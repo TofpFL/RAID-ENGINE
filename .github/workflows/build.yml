@@ -36,7 +36,7 @@ jobs:
         include:
           - { os: windows-latest, name: windows-x64 }
           - { os: ubuntu-22.04, name: linux-x64 }
-          - { os: macos-14, name: macos-arm64 }
+          - { os: macos-15, name: macos-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +67,10 @@ jobs:
 
   release:
     name: Publish downloads
-    needs: build
-    if: github.event_name == 'push'
+    needs: [tests, build]
+    # Publish whatever platforms built, so one unavailable runner does not hold
+    # back the other downloads.
+    if: always() && github.event_name == 'push' && needs.tests.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -80,6 +82,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          shopt -s nullglob
+          zips=(artifacts/*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then echo "No packages were built."; exit 1; fi
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             gh release create "$GITHUB_REF_NAME" artifacts/*.zip --title "God's Hand $GITHUB_REF_NAME" --generate-notes
           else
