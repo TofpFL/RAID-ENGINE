@@ -23,6 +23,7 @@ struct Settings {
     bool fullscreen = false;
     bool showTimings = true;
     bool opponentStrums = true;
+    bool touchControls = false;  // on-screen lanes (the mouse acts as a finger)
     int fpsCap = 240;          // 0 = unlimited
     float offsetMs = 0;        // audio/visual offset (positive = audio heard late)
     float scrollSpeed = 0;     // 0 = use chart speed

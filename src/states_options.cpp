@@ -49,6 +49,7 @@ public:
             {Row::Bool, "Show timing (ms)", "Shows how early or late each hit was.", &s.showTimings},
             {Row::Bool, "Opponent strums", "Light up the opponent's receptors when they sing.", &s.opponentStrums},
             {Row::Bool, "Note splashes", "Bursts of light on DIVINE hits.", &s.noteSplashes},
+            {Row::Bool, "Touch controls", "Tap the lanes on a touchscreen (a mouse click counts as a tap).", &s.touchControls},
             {Row::Header, "CONTROLS  (4 KEYS)", ""},
             {Row::Key, "Left lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
             {Row::Key, "Down lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},

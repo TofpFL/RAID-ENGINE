@@ -29,6 +29,7 @@ struct SongEntry {
     // Psych content: the mod folder (or the song folder for songs/), the
     // chart folder and the song's folder name (data/<songKey>/).
     std::string modRoot, dataDir, songKey;
+    bool autoChart = false;  // no chart: generated from the audio
 };
 
 struct Prepared {
@@ -45,6 +46,7 @@ public:
     const SongEntry* find(const std::string& id) const;
     int customCount() const { return customCount_; }
     const std::string& report() const { return report_; }
+    const std::string& installReport() const { return installReport_; }
 
     // Heavy work (decoding, composing, parsing). Thread-safe.
     Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror);
@@ -65,7 +67,7 @@ private:
 
     std::vector<SongEntry> songs_;
     int customCount_ = 0;
-    std::string report_;
+    std::string report_, installReport_;
     std::mutex mtx_;
     BuiltinAudio cache_;
     std::mutex customMtx_;

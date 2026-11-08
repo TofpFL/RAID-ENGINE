@@ -16,6 +16,7 @@
 #include "gfx.hpp"
 #include "lua_host.hpp"
 #include "raylib.h"
+#include "replay.hpp"
 #include "scene.hpp"
 #include "scene_draw.hpp"
 #include "stage.hpp"
@@ -198,6 +199,14 @@ private:
     int lastCombo_ = 0;
     bool backdrop_ = false;
     std::map<std::string, scene::CharacterPtr> charCache_;  // "slot:name" (Change Character)
+    // Replays and touch input
+    Replay record_, playback_;
+    bool replaying_ = false;
+    size_t replayIdx_ = 0;
+    bool touchDown_[9] = {};
+    void laneDown(int lane, double t);
+    void laneUp(int lane, double t);
+    void handleTouch();
 };
 
 }  // namespace gh

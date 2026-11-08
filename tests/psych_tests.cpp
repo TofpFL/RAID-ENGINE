@@ -4,8 +4,11 @@
 // script found under <dir> and reports anything that fails.
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "chart.hpp"
 #include "common.hpp"
@@ -464,4 +467,143 @@ int runPsychCorpus(const char* dir) {
     std::printf("atlases %d (%d failed), characters %d (%d failed), stages %d (%d failed), scripts %d (%d with errors)\n", atlases,
                 atlasFail, chars, charFail, stages, stageFail, scripts, scriptFail);
     return atlasFail + charFail + stageFail;
+}
+
+// ------------------------------------------------- AutoChart, replays, zips --
+#include "autochart.hpp"
+#include "composer.hpp"
+#include "miniz.h"
+#include "mod_install.hpp"
+#include "replay.hpp"
+#include "session.hpp"
+
+namespace {
+
+void testAutoChart() {
+    // 40 s of clicks at 128 BPM: low thumps on beats, high ticks on off-beats.
+    const int rate = 44100;
+    const double bpm = 128, beat = 60.0 / bpm, first = 0.37;
+    std::vector<int16_t> pcm(size_t(rate * 40), 0);
+    for (double t = first; t < 39.5; t += beat / 2) {
+        const bool onBeat = std::fmod((t - first) / beat + 1e-6, 1.0) < 0.25;
+        const double f = onBeat ? 90 : 3200;
+        for (int i = 0; i < rate / 12; ++i) {
+            const size_t k = size_t(t * rate) + size_t(i);
+            if (k >= pcm.size()) break;
+            const double env = std::exp(-double(i) / (rate * 0.02));
+            pcm[k] = int16_t(std::clamp(pcm[k] + 14000.0 * env * std::sin(2 * kPi * f * i / rate), -32767.0, 32767.0));
+        }
+    }
+    Chart c;
+    AutoChartInfo info;
+    PCHECK(autoChart(pcm.data(), pcm.size(), 1, rate, 2, c, &info));
+    PCHECK(std::fabs(info.bpm - bpm) < 1.5);
+    PCHECK(c.notes.size() > 100 && c.playerNotes > 30 && c.opponentNotes > 30);
+    // Notes sit on the detected grid near the real clicks.
+    int onGrid = 0;
+    for (const Note& n : c.notes) {
+        const double rel = (n.time / 1000.0 - first) / (beat / 4);
+        if (std::fabs(rel - std::round(rel)) < 0.2) ++onGrid;
+    }
+    PCHECK(onGrid > int(c.notes.size() * 9 / 10));
+    Chart easy;
+    PCHECK(autoChart(pcm.data(), pcm.size(), 1, rate, 0, easy) && easy.notes.size() < c.notes.size());
+    std::vector<int16_t> silence(size_t(rate) * 10, 0);
+    PCHECK(!autoChart(silence.data(), silence.size(), 1, rate, 1, c));
+}
+
+void testReplayDeterminism() {
+    Chart c;
+    c.keys = 4;
+    for (int i = 0; i < 64; ++i) c.notes.push_back({1000.0 + i * 180.0, i % 5 == 0 ? 300.0 : 0.0, uint8_t(i % 4), 1, kNormal, 0, 0});
+    c.finalize(120);
+    SessionConfig cfg;
+    Session a;
+    a.init(c, cfg);
+    Replay rec;
+    Rng rng(7);
+    std::vector<ReplayEvent> evs;
+    for (const Note& n : c.notes) {
+        const double err = (rng.uniform() - 0.5) * 140.0;
+        evs.push_back({n.time + err, n.lane, true});
+        evs.push_back({n.time + err + std::max(40.0, n.length + (rng.uniform() - 0.6) * 200.0), n.lane, false});
+    }
+    std::sort(evs.begin(), evs.end(), [](const ReplayEvent& x, const ReplayEvent& y) { return x.t < y.t; });
+    auto run = [&](Session& s, const std::vector<ReplayEvent>& list) {
+        size_t i = 0;
+        for (double t = 0; t < 14000; t += 4) {
+            while (i < list.size() && list[i].t <= t) {
+                const ReplayEvent& e = list[i++];
+                if (e.down) s.press(e.lane, e.t);
+                else s.release(e.lane, e.t);
+            }
+            s.update(t);
+            s.events.clear();
+        }
+    };
+    run(a, evs);
+    rec.songId = "custom:test/song";
+    rec.diff = "Hard";
+    rec.events = evs;
+    const std::string path = (std::filesystem::temp_directory_path() / "gh_replay_test.ghr").string();
+    PCHECK(rec.save(path));
+    Replay back;
+    PCHECK(back.load(path) && back.events.size() == evs.size() && back.songId == rec.songId);
+    Session b;
+    b.init(c, cfg);
+    run(b, back.events);
+    PCHECK(a.score == b.score && a.misses == b.misses && a.counts == b.counts && a.maxCombo == b.maxCombo);
+    PCHECK(replayFileName("custom:My Mod/song", "Hard", "best") == "custom_my_mod_song-hard-best.ghr");
+    std::filesystem::remove(path);
+}
+
+void testZipInstall() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "gh_zip_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "mods", ec);
+    auto makeZip = [&](const fs::path& out, const std::vector<std::pair<std::string, std::string>>& files) {
+        mz_zip_archive z{};
+        mz_zip_writer_init_heap(&z, 0, 0);
+        for (const auto& f : files) mz_zip_writer_add_mem(&z, f.first.c_str(), f.second.data(), f.second.size(), MZ_DEFAULT_COMPRESSION);
+        void* buf = nullptr;
+        size_t size = 0;
+        mz_zip_writer_finalize_heap_archive(&z, &buf, &size);
+        std::ofstream(out, std::ios::binary).write(static_cast<const char*>(buf), std::streamsize(size));
+        mz_free(buf);
+        mz_zip_writer_end(&z);
+    };
+    makeZip(root / "mods" / "Cool Mod v2.zip", {{"Cool Mod/data/song/song.json", "{}"}, {"Cool Mod/pack.json", "{\"name\":1}"},
+                                                {"Cool Mod/../evil.txt", "x"}});
+    makeZip(root / "mods" / "loose.zip", {{"data/a/a.json", "{}"}, {"images/b.png", "png"}});
+    std::string report;
+    PCHECK(installModZips((root / "mods").string(), report) == 2);
+    PCHECK(fs::exists(root / "mods" / "Cool Mod" / "data" / "song" / "song.json"));
+    PCHECK(fs::exists(root / "mods" / "loose" / "images" / "b.png"));
+    PCHECK(!fs::exists(root / "evil.txt") && !fs::exists(root / "mods" / "evil.txt"));
+    PCHECK(fs::exists(root / "mods" / ".installed" / "loose.zip") && !fs::exists(root / "mods" / "loose.zip"));
+    PCHECK(report.find("skipped") != std::string::npos);
+    fs::remove_all(root, ec);
+}
+
+}  // namespace
+
+void runExtraTests(bool audio) {
+    testAutoChart();
+    testReplayDeterminism();
+    testZipInstall();
+    if (!audio) return;
+    // AutoChart on the built-in songs: report the tempo it hears.
+    for (const SongDef& def : builtinSongs()) {
+        auto comp = compose(def, true);
+        Chart c;
+        AutoChartInfo info;
+        const bool ok = autoChart(comp->inst.data(), comp->inst.size() / 2, 2, 44100, 1, c, &info);
+        double ratio = info.bpm / def.bpm;
+        while (ratio > 1.4) ratio /= 2;
+        while (ratio < 0.7) ratio *= 2;
+        std::printf("  AutoChart %-13s %6.1f BPM (real %5.1f)  %zu notes\n", def.title.c_str(), info.bpm, def.bpm, c.notes.size());
+        PCHECK(ok && std::fabs(ratio - 1.0) < 0.03);
+    }
 }

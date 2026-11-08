@@ -4,8 +4,10 @@
 #include <filesystem>
 #include <system_error>
 
+#include "autochart.hpp"
 #include "common.hpp"
 #include "json.hpp"
+#include "mod_install.hpp"
 
 namespace gh {
 
@@ -67,6 +69,26 @@ void Library::scan(const std::string& baseDir) {
     }
     const size_t firstCustom = songs_.size();
     const fs::path base = toPath(baseDir);
+    installReport_.clear();
+    installModZips(pathStr(base / "mods"), installReport_);
+
+    // Loose audio files in songs/: playable through AutoChart.
+    for (const fs::path& f : listDir(base / "songs", false)) {
+        const std::string n = pathStr(f.filename());
+        if (!isAudioExt(toLower(n))) continue;
+        SongEntry e;
+        e.title = prettyName(pathStr(f.stem()));
+        e.subtitle = "songs - AutoChart";
+        e.id = "custom:songs/" + songPathName(pathStr(f.stem()));
+        e.color = colorFor(e.id);
+        e.inst = pathStr(f);
+        e.dataDir = pathStr(base / "songs") + "/";
+        e.songKey = pathStr(f.stem());
+        e.autoChart = true;
+        e.diffs = {"Easy", "Normal", "Hard"};
+        e.chartPaths = {"", "", ""};
+        songs_.push_back(e);
+    }
 
     for (const fs::path& d : listDir(base / "songs", true)) scanSongFolder(pathStr(d), pathStr(d), "songs", pathStr(d) + "/");
 
@@ -113,8 +135,6 @@ void Library::scanSongFolder(const std::string& dirS, const std::string& audioDi
         if (endsWithI(n, "-chart.json")) vsliceChart = f;
         charts.push_back(f);
     }
-    if (charts.empty()) return;
-
     SongEntry e;
     e.title = prettyName(folder);
     e.subtitle = source;
@@ -124,7 +144,13 @@ void Library::scanSongFolder(const std::string& dirS, const std::string& audioDi
     e.dataDir = dirS + "/";
     e.songKey = folder;
 
-    if (!vsliceChart.empty() && !meta.empty()) {
+    if (charts.empty()) {
+        // No chart at all: offer AutoChart when the folder has audio.
+        e.autoChart = true;
+        e.subtitle = source + " - AutoChart";
+        e.diffs = {"Easy", "Normal", "Hard"};
+        e.chartPaths = {"", "", ""};
+    } else if (!vsliceChart.empty() && !meta.empty()) {
         std::string metaText;
         if (readTextFile(pathStr(meta), metaText)) {
             json::Document d;
@@ -181,6 +207,12 @@ void Library::scanSongFolder(const std::string& dirS, const std::string& audioDi
             }
         }
     }
+    if (e.autoChart && e.inst.empty()) {
+        // Any single audio file will do as the instrumental.
+        for (const fs::path& f : listDir(toPath(audioDirS.empty() ? dirS : audioDirS), false))
+            if (isAudioExt(toLower(pathStr(f.filename())))) { e.inst = pathStr(f); break; }
+        if (e.inst.empty()) return;
+    }
     songs_.push_back(e);
 }
 
@@ -228,6 +260,27 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
         p.inst = a.inst;
         p.voiceP = a.vp;
         p.voiceO = a.vo;
+    } else if (e.autoChart) {
+        int d = 1;
+        for (size_t i = 0; i < e.diffs.size(); ++i)
+            if (e.diffs[i] == diff) d = int(i);
+        {
+            std::lock_guard<std::mutex> lk(customMtx_);
+            if (customInstKey_ != e.id || !customInst_) {
+                customInstKey_ = e.id;
+                customInst_ = loadOrNull(e.inst);
+            }
+            customCacheKey_.clear();
+            p.inst = customInst_;
+        }
+        if (!p.inst) { p.error = "cannot decode " + e.inst; return p; }
+        AutoChartInfo info;
+        if (!autoChart(p.inst->data.data(), p.inst->frames(), p.inst->channels, Mixer::kRate, d, p.chart, &info)) {
+            p.error = "AutoChart found no rhythm in this audio";
+            return p;
+        }
+        p.chart.title = e.title;
+        p.chart.difficulty = diff;
     } else {
         size_t idx = 0;
         for (size_t i = 0; i < e.diffs.size(); ++i)

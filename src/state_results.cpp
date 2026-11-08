@@ -42,6 +42,15 @@ public:
         App& a = app();
         if (a.autoRun.enabled && a.autoRun.quitAfter < 0 && a.now - t0_ > 2.5) a.quit = true;
         if (a.now - t0_ < 0.6) return;
+        if (!r_.replayPath.empty() && a.input.pressed(KEY_R)) {
+            sfxPlay(Sfx::Confirm);
+            PlayRequest n;
+            n.songId = r_.req.songId;
+            n.diff = r_.req.diff;
+            n.replayPath = r_.replayPath;
+            a.change(makePlay(n));
+            return;
+        }
         if (a.input.accept() || a.input.back()) {
             sfxPlay(Sfx::Confirm);
             if (r_.req.story && !r_.req.storyQueue.empty()) {
@@ -115,8 +124,10 @@ public:
             gfx::text(FontId::Title, "WEEK COMPLETE  -  " + fmtThousands(r_.req.storyScore), 250, 540, 28, kGold, Align::Center, 2.0f);
         DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
         const bool next = r_.req.story && !r_.req.storyQueue.empty();
-        gfx::text(FontId::Ui, next ? "ENTER next song" : "ENTER continue", gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255},
-                  Align::Center);
+        std::string hint = next ? "ENTER next song" : "ENTER continue";
+        if (!r_.replayPath.empty()) hint += "      R watch replay";
+        if (r_.replay) hint = "REPLAY      " + hint;
+        gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         gfx::endCanvas();
     }
 

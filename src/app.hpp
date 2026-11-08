@@ -32,6 +32,7 @@ struct Modifiers {
 struct PlayRequest {
     std::string songId, diff;
     bool story = false;
+    std::string replayPath;  // watch this replay instead of playing
     std::vector<std::string> storyQueue;  // songs still to play after this one
     long long storyScore = 0;
     int storyMisses = 0, storySongs = 0;
@@ -48,7 +49,8 @@ struct ResultData {
     std::string rank, clear;
     std::vector<Session::HitError> errors;
     double lengthMs = 1;
-    bool newBest = false, botplay = false, practice = false;
+    bool newBest = false, botplay = false, practice = false, replay = false;
+    std::string replayPath;  // replay saved for this run ("" if none)
     double rate = 1.0;
     unsigned color = 0xFFFFFF;
 };

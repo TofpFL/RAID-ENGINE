@@ -56,7 +56,17 @@ void PlayState::enter() {
         return;
     }
     rate_ = req_.story ? 1.0 : a.mods.rate;
-    const bool mirror = !req_.story && a.mods.mirror;
+    bool mirror = !req_.story && a.mods.mirror;
+    if (!req_.replayPath.empty()) {
+        if (!playback_.load(req_.replayPath)) {
+            phase_ = Phase::Error;
+            error_ = "Cannot read replay " + req_.replayPath;
+            return;
+        }
+        replaying_ = true;
+        rate_ = playback_.rate;
+        mirror = playback_.mirror;
+    }
     const SongEntry copy = *entry_;
     const std::string diff = req_.diff;
     job_ = std::async(std::launch::async, [copy, diff, mirror] { return app().library.prepare(copy, diff, mirror); });
@@ -220,6 +230,12 @@ void PlayState::setup() {
     cfg_.practice = !req_.story && a.mods.practice;
     cfg_.rate = rate_;
     playerLeft_ = !req_.story && a.mods.mirror;
+    if (replaying_) {
+        cfg_.botplay = false;
+        cfg_.practice = true;  // a replay never ends early
+        cfg_.ghostTapping = playback_.ghostTapping;
+        playerLeft_ = playback_.mirror;
+    }
     const CharId opp = entry_->builtin ? charFromName(entry_->opponent) : CharId::Shade;
     left_ = CharacterState{};
     left_.id = opp;
@@ -336,6 +352,9 @@ void PlayState::restart() {
     for (auto& s : confirm_)
         for (float& c : s) c = 0;
     for (int& h : heldCount_) h = 0;
+    for (bool& t : touchDown_) t = false;
+    record_.events.clear();
+    replayIdx_ = 0;
     leadMs_ = 60000.0 / chart_.bpmAt(0) * 5.0;
     lastBeat_ = int(std::floor(chart_.beatAt(-leadMs_))) - 1;
     lastStep_ = lastBeat_ * 4 + 3;
@@ -388,18 +407,63 @@ void PlayState::handleInput() {
             pause();
             return;
         }
-        if (e.code <= 0 || e.code >= Input::kMaxCodes) continue;
+        if (e.code <= 0 || e.code >= Input::kMaxCodes || replaying_) continue;
         const int lane = keyLane_[size_t(e.code)];
         if (lane < 0) continue;
         const double t = std::min(songMs_, songMs_ - (a.now - e.t) * 1000.0 * rate_);
         if (e.down) {
-            if (heldCount_[lane]++ == 0) {
-                session_.press(lane, t);
-                if (scripts_) scripts_->call("onKeyPress", {scene::Value(double(lane))});
-            }
+            if (heldCount_[lane]++ == 0) laneDown(lane, t);
         } else if (heldCount_[lane] > 0 && --heldCount_[lane] == 0) {
-            session_.release(lane, t);
-            if (scripts_) scripts_->call("onKeyRelease", {scene::Value(double(lane))});
+            laneUp(lane, t);
+        }
+    }
+    if (a.settings.touchControls && !replaying_) handleTouch();
+    // Replays feed the recorded presses at their song times.
+    while (replaying_ && replayIdx_ < playback_.events.size() && playback_.events[replayIdx_].t <= songMs_) {
+        const ReplayEvent& ev = playback_.events[replayIdx_++];
+        if (ev.lane >= chart_.keys) continue;
+        if (ev.down) { heldCount_[ev.lane] = 1; laneDown(ev.lane, ev.t); }
+        else { heldCount_[ev.lane] = 0; laneUp(ev.lane, ev.t); }
+    }
+}
+
+void PlayState::laneDown(int lane, double t) {
+    session_.press(lane, t);
+    if (!replaying_ && !cfg_.botplay) record_.events.push_back({t, uint8_t(lane), true});
+    if (scripts_) scripts_->call("onKeyPress", {scene::Value(double(lane))});
+}
+
+void PlayState::laneUp(int lane, double t) {
+    session_.release(lane, t);
+    if (!replaying_ && !cfg_.botplay) record_.events.push_back({t, uint8_t(lane), false});
+    if (scripts_) scripts_->call("onKeyRelease", {scene::Value(double(lane))});
+}
+
+// Touchscreens: each player lane is a full-height column around its strum.
+void PlayState::handleTouch() {
+    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
+    const float sc = std::min(sw / gfx::W, sh / gfx::H);
+    const float ox = (sw - gfx::W * sc) * 0.5f;
+    bool want[9] = {};
+    const int K = chart_.keys;
+    const float half = std::min(112.0f, 500.0f / float(K)) * 0.5f + 4.0f;
+    for (int i = 0; i < GetTouchPointCount(); ++i) {
+        const float x = (GetTouchPosition(i).x - ox) / sc;
+        int best = -1;
+        float bestD = 1e9f;
+        for (int l = 0; l < K; ++l) {
+            const float d = std::fabs(x - strumCenter(1, l).x);
+            if (d < bestD) { bestD = d; best = l; }
+        }
+        if (best >= 0 && bestD <= half * 1.6f) want[best] = true;
+    }
+    for (int l = 0; l < K; ++l) {
+        if (want[l] && !touchDown_[l]) {
+            touchDown_[l] = true;
+            if (heldCount_[l]++ == 0) laneDown(l, songMs_);
+        } else if (!want[l] && touchDown_[l]) {
+            touchDown_[l] = false;
+            if (heldCount_[l] > 0 && --heldCount_[l] == 0) laneUp(l, songMs_);
         }
     }
 }
@@ -645,13 +709,32 @@ void PlayState::finish() {
     r.errors = session_.hitErrors;
     r.lengthMs = std::max(1.0, chart_.lengthMs);
     r.botplay = cfg_.botplay;
-    r.practice = cfg_.practice;
+    r.practice = cfg_.practice && !replaying_;
+    r.replay = replaying_;
     r.rate = rate_;
     r.color = entry_->color;
-    const bool saveable = !cfg_.botplay && !cfg_.practice && rate_ >= 1.0;
+    const bool saveable = !cfg_.botplay && !cfg_.practice && !replaying_ && rate_ >= 1.0;
     if (saveable) {
         ScoreEntry e{r.score, r.acc, r.misses, r.rank, r.clear};
         r.newBest = a.scores.submit(Scores::key(entry_->id + (playerLeft_ ? "#opponent" : ""), req_.diff), e);
+    }
+    if (!replaying_ && !cfg_.botplay && !record_.events.empty()) {
+        record_.songId = entry_->id;
+        record_.diff = req_.diff;
+        record_.title = r.title;
+        record_.rate = rate_;
+        record_.mirror = playerLeft_;
+        record_.ghostTapping = cfg_.ghostTapping;
+        record_.keys = chart_.keys;
+        record_.score = r.score;
+        record_.acc = r.acc;
+        record_.misses = r.misses;
+        const std::string dir = a.base + "replays/";
+        const std::string last = dir + replayFileName(entry_->id, req_.diff, "last");
+        if (record_.save(last)) r.replayPath = last;
+        if (r.newBest) record_.save(dir + replayFileName(entry_->id, req_.diff, "best"));
+    } else if (replaying_) {
+        r.replayPath = req_.replayPath;
     }
     if (req_.story) {
         r.req.storyScore += r.score;
@@ -841,10 +924,18 @@ void PlayState::drawHud() {
         }
         gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
     }
-    if (cfg_.botplay && hudShown("botplayTxt"))
-        gfx::text(FontId::Title, "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
+    if ((cfg_.botplay || replaying_) && hudShown("botplayTxt"))
+        gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
                   fade(kGold, 0.55f + 0.35f * std::sin(float(now) * 3.0f)), Align::Center, 2.0f);
-    if (cfg_.practice) gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
+    if (s.touchControls && !replaying_) {
+        const float half = std::min(112.0f, 500.0f / float(chart_.keys)) * 0.5f;
+        for (int l = 0; l < chart_.keys; ++l) {
+            const Vector2 c = strumCenter(1, l);
+            const Color col = gfx::dirColor(gfx::laneDir(chart_.keys, l));
+            DrawRectangleRec({c.x - half, gfx::H * 0.55f, half * 2 - 4, gfx::H * 0.45f}, fade(col, touchDown_[l] ? 0.28f : 0.09f));
+        }
+    }
+    if (cfg_.practice && !replaying_) gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
     if (rate_ != 1.0) gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
 
     // song progress

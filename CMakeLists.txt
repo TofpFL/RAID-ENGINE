@@ -41,6 +41,24 @@ else()
   target_compile_options(gh_lua PRIVATE -w)
 endif()
 
+# ---- miniz (installing mods from .zip) ------------------------------------------
+# Set FETCHCONTENT_SOURCE_DIR_MINIZ to use a local checkout.
+FetchContent_Declare(miniz
+  GIT_REPOSITORY https://github.com/richgel999/miniz.git
+  GIT_TAG 3.0.2
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR do-not-add)  # we compile the four sources ourselves
+FetchContent_MakeAvailable(miniz)
+add_library(gh_miniz STATIC
+  ${miniz_SOURCE_DIR}/miniz.c ${miniz_SOURCE_DIR}/miniz_tdef.c
+  ${miniz_SOURCE_DIR}/miniz_tinfl.c ${miniz_SOURCE_DIR}/miniz_zip.c)
+target_include_directories(gh_miniz PUBLIC ${miniz_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/cmake)
+if(MSVC)
+  target_compile_definitions(gh_miniz PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+  target_compile_options(gh_miniz PRIVATE -w)
+endif()
+
 # ---- engine core: pure C++, no window/audio dependency ----------------------
 add_library(gh_core STATIC
   src/json.cpp
@@ -51,9 +69,12 @@ add_library(gh_core STATIC
   src/psych.cpp
   src/scene.cpp
   src/lua_host.cpp
+  src/replay.cpp
+  src/mod_install.cpp
+  src/autochart.cpp
 )
 target_include_directories(gh_core PUBLIC src)
-target_link_libraries(gh_core PUBLIC Threads::Threads gh_lua)
+target_link_libraries(gh_core PUBLIC Threads::Threads gh_lua gh_miniz)
 if(MSVC)
   target_compile_options(gh_core PRIVATE /W3 /utf-8)
 else()
