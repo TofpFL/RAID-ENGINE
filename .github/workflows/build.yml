@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Core tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DGH_BUILD_GAME=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run tests (charts, gameplay rules, composer and audio rendering)
+        run: ./build/gh_tests --audio
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-22.04, name: linux-x64 }
+          - { os: macos-14, name: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=OFF
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Package
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix dist/GodsHand
+          mkdir -p dist/GodsHand/mods
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a ../GodsHand-${{ matrix.name }}.zip GodsHand
+          else
+            zip -r ../GodsHand-${{ matrix.name }}.zip GodsHand
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GodsHand-${{ matrix.name }}
+          path: GodsHand-${{ matrix.name }}.zip
+
+  release:
+    name: Publish downloads
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            gh release create "$GITHUB_REF_NAME" artifacts/*.zip --title "God's Hand $GITHUB_REF_NAME" --generate-notes
+          else
+            gh release delete nightly --cleanup-tag -y || true
+            gh release create nightly artifacts/*.zip --prerelease --target "$GITHUB_SHA" \
+              --title "God's Hand - latest build" \
+              --notes "Automatic build of ${GITHUB_SHA::7} from ${GITHUB_REF_NAME}. Download the zip for your system, extract it and run godshand (godshand.exe on Windows)."
+          fi
