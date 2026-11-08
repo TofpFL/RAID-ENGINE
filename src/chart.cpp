@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <limits>
 
+#include "chart_stream.hpp"
 #include "common.hpp"
 #include "json.hpp"
 
@@ -159,7 +160,7 @@ static void applyNoteType(std::string_view type, Note& n, Chart& c) {
     if (t == "hey!" || t == "hey") n.flags |= kFlagHey;
 }
 
-static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) {
+static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, const StreamedNotes* sn = nullptr) {
     using json::Type;
     const json::Value& root = doc.root();
     const json::Value* songV = doc.get(root, "song");
@@ -179,25 +180,68 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) 
     if (!sections || sections->type != Type::Array) { err = "chart has no 'notes' section array"; return false; }
 
     // Pass 1: lane count. Extra-key charts use lanes >= 8.
-    int maxLane = -1;
+    int maxLane = sn ? sn->maxData : -1;
     for (size_t i = 0; i < doc.size(*sections); ++i) {
-        const json::Value* sn = doc.get(doc.at(*sections, i), "sectionNotes");
-        if (!sn || sn->type != Type::Array) continue;
-        for (size_t j = 0; j < doc.size(*sn); ++j) {
-            const json::Value& n = doc.at(*sn, j);
+        const json::Value* sv = doc.get(doc.at(*sections, i), "sectionNotes");
+        if (!sv || sv->type != Type::Array) continue;
+        for (size_t j = 0; j < doc.size(*sv); ++j) {
+            const json::Value& n = doc.at(*sv, j);
             if (n.type != Type::Array || doc.size(n) < 2) continue;
             double d = json::Document::num(&doc.at(n, 1), -1);
             if (d >= 0 && d < 64) maxLane = std::max(maxLane, int(d));
         }
     }
+    const int fromLanes = maxLane < 8 ? 4 : (maxLane + 2) / 2;
     int keys = int(json::Document::num(doc.get(s, "keyCount"), 0));
-    if (keys < 1 || keys > 9) keys = maxLane < 8 ? 4 : (maxLane + 2) / 2;
+    if (keys < 1 || keys > 9) {
+        // "mania": Dave & Bambi / Kade multi-key forks (in "options"): 0=4K 1=6K 2=7K 3=9K.
+        // Psych Extra Keys puts it on the song with keys = mania + 1.
+        static const int dnb[] = {4, 6, 7, 9};
+        keys = 0;
+        const json::Value* opts = doc.get(s, "options");
+        const double om = opts ? json::Document::num(doc.get(*opts, "mania"), -1) : -1;
+        const double sm = json::Document::num(doc.get(s, "mania"), -1);
+        if (om >= 0 && om <= 3) keys = dnb[int(om)];
+        else if (sm >= 0 && sm <= 8) {
+            const int ek = int(sm) + 1;
+            keys = (maxLane < 2 * ek) ? ek : (sm <= 3 ? dnb[int(sm)] : ek);
+        }
+        keys = std::max(keys, fromLanes);
+    }
     keys = clampv(keys, 1, 9);
     out.keys = keys;
 
     double secStart = 0, curBpm = bpm;
     out.tempo.push_back({0, bpm, 0});
-    out.notes.reserve(size_t(std::max(0, maxLane)) * 16);
+    out.notes.reserve(sn ? sn->notes.size() : size_t(std::max(0, maxLane)) * 16);
+    std::vector<uint16_t> streamTypes;  // StreamedNotes type index -> chart type index
+    if (sn) {
+        streamTypes.push_back(0);
+        for (const std::string& t : sn->types) {
+            Note probe;
+            applyNoteType(t, probe, out);
+            streamTypes.push_back(probe.type);
+        }
+    }
+    auto addNote = [&](double t, int di, double l, bool must, double stepMs, bool altSec, bool gfSec,
+                       const std::string_view typeName, bool hasTypeName, bool altBool, uint16_t streamType) {
+        if (!std::isfinite(t) || di < 0 || di >= 2 * keys) return;
+        Note n;
+        n.time = t;
+        n.length = (std::isfinite(l) && l >= stepMs * 0.999) ? l : 0.0;
+        n.lane = uint8_t(di % keys);
+        if (v1) n.side = di < keys ? 1 : 0;
+        else n.side = ((di < keys) ? must : !must) ? 1 : 0;
+        if (hasTypeName) applyNoteType(typeName, n, out);
+        else if (streamType) {
+            const std::string& tn = out.noteTypes[streamTypes[streamType]];
+            applyNoteType(tn, n, out);
+        }
+        if (altBool) n.flags |= kFlagAlt;
+        if (altSec && n.side == 0) n.flags |= kFlagAlt;
+        if (gfSec && di < keys) n.flags |= kFlagGF;
+        out.notes.push_back(n);
+    };
     for (size_t i = 0; i < doc.size(*sections); ++i) {
         const json::Value& sec = doc.at(*sections, i);
         if (sec.type != Type::Object) continue;
@@ -220,35 +264,39 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) 
         const bool gfSec = json::Document::boolean(doc.get(sec, "gfSection"), false);
         const double stepMs = 15000.0 / curBpm;
 
-        const json::Value* sn = doc.get(sec, "sectionNotes");
-        if (sn && sn->type == Type::Array) {
-            for (size_t j = 0; j < doc.size(*sn); ++j) {
-                const json::Value& nv = doc.at(*sn, j);
+        const json::Value* sv = doc.get(sec, "sectionNotes");
+        if (sv && sv->type == Type::Array) {
+            for (size_t j = 0; j < doc.size(*sv); ++j) {
+                const json::Value& nv = doc.at(*sv, j);
+                if (sn && nv.type == Type::Object) {
+                    const json::Value* mk = doc.get(nv, "__gh_stream");
+                    const double k = json::Document::num(mk, -1);
+                    if (k >= 0 && size_t(k) + 1 < sn->rangeStart.size()) {
+                        for (uint32_t q = sn->rangeStart[size_t(k)]; q < sn->rangeStart[size_t(k) + 1]; ++q) {
+                            const StreamedNote& r = sn->notes[q];
+                            addNote(r.time, r.data, r.length, must, stepMs, altSec, gfSec, {}, false, r.alt, r.type);
+                        }
+                    }
+                    continue;
+                }
                 if (nv.type != Type::Array || doc.size(nv) < 2) continue;
                 double t = json::Document::num(&doc.at(nv, 0), std::numeric_limits<double>::quiet_NaN());
                 double d = json::Document::num(&doc.at(nv, 1), -1);
                 if (!std::isfinite(t) || !(d >= 0)) continue;  // d < 0: legacy event note
-                int di = int(d);
-                if (di >= 2 * keys) continue;
-                Note n;
-                n.time = t;
                 double l = doc.size(nv) > 2 ? json::Document::num(&doc.at(nv, 2), 0) : 0;
-                n.length = (std::isfinite(l) && l >= stepMs * 0.999) ? l : 0.0;
-                n.lane = uint8_t(di % keys);
-                if (v1) n.side = di < keys ? 1 : 0;
-                else n.side = ((di < keys) ? must : !must) ? 1 : 0;
+                std::string_view tn;
+                bool hasTn = false, altB = false;
                 if (doc.size(nv) > 3) {
                     const json::Value& tv = doc.at(nv, 3);
-                    if (tv.type == Type::String) applyNoteType(doc.str(tv), n, out);
-                    else if (tv.type == Type::Bool && tv.b) n.flags |= kFlagAlt;
+                    if (tv.type == Type::String) { tn = doc.str(tv); hasTn = true; }
+                    else if (tv.type == Type::Bool && tv.b) altB = true;
                 }
-                if (altSec && n.side == 0) n.flags |= kFlagAlt;
-                if (gfSec && di < keys) n.flags |= kFlagGF;
-                out.notes.push_back(n);
+                addNote(t, int(d), l, must, stepMs, altSec, gfSec, tn, hasTn, altB, 0);
             }
         }
         secStart += beats * 60000.0 / curBpm;
     }
+    out.rawNoteCount = sn ? sn->rawCount : out.notes.size();
     out.finalize(bpm);
     return true;
 }
@@ -339,6 +387,7 @@ static bool parseVSlice(const json::Document& doc, std::string_view metaText, co
     }
     // Drop sustains shorter than a step, like the original game.
     if (out.tempo.empty()) out.tempo.push_back({0, bpm, 0});
+    out.rawNoteCount = out.notes.size();
     out.finalize(bpm);
     for (Note& n : out.notes)
         if (n.length > 0 && n.length < out.stepMs(n.time) * 0.999) n.length = 0;
@@ -356,6 +405,18 @@ bool parseChart(std::string_view text, const std::string& difficulty, Chart& out
     const bool ok = (!vsliceMetadata.empty() || (notes && notes->type == json::Type::Object))
                         ? parseVSlice(doc, vsliceMetadata, difficulty, out, err)
                         : parsePsych(doc, out, err);
+    if (ok) psych::parseEvents(doc, out.events);
+    return ok;
+}
+
+bool parseChartStreamed(std::string_view skeleton, const StreamedNotes& notes, const std::string& difficulty, Chart& out,
+                        std::string& err) {
+    out = Chart();
+    out.difficulty = difficulty;
+    json::Document doc;
+    std::string e;
+    if (!doc.parse(skeleton, &e)) { err = "invalid JSON: " + e; return false; }
+    const bool ok = parsePsych(doc, out, err, &notes);
     if (ok) psych::parseEvents(doc, out.events);
     return ok;
 }

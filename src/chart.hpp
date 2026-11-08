@@ -47,6 +47,7 @@ struct Chart {
     std::vector<FocusPoint> focus;
     double lengthMs = 0;       // end of the last note
     size_t playerNotes = 0, opponentNotes = 0;
+    uint64_t rawNoteCount = 0;  // notes in the file, before stacked notes were merged
 
     double bpmAt(double ms) const;
     double beatAt(double ms) const;
@@ -67,5 +68,9 @@ bool parseChart(std::string_view json, const std::string& difficulty, Chart& out
                 std::string_view vsliceMetadata = {});
 
 bool readTextFile(const std::string& path, std::string& out);
+
+struct StreamedNotes;
+bool parseChartStreamed(std::string_view skeleton, const StreamedNotes& notes, const std::string& difficulty, Chart& out,
+                        std::string& err);
 
 }  // namespace gh

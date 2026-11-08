@@ -175,6 +175,8 @@ private:
 
     // Psych mode
     bool psych_ = false;
+    std::string stageName_ = "stage";
+    bool baseStage_ = false;  // stage built from the original game's layout
     std::unique_ptr<ScriptHost> scripts_;
     SceneRenderer renderer_;
     std::vector<NoteRef> noteOrder_;  // every note in time order (script note ids)

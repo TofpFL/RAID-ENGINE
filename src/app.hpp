@@ -58,6 +58,7 @@ struct ResultData {
 class App {
 public:
     std::string base;  // folder with assets/, songs/, mods/ (ends with '/')
+    bool listSongs = false;
     Settings settings;
     Scores scores;
     Library library;

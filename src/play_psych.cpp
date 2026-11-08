@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <limits>
 
+#include "basegame.hpp"
 #include "common.hpp"
 #include "state_play.hpp"
 
@@ -141,6 +142,10 @@ CharacterPtr PlayState::makeCharacter(const std::string& name, bool isPlayer, in
         std::string text;
         ok = scene::readFile(path, text) && psych::parseCharacter(text, def, err);
         if (!ok) debugPrint("character " + name + ": " + err, 0xFFFF6060);
+    } else if (const char* base = basegame::characterJson(name)) {
+        // Older engines hard-code the original characters; their images are in the mod.
+        ok = psych::parseCharacter(base, def, err) && !def.images.empty() &&
+             !sc.files.find("images/" + def.images[0] + ".png").empty();
     }
     scene::GraphicPtr g;
     if (ok) {
@@ -219,7 +224,7 @@ void PlayState::setScriptGlobals() {
     set("songName", chart_.title.empty() ? entry_->title : chart_.title);
     set("songPath", entry_->songKey);
     set("startedCountdown", false);
-    set("curStage", chart_.stage.empty() ? std::string("stage") : chart_.stage);
+    set("curStage", stageName_);
     set("isStoryMode", req_.story);
     set("difficulty", 1.0);
     set("difficultyName", req_.diff);
@@ -337,8 +342,8 @@ void PlayState::loadScripts(bool afterHud) {
     ScriptHost& h = *scripts_;
     if (!afterHud) {
         for (const std::string& f : sc.files.list("scripts", ".lua")) h.load(f);
-        const std::string stageName = chart_.stage.empty() ? "stage" : chart_.stage;
-        if (std::string f = sc.files.find("stages/" + stageName + ".lua"); !f.empty()) h.load(f);
+        if (std::string f = sc.files.find("stages/" + stageName_ + ".lua"); !f.empty()) h.load(f);
+        else if (baseStage_) h.loadString("stages/" + stageName_ + ".lua", basegame::stageLua(stageName_));
         for (Character* c : {sc.gf.get(), sc.dad.get(), sc.bf.get()}) {
             if (!c || c->builtin) continue;
             if (std::string f = sc.files.find("characters/" + c->name + ".lua"); !f.empty() && !h.isLoaded(f)) h.load(f);
@@ -359,27 +364,49 @@ void PlayState::loadScripts(bool afterHud) {
 bool PlayState::setupPsych() {
     App& a = app();
     scene::Scene& sc = *scene_;
-    std::vector<std::string> roots;
-    if (!entry_->modRoot.empty()) roots.push_back(entry_->modRoot);
+    std::vector<std::string> roots = entry_->assetRoots;
+    if (roots.empty() && !entry_->modRoot.empty()) roots.push_back(entry_->modRoot);
     roots.push_back(a.base + "mods/");
     sc.files.setRoots(roots);
 
-    const std::string stageName = chart_.stage.empty() ? "stage" : chart_.stage;
+    // Charts from older engines name no stage: the original game picks it from the song.
+    auto baseStageAvailable = [&](const std::string& st) {
+        const char* probe = basegame::stageProbeImage(st);
+        return probe && !sc.files.find(std::string("images/") + probe + ".png").empty();
+    };
+    std::string stageName = chart_.stage;
+    if (stageName.empty()) {
+        const std::string guess = basegame::stageForSong(entry_->songKey);
+        stageName = baseStageAvailable(guess) ? guess : "stage";
+    }
+    stageName_ = stageName;
     const std::string playerName = chart_.player.empty() ? "bf" : chart_.player;
     const std::string oppName = chart_.opponent.empty() ? "dad" : chart_.opponent;
-    const std::string gfName = chart_.gf.empty() ? "gf" : chart_.gf;
+    std::string gfName = chart_.gf.empty() ? "gf" : chart_.gf;
+    if (chart_.gf.empty() && baseStageAvailable(stageName)) gfName = basegame::gfForStage(stageName);
     const std::string stageJson = sc.files.find("stages/" + stageName + ".json");
     const std::string stageLua = sc.files.find("stages/" + stageName + ".lua");
-    bool any = !stageJson.empty() || !stageLua.empty() || !luaFilesIn(entry_->dataDir).empty() ||
+    baseStage_ = stageLua.empty() && basegame::stageLua(stageName) && baseStageAvailable(stageName);
+    bool any = !stageJson.empty() || !stageLua.empty() || baseStage_ || !luaFilesIn(entry_->dataDir).empty() ||
                !sc.files.list("scripts", ".lua").empty();
-    for (const std::string& n : {playerName, oppName, gfName})
+    for (const std::string& n : {playerName, oppName, gfName}) {
         if (!sc.files.find("characters/" + n + ".json").empty()) any = true;
+        if (const char* base = basegame::characterJson(n)) {
+            psych::CharacterDef d;
+            std::string e;
+            if (psych::parseCharacter(base, d, e) && !d.images.empty() && !sc.files.find("images/" + d.images[0] + ".png").empty())
+                any = true;
+        }
+    }
     if (!any) return false;
 
     if (!stageJson.empty()) {
         std::string text, err;
         if (!scene::readFile(stageJson, text) || !psych::parseStage(text, sc.stage, err))
             debugPrint("stage " + stageName + ": " + err, 0xFFFF6060);
+    } else if (const char* bs = basegame::stageJson(stageName); bs && baseStageAvailable(stageName)) {
+        std::string err;
+        psych::parseStage(bs, sc.stage, err);
     }
     sc.defaultCamZoom = sc.stage.zoom;
     sc.camGame.zoom = float(sc.stage.zoom);
@@ -491,7 +518,7 @@ bool PlayState::setupPsych() {
         if (c) barColor_[c == sc.dad.get() ? 0 : 1] = c->barColor;
     loadIcons();
     renderer_.preload(sc);
-    backdrop_ = stageLua.empty() && sc.stage.objects.empty();
+    backdrop_ = stageLua.empty() && !baseStage_ && sc.stage.objects.empty();
     if (!sc.gfx.missing.empty()) {
         std::string list;
         for (size_t i = 0; i < sc.gfx.missing.size() && i < 4; ++i) list += (i ? ", " : "") + sc.gfx.missing[i];

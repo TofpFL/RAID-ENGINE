@@ -8,6 +8,7 @@
 #include <string>
 
 #include "chart.hpp"
+#include "chart_stream.hpp"
 #include "composer.hpp"
 #include "json.hpp"
 #include "session.hpp"
@@ -255,12 +256,11 @@ static void testComposer(bool audio, const char* wavDir) {
 static int benchCharts(int argc, char** argv, int first) {
     int bad = 0;
     for (int i = first; i < argc; ++i) {
-        std::string text;
-        if (!readTextFile(argv[i], text)) { std::printf("cannot read %s\n", argv[i]); ++bad; continue; }
         Chart c;
         std::string err;
+        const double sizeMb = double(fileSize(argv[i])) / 1e6;
         auto t0 = std::chrono::steady_clock::now();
-        const bool ok = parseChart(text, "Hard", c, err);
+        const bool ok = loadChartFile(argv[i], "Hard", c, err);
         auto t1 = std::chrono::steady_clock::now();
         if (!ok) { std::printf("%-48s FAILED: %s\n", argv[i], err.c_str()); ++bad; continue; }
         Session s;
@@ -271,11 +271,19 @@ static int benchCharts(int argc, char** argv, int first) {
         auto t2 = std::chrono::steady_clock::now();
         const double pm = std::chrono::duration<double, std::milli>(t1 - t0).count();
         const double sm = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        std::printf("%-48s %5.1f MB  %dK  notes P%8zu O%8zu  bpm %.0f  len %6.1fs  parse %6.0f ms  sim %6.0f ms  %s\n",
-                    argv[i], text.size() / 1e6, c.keys, c.playerNotes, c.opponentNotes, c.bpmAt(0), c.lengthMs / 1000.0, pm, sm,
+        std::printf("%-48s %7.1f MB  %dK  raw %10llu  notes P%8zu O%8zu  bpm %.0f  len %6.1fs  parse %6.0f ms  sim %6.0f ms  %s\n",
+                    argv[i], sizeMb, c.keys, (unsigned long long)c.rawNoteCount, c.playerNotes, c.opponentNotes, c.bpmAt(0), c.lengthMs / 1000.0, pm, sm,
                     (s.misses == 0 && s.allResolved()) ? "ok" : "BOT MISSED");
         if (s.misses != 0) ++bad;
     }
+#if defined(__linux__)
+    if (FILE* st = std::fopen("/proc/self/status", "r")) {
+        char line[256];
+        while (std::fgets(line, sizeof line, st))
+            if (!std::strncmp(line, "VmHWM:", 6)) std::printf("peak memory %s", line + 6);
+        std::fclose(st);
+    }
+#endif
     return bad == 0 ? 0 : 1;
 }
 

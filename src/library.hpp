@@ -29,7 +29,12 @@ struct SongEntry {
     // Psych content: the mod folder (or the song folder for songs/), the
     // chart folder and the song's folder name (data/<songKey>/).
     std::string modRoot, dataDir, songKey;
+    // Every folder the scene looks in for images, characters, stages and
+    // sounds: the content root plus, for full game builds, assets/shared,
+    // assets/week1 and so on.
+    std::vector<std::string> assetRoots;
     bool autoChart = false;  // no chart: generated from the audio
+    bool noAudio = false;    // chart found but no audio for it anywhere
 };
 
 struct Prepared {
@@ -64,6 +69,7 @@ private:
     BuiltinAudio builtinAudio(const SongDef& def);
     void scanSongFolder(const std::string& dir, const std::string& audioDir, const std::string& source,
                         const std::string& modRoot);
+    void scanMods(const std::string& modsDir);
 
     std::vector<SongEntry> songs_;
     int customCount_ = 0;

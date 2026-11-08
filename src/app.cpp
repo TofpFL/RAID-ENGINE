@@ -85,9 +85,29 @@ int App::run(int argc, char** argv) {
         else if (!std::strcmp(a, "--quit-after")) autoRun.quitAfter = std::atof(next());
         else if (!std::strcmp(a, "--rate")) mods.rate = clampv(std::atof(next()), 0.5, 2.0);
         else if (!std::strcmp(a, "--mirror")) mods.mirror = true;
+        else if (!std::strcmp(a, "--base")) base = next();
+        else if (!std::strcmp(a, "--list-songs")) listSongs = true;
+    }
+    if (listSongs) {
+        // Prints what the song library finds (no window): --list-songs [--base dir]
+        if (base.empty()) base = std::string(GetWorkingDirectory()) + "/";
+        if (base.back() != '/') base += '/';
+        SetTraceLogLevel(LOG_WARNING);
+        library.scan(base);
+        for (const SongEntry& e : library.songs()) {
+            if (e.builtin) continue;
+            std::printf("%s\n  title: %s | %s%s\n  audio: %s\n", e.id.c_str(), e.title.c_str(), e.subtitle.c_str(),
+                        e.autoChart ? " | AutoChart" : "", e.inst.empty() ? "(none)" : e.inst.c_str());
+            for (size_t i = 0; i < e.diffs.size(); ++i)
+                std::printf("  [%s] %s\n", e.diffs[i].c_str(), i < e.chartPaths.size() ? e.chartPaths[i].c_str() : "");
+            if (e.assetRoots.size() > 1)
+                for (const std::string& r : e.assetRoots) std::printf("  root %s\n", r.c_str());
+        }
+        std::printf("%s\n%s", library.report().c_str(), library.installReport().c_str());
+        return 0;
     }
 
-    base = GetApplicationDirectory();
+    if (base.empty()) base = GetApplicationDirectory();
     if (!FileExists((base + "assets/fonts/Rajdhani-Bold.ttf").c_str())) {
         std::string cwd = std::string(GetWorkingDirectory()) + "/";
         if (FileExists((cwd + "assets/fonts/Rajdhani-Bold.ttf").c_str())) base = cwd;

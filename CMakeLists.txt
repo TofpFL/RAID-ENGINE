@@ -63,6 +63,8 @@ endif()
 add_library(gh_core STATIC
   src/json.cpp
   src/chart.cpp
+  src/chart_stream.cpp
+  src/basegame.cpp
   src/session.cpp
   src/synth.cpp
   src/composer.cpp

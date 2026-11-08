@@ -471,6 +471,7 @@ int runPsychCorpus(const char* dir) {
 
 // ------------------------------------------------- AutoChart, replays, zips --
 #include "autochart.hpp"
+#include "chart_stream.hpp"
 #include "composer.hpp"
 #include "miniz.h"
 #include "mod_install.hpp"
@@ -557,6 +558,59 @@ void testReplayDeterminism() {
     std::filesystem::remove(path);
 }
 
+void testChartStreaming() {
+    // A Dave & Bambi style 9K chart: notes stacked in one lane, a legacy
+    // event note, note types, options.mania, fields after the notes.
+    std::string j = "{\"song\": {\"player2\": \"bambi\", \"notes\": [";
+    Rng rng(3);
+    int stacked = 0;
+    for (int sec = 0; sec < 40; ++sec) {
+        if (sec) j += ",";
+        j += "{\"sectionNotes\": [";
+        for (int k = 0; k < 30; ++k) {
+            const double t = sec * 2000.0 + k * 60.0 + (rng.uniform() < 0.5 ? 0.25 : 0.0);
+            const int d = int(rng.uniform() * 18);
+            if (k) j += ",";
+            char buf[160];
+            if (k == 7) std::snprintf(buf, sizeof buf, "[%.3f, %d, 0, \"Hurt Note\"]", t, d);
+            else if (k == 9) std::snprintf(buf, sizeof buf, "[%.3f, -1, \"Hey!\", \"bf\", \"0.6\"]", t);
+            else std::snprintf(buf, sizeof buf, "[%.6f, %d, %d]", t, d, k == 3 ? 400 : 0);
+            j += buf;
+            if (k % 5 == 0 && k != 9) {  // a stacked copy 0.3 ms later
+                std::snprintf(buf, sizeof buf, ",[%.6f, %d, 0]", t + 0.3, d);
+                j += buf;
+                ++stacked;
+            }
+        }
+        j += "], \"mustHitSection\": ";
+        j += sec % 2 ? "true" : "false";
+        j += ", \"lengthInSteps\": 16}";
+    }
+    j += "], \"options\": {\"mania\": 3, \"speed\": 7}, \"song\": \"Blocked\", \"stage\": \"farm\", \"bpm\": 120}}";
+    const std::string path = (std::filesystem::temp_directory_path() / "gh_stream_test.json").string();
+    std::ofstream(path, std::ios::binary) << j;
+    Chart dom, streamed;
+    std::string err;
+    PCHECK(parseChart(j, "Hard", dom, err));
+    PCHECK(loadChartFile(path, "Hard", streamed, err, {}, 1));  // force streaming
+    PCHECK(dom.keys == 9 && streamed.keys == 9);
+    PCHECK(dom.notes.size() == streamed.notes.size() && dom.notes.size() > 1000);
+    bool same = dom.notes.size() == streamed.notes.size();
+    for (size_t i = 0; same && i < dom.notes.size(); ++i) {
+        const Note& a = dom.notes[i];
+        const Note& b = streamed.notes[i];
+        same = std::fabs(a.time - b.time) < 1e-6 && std::fabs(a.length - b.length) < 1e-3 && a.lane == b.lane &&
+               a.side == b.side && a.kind == b.kind && a.flags == b.flags;
+    }
+    PCHECK(same);
+    PCHECK(streamed.title == "Blocked" && streamed.stage == "farm" && streamed.opponent == "bambi");
+    PCHECK(streamed.events.size() == dom.events.size() && streamed.events.size() == 40 && streamed.events[0].name == "Hey!");
+    PCHECK(streamed.rawNoteCount == streamed.notes.size() + size_t(stacked));
+    const ChartPeek pk = peekChart(path);
+    PCHECK(pk.song == "Blocked" && pk.player2 == "bambi" && pk.stage == "farm" && pk.isChart);
+    std::filesystem::remove(path);
+}
+
 void testZipInstall() {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "gh_zip_test";
@@ -593,6 +647,7 @@ void runExtraTests(bool audio) {
     testAutoChart();
     testReplayDeterminism();
     testZipInstall();
+    testChartStreaming();
     if (!audio) return;
     // AutoChart on the built-in songs: report the tempo it hears.
     for (const SongDef& def : builtinSongs()) {
