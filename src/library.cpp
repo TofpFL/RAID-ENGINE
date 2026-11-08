@@ -56,7 +56,7 @@ static int diffOrder(const std::string& d) {
     return 3;
 }
 
-void Library::scan(const std::string& baseDir) {
+void Library::scan(const std::string& baseDir, const std::function<void(const std::string&, double)>& progress) {
     songs_.clear();
     for (const SongDef& def : builtinSongs()) {
         SongEntry e;
@@ -73,7 +73,7 @@ void Library::scan(const std::string& baseDir) {
     const size_t firstCustom = songs_.size();
     const fs::path base = toPath(baseDir);
     installReport_.clear();
-    installModZips(pathStr(base / "mods"), installReport_);
+    installModZips(pathStr(base / "mods"), installReport_, progress);
 
     // Loose audio files in songs/: playable through AutoChart.
     for (const fs::path& f : listDir(base / "songs", false)) {

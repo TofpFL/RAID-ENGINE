@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -46,7 +47,8 @@ struct Prepared {
 
 class Library {
 public:
-    void scan(const std::string& baseDir);
+    // progress: shown while .zip mods unpack (they can take a while).
+    void scan(const std::string& baseDir, const std::function<void(const std::string&, double)>& progress = {});
     const std::vector<SongEntry>& songs() const { return songs_; }
     const SongEntry* find(const std::string& id) const;
     int customCount() const { return customCount_; }

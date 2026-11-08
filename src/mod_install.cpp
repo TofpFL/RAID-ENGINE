@@ -1,5 +1,7 @@
 #include "mod_install.hpp"
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -30,11 +32,27 @@ bool safeRelative(const std::string& name) {
     return true;
 }
 
-bool installOne(const fs::path& zipPath, const fs::path& modsDir, std::string& msg) {
-    std::ifstream in(zipPath, std::ios::binary);
-    std::vector<char> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+FILE* openRead(const fs::path& p) {
+#if defined(_WIN32)
+    return _wfopen(p.wstring().c_str(), L"rb");
+#else
+    return std::fopen(p.c_str(), "rb");
+#endif
+}
+
+size_t writeOut(void* opaque, mz_uint64 /*ofs*/, const void* buf, size_t n) {
+    static_cast<std::ofstream*>(opaque)->write(static_cast<const char*>(buf), std::streamsize(n));
+    return n;
+}
+
+// Reads straight from the file (packs can be close to 2 GB).
+bool installOne(const fs::path& zipPath, const fs::path& modsDir, std::string& msg, const InstallProgress& progress) {
+    std::error_code sec;
+    const uintmax_t size = fs::file_size(zipPath, sec);
+    FILE* f = openRead(zipPath);
     mz_zip_archive zip{};
-    if (data.empty() || !mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0)) {
+    if (!f || sec || !mz_zip_reader_init_cfile(&zip, f, mz_uint64(size), 0)) {
+        if (f) std::fclose(f);
         msg = "not a zip archive";
         return false;
     }
@@ -76,25 +94,27 @@ bool installOne(const fs::path& zipPath, const fs::path& modsDir, std::string& m
         if (rel.rfind(prefix, 0) != 0) { ++skipped; continue; }
         rel = rel.substr(prefix.size());
         if (!safeRelative(rel)) { ++skipped; continue; }
-        size_t size = 0;
-        void* p = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
-        if (!p) { ++skipped; continue; }
         const fs::path out = dest / toPath(rel);
         std::error_code ec;
         fs::create_directories(out.parent_path(), ec);
-        std::ofstream o(out, std::ios::binary);
-        o.write(static_cast<const char*>(p), std::streamsize(size));
-        mz_free(p);
-        if (o) ++written;
-        else ++skipped;
+        std::ofstream o(out, std::ios::binary | std::ios::trunc);
+        const bool ok = o && mz_zip_reader_extract_to_callback(&zip, i, writeOut, &o, 0);
+        o.close();
+        if (ok && o) ++written;
+        else {
+            ++skipped;
+            fs::remove(out, ec);
+        }
+        if (progress && (i % 64) == 0) progress(pathStr(zipPath.filename()), double(i) / double(std::max<mz_uint>(1, n)));
     }
     mz_zip_reader_end(&zip);
+    std::fclose(f);
     msg = std::to_string(written) + " files into " + pathStr(dest.filename()) + (skipped ? " (" + std::to_string(skipped) + " skipped)" : "");
     return written > 0;
 }
 }  // namespace
 
-int installModZips(const std::string& modsDirS, std::string& report) {
+int installModZips(const std::string& modsDirS, std::string& report, const InstallProgress& progress) {
     const fs::path modsDir = toPath(modsDirS);
     std::error_code ec;
     if (!fs::is_directory(modsDir, ec)) return 0;
@@ -106,7 +126,8 @@ int installModZips(const std::string& modsDirS, std::string& report) {
     int installed = 0;
     for (const fs::path& z : zips) {
         std::string msg;
-        const bool ok = installOne(z, modsDir, msg);
+        if (progress) progress(pathStr(z.filename()), 0.0);
+        const bool ok = installOne(z, modsDir, msg, progress);
         report += pathStr(z.filename()) + ": " + (ok ? "installed, " : "failed, ") + msg + "\n";
         if (!ok) continue;
         ++installed;

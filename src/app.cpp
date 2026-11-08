@@ -129,7 +129,19 @@ int App::run(int argc, char** argv) {
     sfxInit();
     applyVolumes();
     gfx::init(base);
-    library.scan(base);
+    library.scan(base, [](const std::string& zip, double f) {
+        // Unpacking a big mod pack takes a while: keep the window alive.
+        BeginDrawing();
+        ClearBackground(Color{12, 8, 20, 255});
+        const char* t1 = TextFormat("Installing %s", zip.c_str());
+        const int w = GetScreenWidth(), h = GetScreenHeight();
+        DrawText(t1, (w - MeasureText(t1, 24)) / 2, h / 2 - 30, 24, RAYWHITE);
+        DrawRectangle(w / 4, h / 2 + 10, w / 2, 10, Color{60, 50, 80, 255});
+        DrawRectangle(w / 4, h / 2 + 10, int(w / 2 * f), 10, Color{200, 160, 255, 255});
+        EndDrawing();
+        PollInputEvents();
+        SwapScreenBuffer();
+    });
 
     menuBpm_ = menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });

@@ -1,0 +1,22 @@
+# Mod packs published on the "mods" release by .github/workflows/mod-packs.yml.
+# The content lives in the PulseForge repository (Git LFS). Each folder below
+# becomes one zip (or several numbered parts when it is bigger than GitHub's
+# 2 GiB per-file limit); a zip unpacks into mods/<folder>/ when dropped into
+# the game's mods/ folder. A pack already on the release is not rebuilt, so the
+# LFS content is downloaded once.
+source deatuamae67-crypto/pulseforge-c--oss 9565eaf075b38664bb49502700ded1e09a5616c1
+
+js-engine-dorklysonic
+taimuresu spam amplified
+drive-2026-08-22-evil-tsukareta-b-side
+drive-2026-08-22-evil-unfairness
+drive-2026-08-22-vs-bambi-b-side-9k
+drive-pack-disable-sustains-legacy
+drive-pack-files
+drive-batata-static
+drive-loose-charts-2026-08-01
+mr-shash-recovered
+m-r-vs-dave-bambi-fantrack-reupload
+pulseforge-created
+charts feitos no flp
+Hellbreaker Remake FLP
