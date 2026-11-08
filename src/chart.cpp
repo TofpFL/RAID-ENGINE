@@ -128,6 +128,15 @@ void Chart::finalize(double baseBpm) {
     }
 }
 
+uint16_t Chart::typeIndex(const std::string& name) {
+    if (name.empty()) return 0;
+    for (size_t i = 0; i < noteTypes.size(); ++i)
+        if (noteTypes[i] == name) return uint16_t(i);
+    if (noteTypes.size() >= 65535) return 0;
+    noteTypes.push_back(name);
+    return uint16_t(noteTypes.size() - 1);
+}
+
 void Chart::mirror() {
     for (Note& n : notes) n.side ^= 1;
     for (FocusPoint& f : focus) f.side ^= 1;
@@ -137,13 +146,17 @@ void Chart::mirror() {
 
 // --------------------------------------------------------------- parsing ---
 
-static void applyNoteType(std::string_view type, Note& n) {
+static void applyNoteType(std::string_view type, Note& n, Chart& c) {
+    if (type.empty()) return;
+    n.type = c.typeIndex(std::string(type));
     std::string t = toLower(type);
     static const char* mines[] = {"hurt", "kill", "death", "mine", "poison", "danger", "avoid"};
     for (const char* m : mines)
         if (t.find(m) != std::string::npos) { n.kind = kMine; return; }
-    if (t.find("no anim") != std::string::npos) n.flags |= kFlagNoAnim;
+    if (t.find("no anim") != std::string::npos) n.flags |= kFlagNoAnim | kFlagNoMissAnim;
     if (t.find("alt") != std::string::npos) n.flags |= kFlagAlt;
+    if (t == "gf sing" || t == "gf") n.flags |= kFlagGF;
+    if (t == "hey!" || t == "hey") n.flags |= kFlagHey;
 }
 
 static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) {
@@ -158,6 +171,8 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) 
     out.speed = clampv(json::Document::num(doc.get(s, "speed"), 1.0), 0.1, 20.0);
     out.player = std::string(doc.strOr(doc.get(s, "player1"), ""));
     out.opponent = std::string(doc.strOr(doc.get(s, "player2"), ""));
+    out.gf = std::string(doc.strOr(doc.get(s, "gfVersion"), doc.strOr(doc.get(s, "player3"), doc.strOr(doc.get(s, "gf"), ""))));
+    out.stage = std::string(doc.strOr(doc.get(s, "stage"), ""));
     const bool v1 = doc.strOr(doc.get(s, "format"), "").find("psych_v1") != std::string_view::npos;
 
     const json::Value* sections = doc.get(s, "notes");
@@ -202,6 +217,7 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) 
         const uint8_t fside = must ? 1 : 0;
         if (out.focus.empty() || out.focus.back().side != fside) out.focus.push_back({secStart, fside});
         const bool altSec = json::Document::boolean(doc.get(sec, "altAnim"), false);
+        const bool gfSec = json::Document::boolean(doc.get(sec, "gfSection"), false);
         const double stepMs = 15000.0 / curBpm;
 
         const json::Value* sn = doc.get(sec, "sectionNotes");
@@ -223,10 +239,11 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err) 
                 else n.side = ((di < keys) ? must : !must) ? 1 : 0;
                 if (doc.size(nv) > 3) {
                     const json::Value& tv = doc.at(nv, 3);
-                    if (tv.type == Type::String) applyNoteType(doc.str(tv), n);
+                    if (tv.type == Type::String) applyNoteType(doc.str(tv), n, out);
                     else if (tv.type == Type::Bool && tv.b) n.flags |= kFlagAlt;
                 }
                 if (altSec && n.side == 0) n.flags |= kFlagAlt;
+                if (gfSec && di < keys) n.flags |= kFlagGF;
                 out.notes.push_back(n);
             }
         }
@@ -262,7 +279,9 @@ static bool parseVSlice(const json::Document& doc, std::string_view metaText, co
                 if (const json::Value* ch = meta.get(*pd, "characters")) {
                     out.player = std::string(meta.strOr(meta.get(*ch, "player"), ""));
                     out.opponent = std::string(meta.strOr(meta.get(*ch, "opponent"), ""));
+                    out.gf = std::string(meta.strOr(meta.get(*ch, "girlfriend"), ""));
                 }
+                out.stage = std::string(meta.strOr(meta.get(*pd, "stage"), ""));
             }
         }
     }
@@ -304,7 +323,7 @@ static bool parseVSlice(const json::Document& doc, std::string_view metaText, co
         n.length = (std::isfinite(l) && l > 0) ? l : 0;
         n.lane = uint8_t(int(d) % 4);
         n.side = int(d) < 4 ? 1 : 0;
-        if (const json::Value* k = doc.get(nv, "k"); k && k->type == Type::String) applyNoteType(doc.str(*k), n);
+        if (const json::Value* k = doc.get(nv, "k"); k && k->type == Type::String) applyNoteType(doc.str(*k), n, out);
         out.notes.push_back(n);
     }
     if (const json::Value* ev = doc.get(root, "events"); ev && ev->type == Type::Array) {
@@ -334,9 +353,11 @@ bool parseChart(std::string_view text, const std::string& difficulty, Chart& out
     std::string e;
     if (!doc.parse(text, &e)) { err = "invalid JSON: " + e; return false; }
     const json::Value* notes = doc.get(doc.root(), "notes");
-    if (!vsliceMetadata.empty() || (notes && notes->type == json::Type::Object))
-        return parseVSlice(doc, vsliceMetadata, difficulty, out, err);
-    return parsePsych(doc, out, err);
+    const bool ok = (!vsliceMetadata.empty() || (notes && notes->type == json::Type::Object))
+                        ? parseVSlice(doc, vsliceMetadata, difficulty, out, err)
+                        : parsePsych(doc, out, err);
+    if (ok) psych::parseEvents(doc, out.events);
+    return ok;
 }
 
 }  // namespace gh

@@ -1,5 +1,6 @@
 // Headless tests for the engine core: JSON, chart import, gameplay rules and
 // the procedural composer. Run: gh_tests [--audio] [--wav <dir>]
+// Also: --chart <files...> (benchmark), --psych-corpus <dir> (mod content check).
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -13,7 +14,9 @@
 
 using namespace gh;
 
-static int g_fail = 0, g_pass = 0;
+int g_fail = 0, g_pass = 0;
+void runPsychTests();
+int runPsychCorpus(const char* dir);
 #define CHECK(cond)                                                              \
     do {                                                                         \
         if (cond) ++g_pass;                                                      \
@@ -280,6 +283,8 @@ int main(int argc, char** argv) {
     const char* wav = nullptr;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--chart")) return benchCharts(argc, argv, i + 1);
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--psych-corpus")) return runPsychCorpus(argv[i + 1]);
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--audio")) audio = true;
         if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) { wav = argv[++i]; audio = true; }
@@ -289,6 +294,7 @@ int main(int argc, char** argv) {
     testPsychV1AndExtraKeys();
     testVSlice();
     testSession();
+    runPsychTests();
     testComposer(audio, wav);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

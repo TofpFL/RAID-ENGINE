@@ -93,8 +93,9 @@ Font loadFont(const std::string& path, int size, bool& owned) {
     return f;
 }
 
-const Font& fontOf(FontId f) { return f == FontId::Title ? g_title : g_ui; }
 }  // namespace
+
+const Font& fontOf(FontId f) { return f == FontId::Title ? g_title : g_ui; }
 
 float randf(float lo, float hi) { return lo + (hi - lo) * float(std::rand()) / float(RAND_MAX); }
 
@@ -276,17 +277,18 @@ static float dirRotation(int dir) {
     }
 }
 
-void drawNote(int dir, Vector2 c, float size, float alpha, float scale) {
+void drawNote(int dir, Vector2 c, float size, float alpha, float scale, float extraRotDeg) {
     const Texture2D& t = g_note[clampv(dir, 0, 4)];
     const float s = size * scale;
-    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {c.x, c.y, s, s}, {s * 0.5f, s * 0.5f}, dirRotation(dir),
-                   fade(WHITE, alpha));
+    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {c.x, c.y, s, s}, {s * 0.5f, s * 0.5f},
+                   dirRotation(dir) + extraRotDeg, fade(WHITE, alpha));
 }
 
-void drawReceptor(int dir, Vector2 c, float size, Color tint, float scale) {
+void drawReceptor(int dir, Vector2 c, float size, Color tint, float scale, float extraRotDeg) {
     const Texture2D& t = g_receptor[dir == kCenter ? 1 : 0];
     const float s = size * scale;
-    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {c.x, c.y, s, s}, {s * 0.5f, s * 0.5f}, dirRotation(dir), tint);
+    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {c.x, c.y, s, s}, {s * 0.5f, s * 0.5f},
+                   dirRotation(dir) + extraRotDeg, tint);
 }
 
 void drawSustain(int dir, float x, float y0, float y1, float width, float alpha, bool capAtY1) {

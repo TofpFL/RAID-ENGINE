@@ -26,6 +26,9 @@ struct SongEntry {
     std::string inst, voices, voicesP, voicesO;
     uint32_t color = 0xB48CDC;
     std::string opponent;  // built-in character id, "" for custom
+    // Psych content: the mod folder (or the song folder for songs/), the
+    // chart folder and the song's folder name (data/<songKey>/).
+    std::string modRoot, dataDir, songKey;
 };
 
 struct Prepared {
@@ -57,7 +60,8 @@ private:
         PcmPtr inst, vp, vo;
     };
     BuiltinAudio builtinAudio(const SongDef& def);
-    void scanSongFolder(const std::string& dir, const std::string& audioDir, const std::string& source);
+    void scanSongFolder(const std::string& dir, const std::string& audioDir, const std::string& source,
+                        const std::string& modRoot);
 
     std::vector<SongEntry> songs_;
     int customCount_ = 0;

@@ -68,7 +68,7 @@ void Library::scan(const std::string& baseDir) {
     const size_t firstCustom = songs_.size();
     const fs::path base = toPath(baseDir);
 
-    for (const fs::path& d : listDir(base / "songs", true)) scanSongFolder(pathStr(d), pathStr(d), "songs");
+    for (const fs::path& d : listDir(base / "songs", true)) scanSongFolder(pathStr(d), pathStr(d), "songs", pathStr(d) + "/");
 
     for (const fs::path& mod : listDir(base / "mods", true)) {
         const std::string modName = pathStr(mod.filename());
@@ -85,10 +85,10 @@ void Library::scan(const std::string& baseDir) {
             if (equalsI(name, "songs")) {  // V-Slice layout: data/songs/<song>/
                 for (const fs::path& s2 : listDir(s, true)) {
                     const std::string n2 = pathStr(s2.filename());
-                    scanSongFolder(pathStr(s2), audioFor(n2), modName);
+                    scanSongFolder(pathStr(s2), audioFor(n2), modName, pathStr(mod) + "/");
                 }
             } else {
-                scanSongFolder(pathStr(s), audioFor(name), modName);
+                scanSongFolder(pathStr(s), audioFor(name), modName, pathStr(mod) + "/");
             }
         }
     }
@@ -98,7 +98,8 @@ void Library::scan(const std::string& baseDir) {
     report_ = std::to_string(customCount_) + " custom song" + (customCount_ == 1 ? "" : "s") + " found";
 }
 
-void Library::scanSongFolder(const std::string& dirS, const std::string& audioDirS, const std::string& source) {
+void Library::scanSongFolder(const std::string& dirS, const std::string& audioDirS, const std::string& source,
+                             const std::string& modRoot) {
     const fs::path dir = toPath(dirS);
     const std::string folder = pathStr(dir.filename());
     const std::string key = songPathName(folder);
@@ -119,6 +120,9 @@ void Library::scanSongFolder(const std::string& dirS, const std::string& audioDi
     e.subtitle = source;
     e.id = "custom:" + source + "/" + key;
     e.color = colorFor(e.id);
+    e.modRoot = modRoot;
+    e.dataDir = dirS + "/";
+    e.songKey = folder;
 
     if (!vsliceChart.empty() && !meta.empty()) {
         std::string metaText;
@@ -236,6 +240,16 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
         if (!parseChart(text, diff, p.chart, err, meta)) { p.error = err; return p; }
         if (p.chart.title.empty()) p.chart.title = e.title;
         p.chart.difficulty = diff;
+        // Psych keeps events in a separate events.json next to the charts.
+        for (const fs::path& f : listDir(toPath(e.dataDir), false)) {
+            if (!equalsI(pathStr(f.filename()), "events.json")) continue;
+            std::string evText;
+            if (readTextFile(pathStr(f), evText)) {
+                psych::parseEvents(evText, p.chart.events);
+                std::stable_sort(p.chart.events.begin(), p.chart.events.end(),
+                                 [](const psych::ChartEvent& a, const psych::ChartEvent& b) { return a.timeMs < b.timeMs; });
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(customMtx_);
             if (customCacheKey_ != e.id) {

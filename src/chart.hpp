@@ -5,10 +5,19 @@
 #include <string>
 #include <vector>
 
+#include "psych.hpp"
+
 namespace gh {
 
 enum NoteKind : uint8_t { kNormal = 0, kMine = 1 };
-enum NoteFlag : uint8_t { kFlagNoAnim = 1, kFlagAlt = 2 };
+enum NoteFlag : uint8_t {
+    kFlagNoAnim = 1,      // "No Animation"
+    kFlagAlt = 2,         // "-alt" sing animation
+    kFlagGF = 4,          // girlfriend sings it ("GF Sing", gfSection)
+    kFlagHey = 8,         // "Hey!" note
+    kFlagNoMissAnim = 16,
+    kFlagIgnore = 32,     // passes without a miss (scripts: ignoreNote)
+};
 
 struct Note {
     double time = 0;     // ms
@@ -17,6 +26,7 @@ struct Note {
     uint8_t side = 0;    // 0 = opponent, 1 = player
     uint8_t kind = kNormal;
     uint8_t flags = 0;
+    uint16_t type = 0;   // index into Chart::noteTypes (0 = default)
 };
 
 struct TempoPoint { double timeMs = 0; double bpm = 120; double beat = 0; };
@@ -27,6 +37,9 @@ struct Chart {
     std::string difficulty;
     std::string opponent;  // character id (built-ins) or source name
     std::string player;
+    std::string gf, stage;     // Psych scene fields (empty if absent)
+    std::vector<std::string> noteTypes{""};
+    std::vector<psych::ChartEvent> events;  // sorted by time
     int keys = 4;
     double speed = 2.0;        // FNF scroll speed (pixels/ms = 0.45 * speed)
     std::vector<Note> notes;   // sorted by time
@@ -44,6 +57,7 @@ struct Chart {
     // Sorts notes, removes stacked duplicates, fills tempo beats and stats.
     void finalize(double baseBpm);
     void mirror();  // swap player/opponent (play as the opponent)
+    uint16_t typeIndex(const std::string& name);
 };
 
 // Parses an FNF-family chart: legacy/Psych 0.x ("song.notes[].sectionNotes"),

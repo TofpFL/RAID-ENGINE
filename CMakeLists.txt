@@ -16,6 +16,31 @@ find_package(Threads REQUIRED)
 # Static MSVC runtime: the game runs without installing the VC++ redistributable.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+include(FetchContent)
+
+# ---- Lua 5.4 (mod scripts) -----------------------------------------------------
+# Compiled as C++ so script errors unwind with exceptions instead of longjmp.
+# Set FETCHCONTENT_SOURCE_DIR_LUA to use a local checkout.
+FetchContent_Declare(lua
+  GIT_REPOSITORY https://github.com/lua/lua.git
+  GIT_TAG v5.4.7
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(lua)  # no CMakeLists.txt upstream: this only downloads
+set(GH_LUA_SOURCES)
+foreach(f lapi lauxlib lbaselib lcode lcorolib lctype ldebug ldo ldump lfunc lgc llex lmathlib lmem
+          lobject lopcodes lparser lstate lstring lstrlib ltable ltablib ltm lundump lutf8lib lvm lzio)
+  list(APPEND GH_LUA_SOURCES ${lua_SOURCE_DIR}/${f}.c)
+endforeach()
+set_source_files_properties(${GH_LUA_SOURCES} PROPERTIES LANGUAGE CXX)
+add_library(gh_lua STATIC ${GH_LUA_SOURCES})
+target_include_directories(gh_lua PUBLIC ${lua_SOURCE_DIR})
+if(MSVC)
+  target_compile_options(gh_lua PRIVATE /TP /W0)
+  target_compile_definitions(gh_lua PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+  target_compile_options(gh_lua PRIVATE -w)
+endif()
+
 # ---- engine core: pure C++, no window/audio dependency ----------------------
 add_library(gh_core STATIC
   src/json.cpp
@@ -23,9 +48,12 @@ add_library(gh_core STATIC
   src/session.cpp
   src/synth.cpp
   src/composer.cpp
+  src/psych.cpp
+  src/scene.cpp
+  src/lua_host.cpp
 )
 target_include_directories(gh_core PUBLIC src)
-target_link_libraries(gh_core PUBLIC Threads::Threads)
+target_link_libraries(gh_core PUBLIC Threads::Threads gh_lua)
 if(MSVC)
   target_compile_options(gh_core PRIVATE /W3 /utf-8)
 else()
@@ -33,7 +61,7 @@ else()
 endif()
 
 if(GH_BUILD_TESTS)
-  add_executable(gh_tests tests/tests.cpp)
+  add_executable(gh_tests tests/tests.cpp tests/psych_tests.cpp)
   target_link_libraries(gh_tests PRIVATE gh_core)
   enable_testing()
   add_test(NAME core COMMAND gh_tests)
@@ -65,7 +93,6 @@ if(GH_BUILD_GAME)
     endif()
   endforeach()
 
-  include(FetchContent)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
   set(CUSTOMIZE_BUILD OFF CACHE BOOL "" FORCE)
@@ -92,6 +119,8 @@ if(GH_BUILD_GAME)
     src/states_menu.cpp
     src/states_options.cpp
     src/state_play.cpp
+    src/play_psych.cpp
+    src/scene_draw.cpp
     src/state_results.cpp
   )
   target_link_libraries(godshand PRIVATE gh_core raylib)

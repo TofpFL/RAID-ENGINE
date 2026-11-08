@@ -31,6 +31,8 @@ struct LaneNote {
     uint8_t kind = kNormal;
     uint8_t flags = 0;
     uint8_t state = kPending;
+    uint16_t type = 0;
+    uint32_t id = 0;  // index of the note in the chart (script note id)
 };
 
 struct GameEvent {
@@ -41,6 +43,8 @@ struct GameEvent {
     double errMs = 0;    // real-time error (negative = early)
     double length = 0;   // sustain length (ms)
     uint8_t flags = 0;
+    uint16_t noteType = 0;
+    uint32_t id = 0;
 };
 
 struct SessionConfig {
@@ -60,8 +64,13 @@ public:
     // Accessors used for rendering.
     int keys() const { return keys_; }
     const std::vector<LaneNote>& lane(int side, int lane) const { return lanes_[side][lane]; }
+    std::vector<LaneNote>& laneMut(int side, int lane) { return lanes_[side][lane]; }
     double maxSustain(int side, int lane) const { return maxSus_[side][lane]; }
     bool isHolding(int side, int lane) const { return activeHold_[side][lane] >= 0; }
+    long long activeHold(int side, int lane) const { return activeHold_[side][lane]; }
+    void setBotplay(bool b) { cfg_.botplay = b; }
+    void setPractice(bool b) { cfg_.practice = b; }
+    bool botplay() const { return cfg_.botplay; }
     bool keyHeld(int lane) const { return held_[lane]; }
 
     std::vector<GameEvent> events;  // consumed (cleared) by the caller
@@ -71,6 +80,7 @@ public:
     int combo = 0, maxCombo = 0, misses = 0;
     std::array<int, kRatingCount> counts{};
     double health = 1.0;  // 0..2
+    void setHealth(double v) { health = 0; addHealth(v); }
     bool dead = false;
     int judged() const;
     double accuracy() const;   // 0..1 (1 when nothing judged)

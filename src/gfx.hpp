@@ -27,6 +27,7 @@ enum class Align { Left, Center, Right };
 void text(FontId f, std::string_view s, float x, float y, float size, Color c, Align a = Align::Left,
           float outline = 0.0f, Color outlineColor = {10, 6, 18, 255});
 Vector2 measure(FontId f, std::string_view s, float size);
+const Font& fontOf(FontId f);
 void glowText(FontId f, std::string_view s, float x, float y, float size, Color c, Color glow, Align a = Align::Center);
 
 // ---- colours
@@ -49,8 +50,8 @@ Texture2D& glowTexture();
 enum NoteDir { kLeft = 0, kDown = 1, kUp = 2, kRight = 3, kCenter = 4 };
 int laneDir(int keys, int lane);
 Color dirColor(int dir);
-void drawNote(int dir, Vector2 c, float size, float alpha = 1.0f, float scale = 1.0f);
-void drawReceptor(int dir, Vector2 c, float size, Color tint, float scale = 1.0f);
+void drawNote(int dir, Vector2 c, float size, float alpha = 1.0f, float scale = 1.0f, float extraRotDeg = 0.0f);
+void drawReceptor(int dir, Vector2 c, float size, Color tint, float scale = 1.0f, float extraRotDeg = 0.0f);
 void drawSustain(int dir, float x, float y0, float y1, float width, float alpha, bool capAtY1);
 
 // ---- particles

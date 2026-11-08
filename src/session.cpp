@@ -27,9 +27,12 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
         }
     for (bool& h : held_) h = false;
     totalPlayerNotes = 0;
-    for (const Note& n : chart.notes) {
+    for (size_t i = 0; i < chart.notes.size(); ++i) {
+        const Note& n = chart.notes[i];
         if (n.lane >= keys_) continue;
         LaneNote ln;
+        ln.type = n.type;
+        ln.id = uint32_t(i);
         ln.t = n.time;
         ln.len = n.length;
         ln.kind = n.kind;
@@ -87,6 +90,8 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
     e.errMs = err;
     e.length = n.len;
     e.flags = n.flags;
+    e.noteType = n.type;
+    e.id = n.id;
     events.push_back(e);
 }
 
@@ -101,6 +106,9 @@ void Session::missNote(int lane, size_t idx) {
     e.type = GameEvent::PlayerMiss;
     e.lane = uint8_t(lane);
     e.time = n.t;
+    e.flags = n.flags;
+    e.noteType = n.type;
+    e.id = n.id;
     events.push_back(e);
 }
 
@@ -133,6 +141,8 @@ void Session::press(int lane, double songMs) {
         e.type = GameEvent::PlayerMine;
         e.lane = uint8_t(lane);
         e.time = n.t;
+        e.noteType = n.type;
+        e.id = n.id;
         events.push_back(e);
     } else if (!cfg_.ghostTapping) {
         ++misses;
@@ -159,6 +169,9 @@ void Session::release(int lane, double songMs) {
     e.lane = uint8_t(lane);
     e.time = n.t;
     e.length = n.len;
+    e.flags = n.flags;
+    e.noteType = n.type;
+    e.id = n.id;
     if (songMs < end - 120.0 * cfg_.rate) {
         n.state = kDropped;
         ++misses;
@@ -200,14 +213,14 @@ void Session::update(double songMs) {
         if (cfg_.botplay) {
             for (size_t j = c; j < v.size() && v[j].t <= songMs; ++j) {
                 if (v[j].state != kPending) continue;
-                if (v[j].kind == kMine) v[j].state = kMinePassed;
+                if (v[j].kind == kMine || (v[j].flags & kFlagIgnore)) v[j].state = kMinePassed;
                 else hitNote(lane, j, v[j].t, true);
             }
         }
         while (c < v.size() && v[c].state != kPending) ++c;
         for (size_t j = c; j < v.size() && v[j].t < songMs - win; ++j) {
             if (v[j].state != kPending) continue;
-            if (v[j].kind == kMine) v[j].state = kMinePassed;
+            if (v[j].kind == kMine || (v[j].flags & kFlagIgnore)) v[j].state = kMinePassed;
             else missNote(lane, j);
         }
         while (c < v.size() && v[c].state != kPending) ++c;
@@ -219,7 +232,7 @@ void Session::update(double songMs) {
         while (oc < o.size() && o[oc].t <= songMs) {
             LaneNote& n = o[oc];
             if (n.state == kPending) {
-                if (n.kind == kMine) {
+                if (n.kind == kMine || (n.flags & kFlagIgnore)) {
                     n.state = kMinePassed;
                 } else {
                     if (oh >= 0) o[size_t(oh)].state = kHeldDone;
@@ -232,6 +245,8 @@ void Session::update(double songMs) {
                     e.time = n.t;
                     e.length = n.len;
                     e.flags = n.flags;
+                    e.noteType = n.type;
+                    e.id = n.id;
                     events.push_back(e);
                 }
             }

@@ -1,0 +1,467 @@
+// Headless tests for the Psych compatibility layer: atlases, character and
+// stage JSON, events, the scene model and the Lua API. Also a corpus runner:
+// gh_tests --psych-corpus <dir> loads every atlas, character, stage and
+// script found under <dir> and reports anything that fails.
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <string>
+
+#include "chart.hpp"
+#include "common.hpp"
+#include "lua_host.hpp"
+#include "psych.hpp"
+#include "scene.hpp"
+
+using namespace gh;
+
+extern int g_fail, g_pass;
+#define PCHECK(cond)                                                             \
+    do {                                                                         \
+        if (cond) ++g_pass;                                                      \
+        else { ++g_fail; std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } \
+    } while (0)
+
+static bool pnear(double a, double b, double eps = 1e-4) { return std::fabs(a - b) <= eps; }
+
+namespace {
+
+struct StubGame : ScriptGame {
+    double pos = 0, health = 1, score = 0;
+    std::vector<std::string> events, prints;
+    int countdownStarts = 0;
+    double songPosition() const override { return pos; }
+    bool getGameProp(std::string_view p, scene::Value& out) override {
+        if (p == "health") { out = health; return true; }
+        if (p == "songScore") { out = score; return true; }
+        if (p == "class:ClientPrefs.downScroll") { out = false; return true; }
+        return false;
+    }
+    bool setGameProp(std::string_view p, const scene::Value& v) override {
+        if (p == "health") { health = scene::toNum(v); return true; }
+        if (p == "songScore") { score = scene::toNum(v); return true; }
+        return false;
+    }
+    void triggerEvent(const std::string& n, const std::string& a, const std::string& b) override {
+        events.push_back(n + "|" + a + "|" + b);
+    }
+    void debugPrint(const std::string& t, uint32_t) override { prints.push_back(t); }
+    void startCountdown() override { ++countdownStarts; }
+};
+
+const char* kAtlas = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                     "<TextureAtlas imagePath=\"bf.png\">\n"
+                     "  <!-- comment <SubTexture name=\"ghost\"/> -->\n"
+                     "  <SubTexture name=\"BF idle dance0010\" x=\"0\" y=\"0\" width=\"10\" height=\"20\"/>\n"
+                     "  <SubTexture name=\"BF idle dance0002\" x=\"10\" y=\"0\" width=\"10\" height=\"20\" frameX=\"-3\" frameY=\"-4\" frameWidth=\"16\" frameHeight=\"28\"/>\n"
+                     "  <SubTexture name=\"BF idle dance0001\" x=\"20\" y=\"0\" width=\"12\" height=\"20\" rotated=\"true\"/>\n"
+                     "  <SubTexture name=\"BF NOTE LEFT0000\" x=\"0\" y=\"20\" width=\"8\" height=\"8\"/>\n"
+                     "  <SubTexture name=\"Tom &amp; Jerry0000\" x=\"0\" y=\"30\" width=\"4\" height=\"4\"/>\n"
+                     "</TextureAtlas>\n";
+
+void testAtlas() {
+    psych::Atlas a;
+    PCHECK(a.parseSparrow(kAtlas));
+    PCHECK(a.frames.size() == 5);
+    PCHECK(a.imagePath == "bf.png");
+    PCHECK(a.frames[4].name == "Tom & Jerry0000");
+    const auto idle = a.byPrefix("BF idle dance");
+    PCHECK(idle.size() == 3 && idle[0] == 2 && idle[1] == 1 && idle[2] == 0);  // numeric order 1, 2, 10
+    PCHECK(pnear(a.frames[1].fx, -3) && pnear(a.frames[1].fw, 16) && pnear(a.frames[1].fh, 28));
+    PCHECK(a.frames[2].rotated && pnear(a.frames[2].fw, 20) && pnear(a.frames[2].fh, 12));
+    PCHECK(pnear(a.frames[0].fw, 10));  // no frameWidth: the frame itself
+    const auto ind = a.byIndices("BF idle dance", {10, 1, 7});
+    PCHECK(ind.size() == 2 && ind[0] == 0 && ind[1] == 2);
+    PCHECK(a.byPrefix("nope").empty());
+    psych::Atlas p;
+    PCHECK(p.parsePacker("idle_0 = 0 0 32 32\nidle_1 = 32 0 32 32\n"));
+    PCHECK(p.frames.size() == 2 && pnear(p.frames[1].x, 32));
+    const unsigned char png[24] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 'I', 'H', 'D', 'R',
+                                   0, 0, 0x01, 0x2C, 0, 0, 0, 0x96};
+    int w = 0, h = 0;
+    PCHECK(psych::pngSize(std::string_view(reinterpret_cast<const char*>(png), 24), w, h) && w == 300 && h == 150);
+    PCHECK(!psych::pngSize("not a png at all, really not", w, h));
+}
+
+void testCharacterAndStage() {
+    const char* json = R"({"animations": [
+        {"loop": false, "offsets": [-5, 3], "anim": "idle", "fps": 24, "name": "BF idle dance", "indices": []},
+        {"loop": true, "offsets": [0, 0], "anim": "danceLeft", "fps": 24, "name": "BF idle dance", "indices": [1, 2]}],
+      "no_antialiasing": true, "image": "characters/BOYFRIEND, characters/extra", "position": [0, 350],
+      "healthicon": "bf", "flip_x": true, "scale": 1.5, "camera_position": [10, -20],
+      "healthbar_colors": [49, 176, 209], "sing_duration": 6.1})";
+    psych::CharacterDef d;
+    std::string err;
+    PCHECK(psych::parseCharacter(json, d, err));
+    PCHECK(d.images.size() == 2 && d.images[1] == "characters/extra");
+    PCHECK(d.anims.size() == 2 && d.anims[0].anim == "idle" && pnear(d.anims[0].offX, -5));
+    PCHECK(d.anims[1].indices.size() == 2 && d.anims[1].loop);
+    PCHECK(!d.antialiasing && d.flipX && pnear(d.scale, 1.5) && pnear(d.posY, 350) && pnear(d.camY, -20));
+    PCHECK(d.barColor == 0x31B0D1 && d.icon == "bf" && pnear(d.singDuration, 6.1));
+
+    const char* vslice = R"({"version": "1.0.0", "name": "Pico", "renderType": "sparrow", "assetPath": "characters/Pico_Basic",
+      "scale": 1, "healthIcon": {"id": "pico"}, "offsets": [0, -400], "cameraOffsets": [0, 0], "singTime": 8,
+      "animations": [{"name": "idle", "prefix": "Pico Idle Dance", "offsets": [0, 0]}, {"name": "singLEFT", "prefix": "Pico Note Right", "offsets": [-1, 2]}]})";
+    PCHECK(psych::parseCharacter(vslice, d, err));
+    PCHECK(d.images.size() == 1 && d.icon == "pico" && d.anims.size() == 2 && pnear(d.posY, -400));
+
+    psych::StageDef st;
+    PCHECK(psych::parseStage(R"({"directory": "week6", "defaultZoom": 1.05, "stageUI": "pixel", "boyfriend": [970, 320],
+        "girlfriend": [580, 430], "opponent": [100, 100], "hide_girlfriend": true, "camera_boyfriend": [-100, -100],
+        "camera_speed": 2, "objects": [{"type": "square", "name": "bg", "x": -5, "y": -6, "scale": [50, 60], "color": "FF0000"},
+        {"type": "gfGroup"}]})", st, err));
+    PCHECK(st.pixel && st.hideGf && pnear(st.zoom, 1.05) && pnear(st.bf[0], 970) && pnear(st.camBf[1], -100));
+    PCHECK(st.objects.size() == 2 && st.objects[0].color == 0xFF0000 && pnear(st.objects[0].scaleY, 60));
+    PCHECK(pnear(st.camSpeed, 2));
+}
+
+void testEventsAndMeta() {
+    const char* chart = R"({"song": {"song": "Ev", "bpm": 100, "player1": "bf-pixel", "player2": "spirit", "gfVersion": "gf-pixel",
+      "stage": "schoolEvil", "events": [[2000, [["Hey!", "bf", "0.6"], ["Add Camera Zoom", "", ""]]], [500, [["Change Character", "dad", "monster"]]]],
+      "notes": [{"mustHitSection": true, "sectionNotes": [[0, 0, 0], [100, -1, "Play Animation", "hey", "bf"], [200, 1, 0, "GF Sing"]]}]}})";
+    std::vector<psych::ChartEvent> ev;
+    psych::parseEvents(chart, ev);
+    PCHECK(ev.size() == 4);
+    PCHECK(ev[0].timeMs == 100 && ev[0].name == "Play Animation" && ev[0].v2 == "bf");
+    PCHECK(ev[1].timeMs == 500 && ev[1].name == "Change Character" && ev[1].v2 == "monster");
+    PCHECK(ev[2].name == "Hey!" && ev[3].name == "Add Camera Zoom");
+    const psych::SongMeta m = psych::parseSongMeta(chart);
+    PCHECK(m.player == "bf-pixel" && m.opponent == "spirit" && m.gf == "gf-pixel" && m.stage == "schoolEvil");
+    Chart c;
+    std::string err;
+    PCHECK(parseChart(chart, "Hard", c, err));
+    PCHECK(c.events.size() == 4 && c.gf == "gf-pixel" && c.stage == "schoolEvil");
+    PCHECK(c.notes.size() == 2 && (c.notes[1].flags & kFlagGF) && c.noteTypes[c.notes[1].type] == "GF Sing");
+
+    std::vector<psych::ChartEvent> vs;
+    psych::parseEvents(R"({"notes": {}, "events": [{"t": 10, "e": "ZoomCamera", "v": {"zoom": 1.3, "duration": 4, "ease": "expoOut"}},
+        {"t": 20, "e": "PlayAnimation", "v": {"target": "gf", "anim": "cheer", "force": true}}]})", vs);
+    PCHECK(vs.size() == 2 && vs[0].name == "__vslice_zoom" && vs[0].v1 == "1.3" && vs[1].name == "Play Animation" && vs[1].v2 == "gf");
+
+    PCHECK(psych::parseColor("FF0000") == 0xFFFF0000u);
+    PCHECK(psych::parseColor("0xFF00FF00") == 0xFF00FF00u);
+    PCHECK(psych::parseColor("#0000ff") == 0xFF0000FFu);
+    PCHECK(psych::parseColor("white") == 0xFFFFFFFFu);
+    PCHECK(psych::parseColor("garbage", 7) == 7);
+    for (const char* e : {"linear", "quadIn", "quadOut", "cubeInOut", "sineInOut", "bounceOut", "elasticOut", "backIn", "expoInOut",
+                          "circOut", "smoothStepInOut", "quartOut", "quintInOut"}) {
+        PCHECK(pnear(psych::ease(e, 0.0), 0.0, 1e-3));
+        PCHECK(pnear(psych::ease(e, 1.0), 1.0, 1e-3));
+    }
+    PCHECK(pnear(psych::ease("quadIn", 0.5), 0.25));
+}
+
+scene::GraphicPtr fakeAtlas(int frames, float w, float h) {
+    auto g = std::make_shared<scene::Graphic>();
+    g->files.push_back("fake.png");
+    g->sizes.push_back({int(w * frames), int(h)});
+    for (int i = 0; i < frames; ++i) {
+        psych::AtlasFrame f;
+        f.name = "anim" + std::to_string(1000 + i).substr(1);
+        f.x = w * float(i);
+        f.w = f.fw = w;
+        f.h = f.fh = h;
+        g->frames.push_back(f);
+    }
+    return g;
+}
+
+void testSceneModel() {
+    scene::Sprite s;
+    s.setGraphic(fakeAtlas(4, 100, 50));
+    PCHECK(pnear(s.width, 100) && pnear(s.originX, 50) && pnear(s.originY, 25));
+    s.scaleX = s.scaleY = 2;
+    s.updateHitbox();
+    PCHECK(pnear(s.width, 200) && pnear(s.offsetX, -50) && pnear(s.offsetY, -25));
+    s.setGraphicSize(300, 0);
+    PCHECK(pnear(s.scaleX, 3) && pnear(s.scaleY, 3));
+    s.screenCenter(true, false);
+    PCHECK(pnear(s.x, (1280 - s.width) / 2));
+
+    scene::Anim a;
+    a.name = "go";
+    a.frames = {0, 1, 2, 3};
+    a.fps = 10;
+    s.addAnim(a);
+    PCHECK(s.play("go", true));
+    s.updateAnim(0.25);  // 2.5 frames
+    PCHECK(s.animFrame == 2 && !s.finished);
+    s.updateAnim(0.06);
+    PCHECK(s.animFrame == 3 && !s.finished);  // last frame shows for one frame time
+    s.updateAnim(0.1);
+    PCHECK(s.finished && s.animFrame == 3);
+    PCHECK(!s.play("missing"));
+
+    scene::Character c;
+    c.setGraphic(fakeAtlas(4, 100, 100));
+    for (const char* n : {"danceLeft", "danceRight", "singLEFT"}) {
+        scene::Anim an;
+        an.name = n;
+        an.frames = {0, 1};
+        an.fps = 24;
+        an.hasOffset = true;
+        an.offX = std::string(n) == "singLEFT" ? 12.0f : 0.0f;
+        c.addAnim(an);
+    }
+    c.recalcDance(true);
+    PCHECK(c.danceIdle && c.danceEvery == 1);
+    c.dance();
+    PCHECK(c.curAnimName() == "danceRight");
+    c.dance();
+    PCHECK(c.curAnimName() == "danceLeft");
+    c.playAnim("singLEFT", true);
+    PCHECK(pnear(c.offsetX, 12));
+    c.updateChar(0.5, 100, false);  // 0.5 s > 100 ms * 0.0011 * 4: back to dancing
+    PCHECK(c.curAnimName().rfind("dance", 0) == 0);
+
+    scene::Scene sc;
+    auto spr = std::make_shared<scene::Sprite>();
+    spr->tag = "box";
+    spr->setGraphic(fakeAtlas(1, 10, 10));
+    sc.objects["box"] = spr;
+    scene::Tween tw;
+    tw.tag = "move";
+    tw.target = "box";
+    tw.fields.push_back({"x", 0, 100, false});
+    tw.dur = 1;
+    sc.tween(tw);
+    sc.update(0.5, 100, false);
+    PCHECK(pnear(spr->x, 50, 0.5));
+    sc.update(0.6, 100, false);
+    PCHECK(pnear(spr->x, 100) && sc.tweens.empty() && sc.completions.size() == 1);
+    scene::Timer t;
+    t.tag = "tick";
+    t.time = 0.1;
+    t.loops = 3;
+    sc.completions.clear();
+    sc.timer(t);
+    sc.update(0.35, 100, false);
+    PCHECK(sc.completions.size() == 3 && sc.timers.empty() && sc.completions.back().left == 0);
+    scene::Value v;
+    PCHECK(sc.setProp("camGame.zoom", 1.5) && sc.getProp("camGame.zoom", v) && pnear(scene::toNum(v), 1.5));
+    sc.keys = 4;
+    sc.strums.resize(8);
+    PCHECK(sc.setProp("playerStrums.members[2].x", 321.0) && pnear(sc.strums[6].x, 321));
+    PCHECK(sc.getProp("strumLineNotes.length", v) && pnear(scene::toNum(v), 8));
+    PCHECK(sc.setProp("someVariable", std::string("hi")) && sc.getProp("someVariable", v) && scene::toStr(v) == "hi");
+}
+
+void testLua() {
+    scene::Scene sc;
+    sc.keys = 4;
+    sc.strums.resize(8);
+    sc.bf = std::make_shared<scene::Character>();
+    sc.bf->kind = scene::Kind::Character;
+    sc.bf->name = "bf";
+    sc.gfMarker = std::make_shared<scene::Sprite>();
+    sc.gfMarker->kind = scene::Kind::Marker;
+    sc.order = {sc.gfMarker, sc.bf};
+    StubGame game;
+    ScriptHost host(sc, game);
+    host.callBudget = 0.3;
+    host.loadBudget = 0.5;
+    const char* code = R"LUA(
+        created = 0
+        function onCreate()
+            created = created + 1
+            makeLuaSprite('bg', '', -100, -50)
+            makeGraphic('bg', 200, 100, 'FF0000')
+            addLuaSprite('bg', false)
+            makeLuaText('label', 'Hello', 0, 10, 20)
+            addLuaText('label')
+            setProperty('bg.alpha', 0.5)
+            setProperty('boyfriend.x', 777)
+            setProperty('health', 1.5)
+            doTweenX('slide', 'bg', 300, 1, 'linear')
+            runTimer('t1', 0.2, 2)
+            noteTweenAlpha('fade', 5, 0.25, 0.5, 'quadOut')
+            setVar('shared', 42)
+        end
+        function onUpdate(e) beat = (beat or 0) + 1 end
+        function onTimerCompleted(tag, loops, left) last = tag .. ':' .. left end
+        function onTweenCompleted(tag) tweened = tag end
+        function onStartCountdown() return Function_Stop end
+        function label() return 'beat ' .. curBeat end
+    )LUA";
+    PCHECK(host.loadString("test.lua", code));
+    PCHECK(host.errors.empty());
+    if (!host.errors.empty()) std::printf("  %s\n", host.errors[0].c_str());
+    PCHECK(sc.objects.count("bg") && sc.order.front()->tag == "bg");  // inserted behind the characters
+    PCHECK(pnear(sc.objects["bg"]->alpha, 0.5) && pnear(sc.bf->x, 777) && pnear(game.health, 1.5));
+    PCHECK(sc.objects["label"]->kind == scene::Kind::Text && sc.objects["label"]->cam == scene::Cam::Hud);
+    host.setGlobal("curBeat", 4.0);
+    PCHECK(host.call("onStartCountdown") == ScriptHost::kStop);
+    for (int i = 0; i < 12; ++i) {
+        host.call("onUpdate", {scene::Value(0.1)});
+        sc.update(0.1, 100, false);
+        host.dispatchCompletions();
+    }
+    PCHECK(pnear(sc.objects["bg"]->x, 300) && pnear(sc.strums[5].alpha, 0.25));
+    scene::Value v;
+    PCHECK(sc.getProp("shared", v) && pnear(scene::toNum(v), 42));
+    PCHECK(host.errors.empty());
+
+    // Integral numbers print like Psych's Lua ("4", not "4.0"), Lua 5.1 shims work.
+    PCHECK(host.loadString("compat.lua", R"LUA(
+        function onCreate()
+            debugPrint('beat ' .. curBeat)
+            debugPrint(tostring(unpack({7, 8})))
+            debugPrint(tostring(bit.band(12, 10)))
+            debugPrint(tostring(math.pow(2, 3)))
+            debugPrint(stringSplit('a,b,c', ',')[2])
+            debugPrint(getPropertyFromClass('backend.ClientPrefs', 'data.downScroll'))
+        end)LUA"));
+    PCHECK(game.prints.size() >= 6);
+    if (game.prints.size() >= 6) {
+        PCHECK(game.prints[0] == "beat 4");
+        PCHECK(game.prints[1] == "7");
+        PCHECK(game.prints[2] == "8");
+        PCHECK(game.prints[3] == "8.0");
+        PCHECK(game.prints[4] == "b");
+        PCHECK(game.prints[5] == "false");
+    }
+
+    // Sandbox: no io / os.execute / require, and runaway loops are stopped.
+    game.prints.clear();
+    PCHECK(host.loadString("sandbox.lua", R"LUA(
+        function onCreate()
+            debugPrint(tostring(io), tostring(os.execute), tostring(require), tostring(dofile))
+        end
+        function onUpdate() while true do end end)LUA"));
+    PCHECK(!game.prints.empty() && game.prints[0] == "nilnilnilnil");
+    const size_t before = host.errors.size();
+    host.call("onUpdate", {scene::Value(0.016)});
+    PCHECK(host.errors.size() == before + 1 && host.errors.back().find("too long") != std::string::npos);
+
+    // Syntax errors are reported, not fatal.
+    PCHECK(!host.loadString("broken.lua", "function onCreate( end"));
+    PCHECK(host.errors.back().find("broken.lua") != std::string::npos);
+
+    // Kade modchart helpers address strums by number.
+    PCHECK(host.loadString("data/song/modchart.lua", R"LUA(
+        function start(song) setActorX(500, 4); setActorAlpha(0.5, 1) end)LUA"));
+    PCHECK(host.kadeMode && pnear(sc.strums[4].x, 500) && pnear(sc.strums[1].alpha, 0.5));
+}
+
+namespace fs = std::filesystem;
+
+std::string modRootOf(const fs::path& file) {
+    // The nearest parent that looks like a Psych mod / asset root.
+    for (fs::path p = file.parent_path(); !p.empty() && p != p.root_path(); p = p.parent_path()) {
+        std::error_code ec;
+        if (fs::is_directory(p / "images", ec) || fs::is_directory(p / "characters", ec) || fs::is_directory(p / "stages", ec) ||
+            fs::is_directory(p / "data", ec))
+            return p.string() + "/";
+    }
+    return file.parent_path().string() + "/";
+}
+
+}  // namespace
+
+void runPsychTests() {
+    testAtlas();
+    testCharacterAndStage();
+    testEventsAndMeta();
+    testSceneModel();
+    testLua();
+}
+
+// Loads every atlas, character, stage and Lua script under dir.
+int runPsychCorpus(const char* dir) {
+    int atlases = 0, atlasFail = 0, chars = 0, charFail = 0, stages = 0, stageFail = 0, scripts = 0, scriptFail = 0;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const fs::path p = it->path();
+        const std::string name = p.filename().string(), parent = p.parent_path().filename().string();
+        std::string text;
+        if (endsWithI(name, ".xml")) {
+            if (!scene::readFile(p.string(), text) || text.find("TextureAtlas") == std::string::npos) continue;
+            psych::Atlas a;
+            ++atlases;
+            std::string err;
+            if (!a.parseSparrow(text, &err)) { ++atlasFail; std::printf("atlas FAIL %s: %s\n", p.string().c_str(), err.c_str()); }
+        } else if (endsWithI(name, ".json") && (parent == "characters" || parent == "stages")) {
+            if (!scene::readFile(p.string(), text)) continue;
+            if (text.rfind("version https://git-lfs", 0) == 0) continue;
+            std::string err;
+            if (parent == "characters") {
+                psych::CharacterDef d;
+                ++chars;
+                if (!psych::parseCharacter(text, d, err)) { ++charFail; std::printf("char FAIL %s: %s\n", p.string().c_str(), err.c_str()); }
+            } else {
+                psych::StageDef d;
+                ++stages;
+                if (!psych::parseStage(text, d, err)) { ++stageFail; std::printf("stage FAIL %s: %s\n", p.string().c_str(), err.c_str()); }
+            }
+        } else if (endsWithI(name, ".lua")) {
+            scene::Scene sc;
+            sc.files.setRoots({modRootOf(p)});
+            sc.keys = 4;
+            sc.strums.resize(8);
+            for (const char* who : {"bf", "dad", "gf"}) {
+                auto c = std::make_shared<scene::Character>();
+                c->kind = scene::Kind::Character;
+                c->name = who;
+                c->builtin = true;
+                c->width = c->frameW = 400;
+                c->height = c->frameH = 400;
+                (std::string(who) == "bf" ? sc.bf : std::string(who) == "dad" ? sc.dad : sc.gf) = c;
+            }
+            sc.gfMarker = std::make_shared<scene::Sprite>();
+            sc.gfMarker->kind = scene::Kind::Marker;
+            sc.order = {sc.gfMarker, sc.gf, sc.dad, sc.bf};
+            StubGame game;
+            ScriptHost host(sc, game);
+            host.callBudget = 0.5;
+            ++scripts;
+            host.setGlobal("curBeat", 0.0);
+            host.setGlobal("curStep", 0.0);
+            host.setGlobal("songName", std::string("test"));
+            for (const char* n : {"bpm", "curBpm"}) host.setGlobal(n, 120.0);
+            host.setGlobal("crochet", 500.0);
+            host.setGlobal("stepCrochet", 125.0);
+            host.setGlobal("scrollSpeed", 2.0);
+            host.setGlobal("screenWidth", 1280.0);
+            host.setGlobal("screenHeight", 720.0);
+            host.setGlobal("downscroll", false);
+            host.setGlobal("middlescroll", false);
+            host.setGlobal("mustHitSection", true);
+            for (int i = 0; i < 4; ++i) {
+                host.setGlobal(("defaultPlayerStrumX" + std::to_string(i)).c_str(), 732.0 + 112 * i);
+                host.setGlobal(("defaultPlayerStrumY" + std::to_string(i)).c_str(), 50.0);
+                host.setGlobal(("defaultOpponentStrumX" + std::to_string(i)).c_str(), 92.0 + 112 * i);
+                host.setGlobal(("defaultOpponentStrumY" + std::to_string(i)).c_str(), 50.0);
+            }
+            host.load(p.string());
+            host.call("onCreatePost");
+            for (int f = 0; f < 120; ++f) {
+                game.pos = f * 16.0;
+                host.call("onUpdate", {scene::Value(1.0 / 60)});
+                if (f % 8 == 0) {
+                    host.setGlobal("curBeat", double(f / 8));
+                    host.call("onBeatHit", {scene::Value(double(f / 8))});
+                    host.call("beatHit", {scene::Value(double(f / 8))});
+                }
+                if (f % 2 == 0) {
+                    host.setGlobal("curStep", double(f / 2));
+                    host.call("onStepHit");
+                }
+                if (f == 30) host.call("goodNoteHit", {scene::Value(0.0), scene::Value(1.0), scene::Value(std::string()), scene::Value(false)});
+                if (f == 40) host.call("opponentNoteHit", {scene::Value(0.0), scene::Value(2.0), scene::Value(std::string()), scene::Value(false)});
+                if (f == 50 && parent == "custom_events")
+                    host.call("onEvent", {scene::Value(p.stem().string()), scene::Value(std::string("1")), scene::Value(std::string("0.5"))});
+                sc.update(1.0 / 60, 120, false);
+                host.dispatchCompletions();
+                host.call("onUpdatePost", {scene::Value(1.0 / 60)});
+            }
+            if (!host.errors.empty()) {
+                ++scriptFail;
+                std::printf("script %s: %zu error(s), first: %s\n", p.string().c_str(), host.errors.size(), host.errors[0].c_str());
+            }
+        }
+    }
+    std::printf("atlases %d (%d failed), characters %d (%d failed), stages %d (%d failed), scripts %d (%d with errors)\n", atlases,
+                atlasFail, chars, charFail, stages, stageFail, scripts, scriptFail);
+    return atlasFail + charFail + stageFail;
+}
