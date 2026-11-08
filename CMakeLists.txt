@@ -41,6 +41,30 @@ endif()
 
 # ---- the game ----------------------------------------------------------------
 if(GH_BUILD_GAME)
+  # Fonts (SIL OFL) ship in assets/fonts; copies of the source without them
+  # fetch the exact same files here. The game falls back to a built-in font.
+  set(GH_FONT_COMMIT 5bb28733cec313b63fbd415b574b5ae35c8aa8b8)
+  set(GH_FONTS
+    "CinzelDecorative-Bold.ttf|ofl/cinzeldecorative/CinzelDecorative-Bold.ttf|e854e68a388aa50d742a4415c1ae5c17a617ef7956c95a70021d0a4a44f20518"
+    "Rajdhani-Bold.ttf|ofl/rajdhani/Rajdhani-Bold.ttf|691470dd3286a14e9677940d0bf75796179841ba5215cbda1a2c8910a3226afd")
+  foreach(entry IN LISTS GH_FONTS)
+    string(REPLACE "|" ";" parts "${entry}")
+    list(GET parts 0 font_name)
+    list(GET parts 1 font_path)
+    list(GET parts 2 font_hash)
+    set(font_file ${CMAKE_SOURCE_DIR}/assets/fonts/${font_name})
+    if(NOT EXISTS ${font_file})
+      message(STATUS "Downloading font ${font_name}")
+      file(DOWNLOAD https://raw.githubusercontent.com/google/fonts/${GH_FONT_COMMIT}/${font_path} ${font_file}
+        EXPECTED_HASH SHA256=${font_hash} STATUS font_status)
+      list(GET font_status 0 font_code)
+      if(NOT font_code EQUAL 0)
+        file(REMOVE ${font_file})
+        message(WARNING "Could not download ${font_name}; the game will use its fallback font.")
+      endif()
+    endif()
+  endforeach()
+
   include(FetchContent)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
