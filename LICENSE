@@ -21,7 +21,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ---------------------------------------------------------------------------
+Features merged from PulseForge (Apache-2.0, same copyright holder) were
+re-implemented for this code base and are covered by the MIT license above.
+
 Third-party components keep their own licenses:
 - raylib (fetched at build time): zlib/libpng license
+- Lua 5.4 (fetched at build time): MIT license, Copyright (C) 1994-2024 Lua.org, PUC-Rio
+- miniz (fetched at build time): MIT license, Copyright 2013-2014 RAD Game Tools and Valve Software
 - assets/fonts/CinzelDecorative-Bold.ttf: SIL Open Font License 1.1 (see OFL-CinzelDecorative.txt)
 - assets/fonts/Rajdhani-Bold.ttf: SIL Open Font License 1.1 (see OFL-Rajdhani.txt)
