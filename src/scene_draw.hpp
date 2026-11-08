@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "raylib.h"
 #include "scene.hpp"
@@ -27,8 +28,26 @@ public:
     static Vector2 toScreen(const scene::Camera& c, float x, float y, float sfx, float sfy);
     Texture2D* texture(const std::string& file);
     void clear();
+    // Draws `src` (a camera rendered to a texture) through the camera's
+    // shaders into `dest` on the current target.
+    void drawFiltered(scene::Scene& sc, const std::vector<scene::ShaderPtr>& filters, const RenderTexture2D& src,
+                      Rectangle dest);
+    std::vector<std::string> errors;  // shader problems, shown by the play state
 
 private:
+    struct CompiledShader {
+        Shader sh{};
+        bool ok = false;
+        std::map<std::string, int> locs;
+    };
+    CompiledShader* shaderFor(const scene::Scene& sc, const std::string& name);
+    int loc(CompiledShader& cs, const std::string& name);
+    void applyUniforms(CompiledShader& cs, const scene::ShaderInstance& inst, float texW, float texH, bool renderTexture,
+                       const scene::Scene& sc);
+    std::map<std::string, CompiledShader> shaders_;
+    RenderTexture2D pingPong_[2]{};
+    scene::Scene* sc_ = nullptr;
+
     void drawSprite(const scene::Sprite& s, const scene::Camera& c);
     void drawText(scene::Sprite& s, const scene::Camera& c);
     Font* font(const std::string& file);

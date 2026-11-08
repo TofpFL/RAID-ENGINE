@@ -472,6 +472,7 @@ int runPsychCorpus(const char* dir) {
 // ------------------------------------------------- AutoChart, replays, zips --
 #include "autochart.hpp"
 #include "chart_stream.hpp"
+#include "shader_glsl.hpp"
 #include "composer.hpp"
 #include "miniz.h"
 #include "mod_install.hpp"
@@ -611,6 +612,21 @@ void testChartStreaming() {
     std::filesystem::remove(path);
 }
 
+void testShaderTranslation() {
+    const std::string out = translateShader(
+        "#pragma header\nprecision mediump float;\nuniform sampler2D bitmap;\nvarying vec2 openfl_TextureCoordv;\n"
+        "uniform sampler2D texture;\nuniform float iTime;\nvoid main() {\n"
+        "  vec4 a = texture2D(bitmap, openfl_TextureCoordv);\n  vec4 b = texture2D( texture , vec2(0.5));\n"
+        "  vec4 c = flixel_texture2D(bitmap, openfl_TextureCoordv);\n  gl_FragColor = a + b + c;\n}\n");
+    PCHECK(out.rfind("#version 330", 0) == 0);
+    PCHECK(out.find("gh_texBitmap( openfl_TextureCoordv)") != std::string::npos);
+    PCHECK(out.find("gh_tex( gh_userTexture , vec2(0.5))") != std::string::npos);
+    PCHECK(out.find("gh_FragColor = a + b + c") != std::string::npos);
+    PCHECK(out.find("uniform sampler2D bitmap") == std::string::npos);  // supplied by the prelude
+    PCHECK(out.find("varying") == std::string::npos && out.find("#pragma") == std::string::npos);
+    PCHECK(out.find("uniform float iTime;") != std::string::npos);
+}
+
 void testZipInstall() {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "gh_zip_test";
@@ -648,6 +664,7 @@ void runExtraTests(bool audio) {
     testReplayDeterminism();
     testZipInstall();
     testChartStreaming();
+    testShaderTranslation();
     if (!audio) return;
     // AutoChart on the built-in songs: report the tempo it hears.
     for (const SongDef& def : builtinSongs()) {

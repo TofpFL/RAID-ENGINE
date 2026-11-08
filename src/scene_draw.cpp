@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cmath>
 
+#include <cstdarg>
+#include <cstdio>
+
 #include "common.hpp"
 #include "gfx.hpp"
 #include "rlgl.h"
+#include "shader_glsl.hpp"
 
 namespace gh {
 
@@ -46,16 +50,146 @@ void setBlend(int& cur, int want) {
         case 2: rlSetBlendMode(BLEND_MULTIPLIED); break;
         case 3: rlSetBlendMode(BLEND_ADD_COLORS); break;
         case 4: rlSetBlendMode(BLEND_SUBTRACT_COLORS); break;
+        case 5: rlSetBlendMode(BLEND_ALPHA_PREMULTIPLY); break;
         default: rlSetBlendMode(BLEND_ALPHA); break;
     }
     cur = want;
+}
+
+std::string* g_shaderLog = nullptr;
+void captureLog(int level, const char* text, va_list args) {
+    if (!g_shaderLog || level < LOG_WARNING) return;
+    char buf[2048];
+    std::vsnprintf(buf, sizeof buf, text, args);
+    *g_shaderLog += buf;
+    *g_shaderLog += '\n';
 }
 }  // namespace
 
 SceneRenderer::~SceneRenderer() { clear(); }
 
+SceneRenderer::CompiledShader* SceneRenderer::shaderFor(const scene::Scene& sc, const std::string& name) {
+    auto it = shaders_.find(name);
+    if (it != shaders_.end()) return &it->second;
+    CompiledShader& cs = shaders_[name];
+    auto src = sc.shaderSources.find(name);
+    if (src == sc.shaderSources.end() || src->second.frag.empty()) {
+        errors.push_back("shader " + name + ": no fragment shader");
+        return &cs;
+    }
+    const std::string glsl = translateShader(src->second.frag);
+    std::string log;
+    g_shaderLog = &log;
+    SetTraceLogCallback(captureLog);
+    cs.sh = LoadShaderFromMemory(nullptr, glsl.c_str());
+    SetTraceLogCallback(nullptr);
+    g_shaderLog = nullptr;
+    cs.ok = cs.sh.id != 0 && cs.sh.id != rlGetShaderIdDefault();
+    if (!cs.ok) {
+        // Keep the compiler's own message (first error line).
+        std::string first;
+        size_t p = log.find("ERROR");
+        if (p == std::string::npos) p = log.find("error");
+        if (p != std::string::npos) first = log.substr(p, log.find('\n', p) - p);
+        errors.push_back("shader " + name + " failed to compile" + (first.empty() ? "" : ": " + first));
+    }
+    return &cs;
+}
+
+int SceneRenderer::loc(CompiledShader& cs, const std::string& name) {
+    auto it = cs.locs.find(name);
+    if (it != cs.locs.end()) return it->second;
+    const int l = GetShaderLocation(cs.sh, name.c_str());
+    cs.locs[name] = l;
+    return l;
+}
+
+void SceneRenderer::applyUniforms(CompiledShader& cs, const scene::ShaderInstance& inst, float texW, float texH,
+                                  bool renderTexture, const scene::Scene& sc) {
+    const float size[2] = {texW, texH};
+    if (int l = loc(cs, "openfl_TextureSize"); l >= 0) SetShaderValue(cs.sh, l, size, SHADER_UNIFORM_VEC2);
+    const float flip = renderTexture ? 1.0f : 0.0f, premul = renderTexture ? 0.0f : 1.0f;
+    if (int l = loc(cs, "gh_flipY"); l >= 0) SetShaderValue(cs.sh, l, &flip, SHADER_UNIFORM_FLOAT);
+    if (int l = loc(cs, "gh_premul"); l >= 0) SetShaderValue(cs.sh, l, &premul, SHADER_UNIFORM_FLOAT);
+    const int one = 1;
+    if (int l = loc(cs, "hasTransform"); l >= 0) SetShaderValue(cs.sh, l, &one, SHADER_UNIFORM_INT);
+    if (int l = loc(cs, "hasColorTransform"); l >= 0) SetShaderValue(cs.sh, l, &one, SHADER_UNIFORM_INT);
+    for (const auto& [name, v] : inst.floats) {
+        const int l = loc(cs, name);
+        if (l < 0 || v.empty()) continue;
+        static const int types[] = {SHADER_UNIFORM_FLOAT, SHADER_UNIFORM_VEC2, SHADER_UNIFORM_VEC3, SHADER_UNIFORM_VEC4};
+        if (v.size() <= 4) SetShaderValue(cs.sh, l, v.data(), types[v.size() - 1]);
+        else SetShaderValueV(cs.sh, l, v.data(), SHADER_UNIFORM_FLOAT, int(v.size()));
+    }
+    for (const auto& [name, v] : inst.ints) {
+        const int l = loc(cs, name);
+        if (l < 0 || v.empty()) continue;
+        static const int types[] = {SHADER_UNIFORM_INT, SHADER_UNIFORM_IVEC2, SHADER_UNIFORM_IVEC3, SHADER_UNIFORM_IVEC4};
+        if (v.size() <= 4) SetShaderValue(cs.sh, l, v.data(), types[v.size() - 1]);
+        else SetShaderValueV(cs.sh, l, v.data(), SHADER_UNIFORM_INT, int(v.size()));
+    }
+    for (const auto& [name, key] : inst.samplers) {
+        const int l = loc(cs, name);
+        if (l < 0) continue;
+        scene::GraphicPtr g = const_cast<scene::Scene&>(sc).gfx.image(key);
+        if (!g || g->files.empty()) continue;
+        if (Texture2D* t = texture(g->files[0])) SetShaderValueTexture(cs.sh, l, *t);
+    }
+}
+
+void SceneRenderer::drawFiltered(scene::Scene& sc, const std::vector<scene::ShaderPtr>& filters, const RenderTexture2D& src,
+                                 Rectangle dest) {
+    const float w = float(src.texture.width), h = float(src.texture.height);
+    std::vector<CompiledShader*> chain;
+    std::vector<const scene::ShaderInstance*> insts;
+    for (const scene::ShaderPtr& f : filters) {
+        if (!f) continue;
+        CompiledShader* cs = shaderFor(sc, f->name);
+        if (cs && cs->ok) { chain.push_back(cs); insts.push_back(f.get()); }
+    }
+    rlDrawRenderBatchActive();
+    if (chain.empty()) {
+        rlSetBlendMode(BLEND_ALPHA_PREMULTIPLY);
+        DrawTexturePro(src.texture, {0, 0, w, -h}, dest, {0, 0}, 0, WHITE);
+        rlDrawRenderBatchActive();
+        rlSetBlendMode(BLEND_ALPHA);
+        return;
+    }
+    const Texture2D* in = &src.texture;
+    int k = 0;
+    for (size_t i = 0; i < chain.size(); ++i) {
+        const bool last = i + 1 == chain.size();
+        if (!last) {
+            RenderTexture2D& rt = pingPong_[k];
+            if (!rt.id || rt.texture.width != int(w) || rt.texture.height != int(h)) {
+                if (rt.id) UnloadRenderTexture(rt);
+                rt = LoadRenderTexture(int(w), int(h));
+            }
+            BeginTextureMode(rt);
+            ClearBackground(BLANK);
+        }
+        BeginShaderMode(chain[i]->sh);
+        applyUniforms(*chain[i], *insts[i], w, h, true, sc);
+        rlSetBlendMode(BLEND_ALPHA_PREMULTIPLY);
+        DrawTexturePro(*in, {0, 0, w, -h}, last ? dest : Rectangle{0, 0, w, h}, {0, 0}, 0, WHITE);
+        rlDrawRenderBatchActive();
+        EndShaderMode();
+        rlSetBlendMode(BLEND_ALPHA);
+        if (!last) {
+            EndTextureMode();
+            in = &pingPong_[k].texture;
+            k ^= 1;
+        }
+    }
+}
+
 void SceneRenderer::clear() {
     if (!IsWindowReady()) return;
+    for (auto& kv : shaders_)
+        if (kv.second.ok) UnloadShader(kv.second.sh);
+    shaders_.clear();
+    for (RenderTexture2D& rt : pingPong_)
+        if (rt.id) { UnloadRenderTexture(rt); rt = RenderTexture2D{}; }
     for (auto& kv : tex_)
         if (kv.second.id) UnloadTexture(kv.second);
     tex_.clear();
@@ -171,7 +305,20 @@ void SceneRenderer::drawSprite(const Sprite& s, const Camera& cam) {
     } else {
         col = argbColor(0xFF000000u | tint, alpha);
     }
-    setBlend(blend_, s.blend);
+    CompiledShader* shp = nullptr;
+    if (s.shader && sc_) {
+        shp = shaderFor(*sc_, s.shader->name);
+        if (shp && !shp->ok) shp = nullptr;
+    }
+    if (shp) {
+        // Shader output is premultiplied (OpenFL style).
+        rlDrawRenderBatchActive();
+        BeginShaderMode(shp->sh);
+        applyUniforms(*shp, *s.shader, tex ? float(tex->width) : 1.0f, tex ? float(tex->height) : 1.0f, false, *sc_);
+        setBlend(blend_, 5);
+    } else {
+        setBlend(blend_, s.blend);
+    }
     rlSetTexture(tex ? tex->id : rlGetTextureIdDefault());
     rlBegin(RL_QUADS);
     rlColor4ub(col.r, col.g, col.b, col.a);
@@ -183,6 +330,10 @@ void SceneRenderer::drawSprite(const Sprite& s, const Camera& cam) {
     }
     rlEnd();
     rlSetTexture(0);
+    if (shp) {
+        rlDrawRenderBatchActive();
+        EndShaderMode();
+    }
 }
 
 void SceneRenderer::drawText(Sprite& s, const Camera& cam) {
@@ -270,6 +421,7 @@ void SceneRenderer::drawCamera(scene::Scene& sc, Cam which,
                                const std::function<void(const scene::Character& c, Vector2 feet, float scale)>& builtin) {
     const Camera& cam = which == Cam::Game ? sc.camGame : which == Cam::Hud ? sc.camHud : sc.camOther;
     if (!cam.visible) return;
+    sc_ = &sc;
     rlDrawRenderBatchActive();
     rlDisableBackfaceCulling();
     blend_ = 0;

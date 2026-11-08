@@ -17,6 +17,9 @@ void shutdown();
 
 // Virtual canvas: everything is drawn in 1280x720 units, scaled and letterboxed.
 Camera2D screenCamera(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
+// While drawing into a render texture of this size, the canvas maps onto it
+// instead of the window (0, 0 = the window again).
+void setRenderTargetSize(int w, int h);
 void beginCanvas(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
 void endCanvas();
 void drawLetterbox();

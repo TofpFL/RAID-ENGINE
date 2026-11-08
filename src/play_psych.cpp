@@ -844,7 +844,7 @@ void PlayState::drawHudLayer() {
     gfx::endCanvas();
     const Vector2 focus{gfx::W * 0.5f - (cam.shakeX + cam.x) / std::max(0.01f, cam.zoom),
                         gfx::H * 0.5f - (cam.shakeY + cam.y) / std::max(0.01f, cam.zoom)};
-    if (cam.alpha < 0.999f) {
+    if (cam.alpha < 0.999f && !capturing_) {
         const int w = GetScreenWidth(), h = GetScreenHeight();
         if (!hudRt_.id || hudRt_.texture.width != w || hudRt_.texture.height != h) {
             if (hudRt_.id) UnloadRenderTexture(hudRt_);
@@ -909,16 +909,46 @@ void PlayState::psychDraw() {
     auto marker = [&](const scene::Sprite& m) {
         if (hudPass && &m == sc.hudMarker.get()) drawHudLayer();
     };
-    renderer_.drawCamera(sc, scene::Cam::Game, marker, builtin);
-    renderer_.drawEffects(sc.camGame);
+    // One camera; with shaders (ShaderFilter) it is drawn to a texture first.
+    auto pass = [&](scene::Cam which, scene::Camera& cam, bool isHud) {
+        if (cam.filters.empty() || !cam.visible) {
+            hudPass = isHud;
+            renderer_.drawCamera(sc, which, marker, builtin);
+            hudPass = false;
+            renderer_.drawEffects(cam);
+            return;
+        }
+        gfx::endCanvas();
+        const int sw = GetScreenWidth(), sh = GetScreenHeight();
+        const float s = std::min(float(sw) / gfx::W, float(sh) / gfx::H);
+        const int rw = std::max(1, int(gfx::W * s)), rh = std::max(1, int(gfx::H * s));
+        if (!camRt_.id || camRt_.texture.width != rw || camRt_.texture.height != rh) {
+            if (camRt_.id) UnloadRenderTexture(camRt_);
+            camRt_ = LoadRenderTexture(rw, rh);
+        }
+        BeginTextureMode(camRt_);
+        ClearBackground(BLANK);
+        gfx::setRenderTargetSize(rw, rh);
+        gfx::beginCanvas();
+        capturing_ = true;
+        hudPass = isHud;
+        renderer_.drawCamera(sc, which, marker, builtin);
+        hudPass = false;
+        renderer_.drawEffects(cam);
+        capturing_ = false;
+        gfx::endCanvas();
+        gfx::setRenderTargetSize(0, 0);
+        EndTextureMode();
+        renderer_.drawFiltered(sc, cam.filters, camRt_, Rectangle{(sw - rw) * 0.5f, (sh - rh) * 0.5f, float(rw), float(rh)});
+        gfx::beginCanvas();
+    };
+    pass(scene::Cam::Game, sc.camGame, false);
     if (minePulse_ > 0) DrawRectangleRec({0, 0, gfx::W, gfx::H}, gfx::fade(Color{200, 0, 30, 255}, minePulse_ * 0.35f));
-    hudPass = true;
-    renderer_.drawCamera(sc, scene::Cam::Hud, marker, builtin);
-    hudPass = false;
-    renderer_.drawEffects(sc.camHud);
-    renderer_.drawCamera(sc, scene::Cam::Other, marker, builtin);
-    renderer_.drawEffects(sc.camOther);
+    pass(scene::Cam::Hud, sc.camHud, true);
+    pass(scene::Cam::Other, sc.camOther, false);
     gfx::endCanvas();
+    for (const std::string& e : renderer_.errors) debugPrint(e, 0xFFFF6060);
+    renderer_.errors.clear();
 }
 
 // ------------------------------------------------------------------ sound --

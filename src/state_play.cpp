@@ -43,6 +43,7 @@ PlayState::~PlayState() {
     scripts_.reset();
     releaseAudio();
     if (hudRt_.id && IsWindowReady()) UnloadRenderTexture(hudRt_);
+    if (camRt_.id && IsWindowReady()) UnloadRenderTexture(camRt_);
 }
 
 void PlayState::enter() {

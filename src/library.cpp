@@ -386,6 +386,8 @@ void Library::scanMods(const std::string& modsDirS) {
             for (size_t i = before; i < songs_.size(); ++i) {
                 SongEntry& e = songs_[i];
                 e.assetRoots = assetRoots;
+                // Ids follow the folder (display names can repeat between mods).
+                e.id = "custom:" + m.folder + "/" + songPathName(e.songKey) + (e.autoChart ? "~auto" : "");
                 if (ri > 0) e.id += "~" + std::to_string(ri);
                 if (!e.autoChart) charted.insert(fuzzyKey(e.songKey));
                 if (!e.autoChart && e.inst.empty()) {
@@ -505,8 +507,10 @@ void Library::scanMods(const std::string& modsDirS) {
         for (auto& [name, dir] : audioOnly) {
             if (charted.count(fuzzyKey(name))) continue;
             scanSongFolder(pathStr(dir), pathStr(dir), source, pathStr(dir.parent_path().parent_path()) + "/");
-            if (!songs_.empty() && songs_.back().songKey == name)
+            if (!songs_.empty() && songs_.back().songKey == name) {
                 songs_.back().assetRoots = assetRootsOf(dir.parent_path().parent_path());
+                songs_.back().id = "custom:" + m.folder + "/" + songPathName(name) + "~auto";
+            }
             charted.insert(fuzzyKey(name));
         }
     }

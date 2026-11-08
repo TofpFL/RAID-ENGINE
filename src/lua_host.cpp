@@ -1060,6 +1060,129 @@ int l_runHaxeCode(lua_State* L) {
     return 1;
 }
 
+// ------------------------------------------------------------------ shaders --
+
+bool loadShaderSource(lua_State* L, const std::string& name) {
+    scene::Scene& sc = SC(L);
+    if (name.empty()) return false;
+    if (sc.shaderSources.count(name)) return true;
+    scene::ShaderSource src;
+    const std::string frag = sc.files.find("shaders/" + name + ".frag");
+    const std::string vert = sc.files.find("shaders/" + name + ".vert");
+    if (frag.empty() && vert.empty()) {
+        warn(L, "shader not found: " + name);
+        return false;
+    }
+    if (!frag.empty()) scene::readFile(frag, src.frag);
+    if (!vert.empty()) scene::readFile(vert, src.vert);
+    sc.shaderSources[name] = std::move(src);
+    return true;
+}
+
+int l_initLuaShader(lua_State* L) { return retBool(L, loadShaderSource(L, str(L, 1))); }
+
+scene::ShaderInstance* shaderOf(lua_State* L, int i) {
+    Sprite* s = obj(L, str(L, i));
+    return s && s->shader ? s->shader.get() : nullptr;
+}
+
+int l_setSpriteShader(lua_State* L) {
+    Sprite* s = obj(L, str(L, 1));
+    const std::string name = str(L, 2);
+    if (!s || !loadShaderSource(L, name)) return retBool(L, false);
+    s->shader = std::make_shared<scene::ShaderInstance>();
+    s->shader->name = name;
+    return retBool(L, true);
+}
+
+int l_removeSpriteShader(lua_State* L) {
+    Sprite* s = obj(L, str(L, 1));
+    if (!s) return retBool(L, false);
+    s->shader.reset();
+    return retBool(L, true);
+}
+
+std::vector<float> floatList(lua_State* L, int i) {
+    std::vector<float> out;
+    if (lua_istable(L, i)) {
+        const lua_Integer n = luaL_len(L, i);
+        for (lua_Integer k = 1; k <= n; ++k) {
+            lua_geti(L, i, k);
+            out.push_back(float(lua_isboolean(L, -1) ? lua_toboolean(L, -1) : lua_tonumber(L, -1)));
+            lua_pop(L, 1);
+        }
+    }
+    return out;
+}
+
+int l_setShaderFloat(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) sh->floats[str(L, 2)] = {float(num(L, 3))};
+    return retBool(L, true);
+}
+int l_setShaderFloatArray(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) sh->floats[str(L, 2)] = floatList(L, 3);
+    return retBool(L, true);
+}
+int l_setShaderInt(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) sh->ints[str(L, 2)] = {int(num(L, 3))};
+    return retBool(L, true);
+}
+int l_setShaderIntArray(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) {
+        std::vector<int> v;
+        for (float f : floatList(L, 3)) v.push_back(int(f));
+        sh->ints[str(L, 2)] = v;
+    }
+    return retBool(L, true);
+}
+int l_setShaderBool(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) sh->ints[str(L, 2)] = {boolean(L, 3) ? 1 : 0};
+    return retBool(L, true);
+}
+int l_setShaderSampler2D(lua_State* L) {
+    if (auto* sh = shaderOf(L, 1)) sh->samplers[str(L, 2)] = str(L, 3);
+    return retBool(L, true);
+}
+int pushNumList(lua_State* L, const std::vector<float>& v, bool asBool) {
+    lua_newtable(L);
+    for (size_t k = 0; k < v.size(); ++k) {
+        if (asBool) lua_pushboolean(L, v[k] != 0);
+        else push(L, Value(double(v[k])));
+        lua_rawseti(L, -2, lua_Integer(k + 1));
+    }
+    return 1;
+}
+int l_getShaderFloat(lua_State* L) {
+    auto* sh = shaderOf(L, 1);
+    if (!sh) { lua_pushnil(L); return 1; }
+    auto it = sh->floats.find(str(L, 2));
+    if (it == sh->floats.end() || it->second.empty()) { lua_pushnil(L); return 1; }
+    return retNum(L, it->second[0]);
+}
+int l_getShaderFloatArray(lua_State* L) {
+    auto* sh = shaderOf(L, 1);
+    if (!sh) { lua_pushnil(L); return 1; }
+    auto it = sh->floats.find(str(L, 2));
+    if (it == sh->floats.end()) { lua_pushnil(L); return 1; }
+    return pushNumList(L, it->second, false);
+}
+int intUniform(lua_State* L, bool asBool, bool array) {
+    auto* sh = shaderOf(L, 1);
+    if (!sh) { lua_pushnil(L); return 1; }
+    auto it = sh->ints.find(str(L, 2));
+    if (it == sh->ints.end() || it->second.empty()) { lua_pushnil(L); return 1; }
+    if (array) {
+        std::vector<float> f(it->second.begin(), it->second.end());
+        return pushNumList(L, f, asBool);
+    }
+    if (asBool) return retBool(L, it->second[0] != 0);
+    return retNum(L, it->second[0]);
+}
+int l_getShaderInt(lua_State* L) { return intUniform(L, false, false); }
+int l_getShaderIntArray(lua_State* L) { return intUniform(L, false, true); }
+int l_getShaderBool(lua_State* L) { return intUniform(L, true, false); }
+int l_getShaderBoolArray(lua_State* L) { return intUniform(L, true, true); }
+
 // ----------------------------------------------------------- script control --
 
 int l_getRunningScripts(lua_State* L);
@@ -1246,12 +1369,13 @@ const Fn kFunctions[] = {
     {"callScript", l_callScript}, {"setOnLuas", l_setOnLuas}, {"setOnScripts", l_setOnLuas},
     {"addLuaScript", l_addLuaScript}, {"removeLuaScript", l_removeLuaScript}, {"isRunning", l_isRunning},
     {"getGlobalFromScript", l_getGlobalFromScript}, {"setGlobalFromScript", l_setGlobalFromScript},
-    // Shaders, Haxe code, Discord and custom substates are not available here.
-    {"initLuaShader", l_stubFalse}, {"setSpriteShader", l_stubFalse}, {"removeSpriteShader", l_stubFalse},
-    {"setShaderFloat", l_stubNil}, {"setShaderFloatArray", l_stubNil}, {"setShaderInt", l_stubNil},
-    {"setShaderIntArray", l_stubNil}, {"setShaderBool", l_stubNil}, {"setShaderBoolArray", l_stubNil},
-    {"setShaderSampler2D", l_stubNil}, {"getShaderFloat", l_stubZero}, {"getShaderInt", l_stubZero},
-    {"getShaderBool", l_stubFalse}, {"createRuntimeShader", l_stubFalse}, {"addGlitchEffect", l_stubNil},
+    // Discord presence has no meaning here; shaders are drawn by the renderer.
+    {"initLuaShader", l_initLuaShader}, {"setSpriteShader", l_setSpriteShader}, {"removeSpriteShader", l_removeSpriteShader},
+    {"setShaderFloat", l_setShaderFloat}, {"setShaderFloatArray", l_setShaderFloatArray}, {"setShaderInt", l_setShaderInt},
+    {"setShaderIntArray", l_setShaderIntArray}, {"setShaderBool", l_setShaderBool}, {"setShaderBoolArray", l_setShaderIntArray},
+    {"setShaderSampler2D", l_setShaderSampler2D}, {"getShaderFloat", l_getShaderFloat}, {"getShaderInt", l_getShaderInt},
+    {"getShaderBool", l_getShaderBool}, {"getShaderFloatArray", l_getShaderFloatArray}, {"getShaderIntArray", l_getShaderIntArray},
+    {"getShaderBoolArray", l_getShaderBoolArray}, {"createRuntimeShader", l_initLuaShader}, {"addGlitchEffect", l_stubNil},
     {"runHaxeCode", l_runHaxeCode}, {"runHaxeFunction", l_runHaxeCode}, {"addHaxeLibrary", l_stubNil},
     {"changePresence", l_stubNil}, {"changeDiscordPresence", l_stubNil}, {"changeDiscordClientID", l_stubNil},
     {"openCustomSubstate", l_stubNil}, {"closeCustomSubstate", l_stubNil}, {"insertToCustomSubstate", l_stubFalse},

@@ -65,6 +65,7 @@ add_library(gh_core STATIC
   src/chart.cpp
   src/chart_stream.cpp
   src/basegame.cpp
+  src/shader_glsl.cpp
   src/session.cpp
   src/synth.cpp
   src/composer.cpp

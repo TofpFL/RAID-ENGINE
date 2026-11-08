@@ -66,6 +66,19 @@ private:
 };
 
 enum class Cam : uint8_t { Game = 0, Hud = 1, Other = 2 };
+
+// A shader on a sprite or a camera. Like Psych's FlxRuntimeShader, every
+// sprite gets its own instance (its own uniform values) of a named source.
+struct ShaderInstance {
+    std::string name;
+    std::map<std::string, std::vector<float>, std::less<>> floats;
+    std::map<std::string, std::vector<int>, std::less<>> ints;  // ints and bools
+    std::map<std::string, std::string, std::less<>> samplers;   // image keys
+};
+using ShaderPtr = std::shared_ptr<ShaderInstance>;
+struct ShaderSource {
+    std::string frag, vert;
+};
 enum class Kind : uint8_t { Sprite, Text, Character, Marker };
 
 struct Anim {
@@ -102,6 +115,7 @@ public:
     Cam cam = Cam::Game;
     int blend = 0;  // 0 normal, 1 add, 2 multiply, 3 screen, 4 subtract
     bool inScene = false;
+    ShaderPtr shader;
 
     std::vector<Anim> anims;
     int cur = -1, animFrame = 0;
@@ -167,6 +181,7 @@ struct Camera {
     float fadeDur = 0, fadeTime = 0, fadeAlpha = 0;
     bool fadeIn = false;
     uint32_t bgColor = 0;
+    std::vector<ShaderPtr> filters;  // camera shaders (ShaderFilter), applied in order
     void update(double dt, unsigned seed);
     bool get(std::string_view field, Value& out) const;
     bool set(std::string_view field, const Value& v);
@@ -230,6 +245,7 @@ public:
     std::vector<Completion> completions;  // consumed by the script host
     psych::StageDef stage;
     std::map<std::string, Value, std::less<>> vars;  // setVar/getVar
+    std::map<std::string, ShaderSource, std::less<>> shaderSources;  // initLuaShader
     double now = 0;
     unsigned frameSeed = 1;
 

@@ -132,8 +132,14 @@ void shutdown() {
 
 // ---------------------------------------------------------------- canvas --
 
+static int g_targetW = 0, g_targetH = 0;
+void setRenderTargetSize(int w, int h) {
+    g_targetW = w;
+    g_targetH = h;
+}
+
 Camera2D screenCamera(float zoom, Vector2 focus, float rotationDeg) {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
+    const float sw = float(g_targetW > 0 ? g_targetW : GetScreenWidth()), sh = float(g_targetH > 0 ? g_targetH : GetScreenHeight());
     const float s = std::min(sw / W, sh / H);
     Camera2D cam{};
     cam.offset = {(sw - W * s) * 0.5f + s * W * 0.5f, (sh - H * s) * 0.5f + s * H * 0.5f};
