@@ -48,7 +48,7 @@ tap_wait() {  # x, y, pattern, seconds
   [ "$(seen "screen ")" -eq "$screens" ] || fail "the game opened another screen instead of logging '$3'"
   echo "note: tapping again ($3)"
   tap "$1" "$2"
-  wait_log "$3" "$4"
+  wait_quiet "$3" "$4" $((before + 1)) || fail "the game did not log '$3'"
 }
 
 # Right after boot Android is still starting every app's boot receivers;
@@ -143,7 +143,8 @@ adb logcat -d -s GodsHand:I | grep "paused at" | tail -n1 | grep -qE ": [1-9][0-
 shot 7-lanes
 
 adb logcat -d > "$out/logcat.txt"
-if grep -qE "FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT" "$out/logcat.txt"; then fail "crash in the log"; fi
-if grep -q "Failed to open file" "$out/logcat.txt"; then fail "a file could not be opened"; fi
+# Only the game's own lines count: other apps on the emulator log their own errors.
+if grep -A2 -E "FATAL EXCEPTION|Fatal signal" "$out/logcat.txt" | grep -q "godshand"; then fail "the game crashed"; fi
+if grep -qE " raylib *: FILEIO: .*Failed to open file" "$out/logcat.txt"; then fail "the game could not open a file"; fi
 grep -E " (GodsHand|raylib) *:" "$out/logcat.txt" | tail -40
 echo "Android smoke test passed"
