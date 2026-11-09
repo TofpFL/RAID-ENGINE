@@ -627,6 +627,113 @@ void testShaderTranslation() {
     PCHECK(out.find("uniform float iTime;") != std::string::npos);
 }
 
+void testHScript() {
+    scene::Scene sc;
+    sc.keys = 4;
+    sc.strums.resize(8);
+    sc.bf = std::make_shared<scene::Character>();
+    sc.bf->kind = scene::Kind::Character;
+    sc.bf->name = "bf";
+    sc.gfMarker = std::make_shared<scene::Sprite>();
+    sc.gfMarker->kind = scene::Kind::Marker;
+    sc.order = {sc.gfMarker, sc.bf};
+    StubGame game;
+    ScriptHost host(sc, game);
+    host.callBudget = 0.5;
+    host.loadBudget = 0.5;
+
+    // Language: closures, interpolation, loops, switch, maps, arrow functions, try/catch.
+    hx::Interp ip(sc, game, &host, host.hxShared);
+    hx::Value r;
+    std::string err;
+    PCHECK(ip.run(R"HX(
+        var total = 0;
+        for (i in 0...5) total += i;
+        var arr = [3, 1, 2];
+        arr.sort((a, b) -> a - b);
+        var m = ["a" => 1, "b" => 2];
+        var sum = 0;
+        for (k => v in m) sum += v;
+        function fib(n:Int):Int { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        var counter = function() { var c = 0; return function() { return ++c; }; }();
+        counter(); counter();
+        var kind = switch (total) { case 10: 'ten'; default: 'other'; };
+        var caught = '';
+        try { throw 'boom'; } catch (e:Dynamic) { caught = e; }
+        var obj = {name: 'bf', hp: 2};
+        obj.hp -= 0.5;
+        var s = 'total=$total arr=${arr.join(",")} sum=$sum fib=${fib(10)} c=${counter()} $kind $caught ${obj.hp}';
+        s;
+    )HX", "lang", r, err));
+    if (!err.empty()) std::printf("  %s\n", err.c_str());
+    PCHECK(r.str() == "total=10 arr=1,2,3 sum=3 fib=55 c=3 ten boom 1.5");
+    PCHECK(!ip.run("var x = ;", "bad", r, err) && err.find("line 1") != std::string::npos);
+    err.clear();
+    PCHECK(!ip.run("while (true) {}", "loop", r, err) && err.find("too long") != std::string::npos);
+
+    // Lua -> runHaxeCode -> scene, shaders on cameras, tweens with callbacks, setVar.
+    PCHECK(host.loadString("hx.lua", R"LUA(
+        function onCreate()
+            makeLuaSprite('bg', '', 0, 0)
+            makeGraphic('bg', 10, 10, 'FFFFFF')
+            addLuaSprite('bg', false)
+            local x = runHaxeCode([[
+                var bg = game.getLuaObject('bg');
+                bg.x = 50;
+                bg.scale.set(2, 3);
+                var s = new FlxRuntimeShader('#pragma header
+void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }');
+                s.setFloat('amount', 0.5);
+                game.camGame.setFilters([new ShaderFilter(s)]);
+                var spr = new FlxSprite(5, 6);
+                spr.makeGraphic(4, 4, FlxColor.RED);
+                add(spr);
+                setVar('fromHaxe', 42);
+                FlxTween.tween(bg, {y: 100}, 0.5, {ease: FlxEase.quadOut, onComplete: function(t) { setVar('tweenDone', true); }});
+                new FlxTimer().start(0.2, function(t) { game.boyfriend.x = 777; });
+                createCallback('haxeDouble', function(n) { return n * 2; });
+                function later(a, b) { return a + b; }
+                return bg.x + bg.scale.y;
+            ]])
+            debugPrint('x=' .. x)
+            debugPrint('fn=' .. runHaxeFunction('later', {20, 22}))
+            debugPrint('cb=' .. haxeDouble(21))
+            debugPrint('var=' .. getVar('fromHaxe'))
+        end)LUA"));
+    for (const std::string& e : host.errors) std::printf("  %s\n", e.c_str());
+    PCHECK(host.errors.empty());
+    PCHECK(game.prints.size() >= 4);
+    if (game.prints.size() >= 4) {
+        PCHECK(game.prints[0] == "x=53");
+        PCHECK(game.prints[1] == "fn=42");
+        PCHECK(game.prints[2] == "cb=42");
+        PCHECK(game.prints[3] == "var=42");
+    }
+    PCHECK(pnear(sc.objects["bg"]->scaleX, 2) && pnear(sc.objects["bg"]->scaleY, 3));
+    PCHECK(sc.camGame.filters.size() == 1 && pnear(sc.camGame.filters[0]->floats["amount"][0], 0.5));
+    PCHECK(sc.order.back()->graphic && sc.order.back()->graphic->solid && pnear(sc.order.back()->x, 5));
+    for (int i = 0; i < 8; ++i) {
+        host.call("onUpdate", {scene::Value(0.1)});
+        sc.update(0.1, 100, false);
+        host.dispatchCompletions();
+    }
+    PCHECK(pnear(sc.objects["bg"]->y, 100) && scene::toBool(sc.vars["tweenDone"]) && pnear(sc.bf->x, 777));
+
+    // .hx script files with Psych callbacks; Function_Stop works like in Lua.
+    PCHECK(host.loadHx("scripts/test.hx", R"HX(
+        import flixel.FlxG;
+        var hits:Array<Int> = [];
+        function onCreate() { setVar('hxCreated', true); }
+        function goodNoteHit(note) { hits.push(note.noteData); setVar('lastHit', note.noteData + (note.mustPress ? 10 : 0)); }
+        function onStartCountdown() { return Function_Stop; }
+    )HX"));
+    PCHECK(scene::toBool(sc.vars["hxCreated"]));
+    host.call("goodNoteHit", {scene::Value(7.0), scene::Value(2.0), scene::Value(std::string()), scene::Value(false)});
+    PCHECK(pnear(scene::toNum(sc.vars["lastHit"]), 12));
+    PCHECK(host.call("onStartCountdown") == ScriptHost::kStop);
+    PCHECK(host.errors.empty());
+}
+
 void testZipInstall() {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "gh_zip_test";
@@ -665,6 +772,7 @@ void runExtraTests(bool audio) {
     testZipInstall();
     testChartStreaming();
     testShaderTranslation();
+    testHScript();
     if (!audio) return;
     // AutoChart on the built-in songs: report the tempo it hears.
     for (const SongDef& def : builtinSongs()) {

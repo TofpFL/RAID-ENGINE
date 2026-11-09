@@ -4,11 +4,13 @@
 // runaway loops are stopped after a time budget.
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "hscript.hpp"
 #include "scene.hpp"
 
 namespace gh {
@@ -80,8 +82,26 @@ public:
     ScriptGame& game;
     std::vector<std::unique_ptr<Script>>& scriptList() { return scripts_; }
 
+    // HScript (.hx files and runHaxeCode)
+    std::shared_ptr<hx::Shared> hxShared;
+    bool loadHx(const std::string& path, const std::string& code, bool callCreate = true);
+    // createCallback / createGlobalCallback: a Lua function that calls into HScript.
+    void registerHxCallback(const std::string& name, hx::Interp* owner, const hx::Value& fn);
+    struct HxCallback {
+        hx::Interp* owner = nullptr;
+        hx::Value fn;
+    };
+    std::map<std::string, HxCallback> hxCallbacks;
+    void reportError(const std::string& msg);
+
 private:
+    struct HxScript {
+        std::unique_ptr<hx::Interp> ip;
+        std::string path, name;
+        bool closed = false;
+    };
     std::vector<std::unique_ptr<Script>> scripts_;
+    std::vector<std::unique_ptr<HxScript>> hxScripts_;
     std::vector<std::pair<std::string, scene::Value>> globals_;
 };
 

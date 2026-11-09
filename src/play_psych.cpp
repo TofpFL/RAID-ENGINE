@@ -26,14 +26,27 @@ std::string pathStr(const fs::path& p) {
     return std::string(s.begin(), s.end());
 }
 
+bool isScriptFile(const std::string& name) {
+    return endsWithI(name, ".lua") || endsWithI(name, ".hx") || endsWithI(name, ".hscript") || endsWithI(name, ".hxs");
+}
+
+// Lua and HScript files directly in dir.
 std::vector<std::string> luaFilesIn(const std::string& dir) {
     std::vector<std::string> out;
     std::error_code ec;
     for (fs::directory_iterator it(toPath(dir), ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
-        if (it->is_regular_file(e2) && endsWithI(pathStr(it->path().filename()), ".lua")) out.push_back(pathStr(it->path()));
+        if (it->is_regular_file(e2) && isScriptFile(pathStr(it->path().filename()))) out.push_back(pathStr(it->path()));
     }
     std::sort(out.begin(), out.end());
+    return out;
+}
+
+// stages/foo.lua and stages/foo.hx, whichever exist.
+std::vector<std::string> scriptsNamed(const scene::Files& files, const std::string& base) {
+    std::vector<std::string> out;
+    for (const char* ext : {".lua", ".hx", ".hscript", ".hxs"})
+        if (std::string f = files.find(base + ext); !f.empty()) out.push_back(f);
     return out;
 }
 
@@ -341,22 +354,25 @@ void PlayState::loadScripts(bool afterHud) {
     scene::Scene& sc = *scene_;
     ScriptHost& h = *scripts_;
     if (!afterHud) {
-        for (const std::string& f : sc.files.list("scripts", ".lua")) h.load(f);
-        if (std::string f = sc.files.find("stages/" + stageName_ + ".lua"); !f.empty()) h.load(f);
-        else if (baseStage_) h.loadString("stages/" + stageName_ + ".lua", basegame::stageLua(stageName_));
+        for (const char* ext : {".lua", ".hx", ".hscript", ".hxs"})
+            for (const std::string& f : sc.files.list("scripts", ext)) h.load(f);
+        const auto stageScripts = scriptsNamed(sc.files, "stages/" + stageName_);
+        for (const std::string& f : stageScripts) h.load(f);
+        if (stageScripts.empty() && baseStage_) h.loadString("stages/" + stageName_ + ".lua", basegame::stageLua(stageName_));
         for (Character* c : {sc.gf.get(), sc.dad.get(), sc.bf.get()}) {
             if (!c || c->builtin) continue;
-            if (std::string f = sc.files.find("characters/" + c->name + ".lua"); !f.empty() && !h.isLoaded(f)) h.load(f);
+            for (const std::string& f : scriptsNamed(sc.files, "characters/" + c->name))
+                if (!h.isLoaded(f)) h.load(f);
         }
         return;
     }
     for (size_t i = 1; i < chart_.noteTypes.size(); ++i)
-        if (std::string f = sc.files.find("custom_notetypes/" + chart_.noteTypes[i] + ".lua"); !f.empty()) h.load(f);
+        for (const std::string& f : scriptsNamed(sc.files, "custom_notetypes/" + chart_.noteTypes[i])) h.load(f);
     std::vector<std::string> seen;
     for (const psych::ChartEvent& e : chart_.events) {
         if (std::find(seen.begin(), seen.end(), e.name) != seen.end()) continue;
         seen.push_back(e.name);
-        if (std::string f = sc.files.find("custom_events/" + e.name + ".lua"); !f.empty()) h.load(f);
+        for (const std::string& f : scriptsNamed(sc.files, "custom_events/" + e.name)) h.load(f);
     }
     for (const std::string& f : luaFilesIn(entry_->dataDir)) h.load(f);
 }
@@ -385,10 +401,11 @@ bool PlayState::setupPsych() {
     std::string gfName = chart_.gf.empty() ? "gf" : chart_.gf;
     if (chart_.gf.empty() && baseStageAvailable(stageName)) gfName = basegame::gfForStage(stageName);
     const std::string stageJson = sc.files.find("stages/" + stageName + ".json");
-    const std::string stageLua = sc.files.find("stages/" + stageName + ".lua");
+    std::string stageLua = sc.files.find("stages/" + stageName + ".lua");
+    if (stageLua.empty()) stageLua = sc.files.find("stages/" + stageName + ".hx");
     baseStage_ = stageLua.empty() && basegame::stageLua(stageName) && baseStageAvailable(stageName);
     bool any = !stageJson.empty() || !stageLua.empty() || baseStage_ || !luaFilesIn(entry_->dataDir).empty() ||
-               !sc.files.list("scripts", ".lua").empty();
+               !sc.files.list("scripts", ".lua").empty() || !sc.files.list("scripts", ".hx").empty();
     for (const std::string& n : {playerName, oppName, gfName}) {
         if (!sc.files.find("characters/" + n + ".json").empty()) any = true;
         if (const char* base = basegame::characterJson(n)) {

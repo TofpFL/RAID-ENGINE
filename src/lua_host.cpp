@@ -28,7 +28,9 @@ struct ScriptHost::Script {
     double callStart = 0, budget = 2.0;
     std::string lastErr;
     double lastErrAt = -10;
+    std::unique_ptr<hx::Interp> hx;  // runHaxeCode
     ~Script() {
+        hx.reset();
         if (L) lua_close(L);
     }
 };
@@ -1048,17 +1050,8 @@ int l_callMethod(lua_State* L) {
 
 int l_stubFalse(lua_State* L) { return retBool(L, false); }
 int l_stubNil(lua_State* L) { (void)L; return 0; }
-int l_stubZero(lua_State* L) { return retNum(L, 0); }
 
-int l_runHaxeCode(lua_State* L) {
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        warn(L, "runHaxeCode is not supported");
-    }
-    lua_pushnil(L);
-    return 1;
-}
+int l_stubTrue(lua_State* L) { return retBool(L, true); }
 
 // ------------------------------------------------------------------ shaders --
 
@@ -1182,6 +1175,135 @@ int l_getShaderInt(lua_State* L) { return intUniform(L, false, false); }
 int l_getShaderIntArray(lua_State* L) { return intUniform(L, false, true); }
 int l_getShaderBool(lua_State* L) { return intUniform(L, true, false); }
 int l_getShaderBoolArray(lua_State* L) { return intUniform(L, true, true); }
+
+// ------------------------------------------------------------------ HScript --
+
+hx::Value luaToHx(lua_State* L, int i, int depth = 0) {
+    switch (lua_type(L, i)) {
+        case LUA_TBOOLEAN: return hx::Value(bool(lua_toboolean(L, i)));
+        case LUA_TNUMBER: return hx::Value(double(lua_tonumber(L, i)));
+        case LUA_TSTRING: return hx::Value(str(L, i));
+        case LUA_TTABLE: {
+            if (depth > 8) return hx::Value();
+            i = lua_absindex(L, i);
+            const lua_Integer n = luaL_len(L, i);
+            if (n > 0) {
+                std::vector<hx::Value> arr;
+                for (lua_Integer k = 1; k <= n; ++k) {
+                    lua_geti(L, i, k);
+                    arr.push_back(luaToHx(L, -1, depth + 1));
+                    lua_pop(L, 1);
+                }
+                return hx::Value::array(arr);
+            }
+            hx::ValueMap m;
+            lua_pushnil(L);
+            while (lua_next(L, i)) {
+                if (lua_type(L, -2) == LUA_TSTRING) m[lua_tostring(L, -2)] = luaToHx(L, -1, depth + 1);
+                lua_pop(L, 1);
+            }
+            return hx::Value::object(m);
+        }
+        default: return hx::Value();
+    }
+}
+
+void pushHx(lua_State* L, const hx::Value& v, int depth = 0) {
+    switch (v.t) {
+        case hx::T::Bool: lua_pushboolean(L, v.b); return;
+        case hx::T::Num: push(L, Value(v.n)); return;
+        case hx::T::Str: lua_pushlstring(L, v.s.data(), v.s.size()); return;
+        case hx::T::Array:
+            if (depth > 8) break;
+            lua_newtable(L);
+            for (size_t k = 0; k < v.arr->size(); ++k) {
+                pushHx(L, (*v.arr)[k], depth + 1);
+                lua_rawseti(L, -2, lua_Integer(k + 1));
+            }
+            return;
+        case hx::T::Object:
+        case hx::T::Map:
+            if (depth > 8) break;
+            lua_newtable(L);
+            for (auto& kv : *v.map) {
+                pushHx(L, kv.second, depth + 1);
+                lua_setfield(L, -2, kv.first.c_str());
+            }
+            return;
+        default: break;
+    }
+    lua_pushnil(L);
+}
+
+hx::Interp& hxOf(lua_State* L) {
+    ScriptHost::Script& s = S(L);
+    if (!s.hx) {
+        s.hx = std::make_unique<hx::Interp>(SC(L), G(L), &H(L), H(L).hxShared);
+        s.hx->scriptName = s.name + " (haxe)";
+    }
+    s.hx->budget = s.budget;
+    return *s.hx;
+}
+
+std::vector<hx::Value> hxArgs(lua_State* L, int i) {
+    std::vector<hx::Value> out;
+    if (!lua_istable(L, i)) return out;
+    hx::Value v = luaToHx(L, i);
+    if (v.t == hx::T::Array) out = *v.arr;
+    return out;
+}
+
+int l_runHaxeCode(lua_State* L) {
+    hx::Interp& ip = hxOf(L);
+    if (lua_istable(L, 2)) {
+        lua_pushnil(L);
+        while (lua_next(L, 2)) {
+            if (lua_type(L, -2) == LUA_TSTRING) ip.setGlobal(lua_tostring(L, -2), luaToHx(L, -1));
+            lua_pop(L, 1);
+        }
+    }
+    hx::Value result;
+    std::string err;
+    if (!ip.run(str(L, 1), S(L).name + " (runHaxeCode)", result, err)) {
+        H(L).reportError(err);
+        lua_pushnil(L);
+        return 1;
+    }
+    if (!lua_isnoneornil(L, 3) && !str(L, 3).empty()) {
+        if (!ip.call(str(L, 3), hxArgs(L, 4), result, err)) H(L).reportError(err);
+    }
+    pushHx(L, result);
+    return 1;
+}
+
+int l_runHaxeFunction(lua_State* L) {
+    hx::Interp& ip = hxOf(L);
+    hx::Value result;
+    std::string err;
+    bool found = false;
+    if (!ip.call(str(L, 1), hxArgs(L, 2), result, err, &found)) H(L).reportError(err);
+    else if (!found) warn(L, "runHaxeFunction: no function " + str(L, 1));
+    pushHx(L, result);
+    return 1;
+}
+
+int l_hxCallback(lua_State* L) {
+    const std::string name = lua_tostring(L, lua_upvalueindex(1));
+    auto it = H(L).hxCallbacks.find(name);
+    if (it == H(L).hxCallbacks.end() || !it->second.owner) { lua_pushnil(L); return 1; }
+    std::vector<hx::Value> args;
+    for (int i = 1; i <= lua_gettop(L); ++i) args.push_back(luaToHx(L, i));
+    hx::Value r;
+    try {
+        r = it->second.owner->callValue(it->second.fn, args);
+    } catch (std::exception& e) {
+        H(L).reportError(name + ": " + e.what());
+    } catch (...) {
+        H(L).reportError(name + ": uncaught throw");
+    }
+    pushHx(L, r);
+    return 1;
+}
 
 // ----------------------------------------------------------- script control --
 
@@ -1376,7 +1498,7 @@ const Fn kFunctions[] = {
     {"setShaderSampler2D", l_setShaderSampler2D}, {"getShaderFloat", l_getShaderFloat}, {"getShaderInt", l_getShaderInt},
     {"getShaderBool", l_getShaderBool}, {"getShaderFloatArray", l_getShaderFloatArray}, {"getShaderIntArray", l_getShaderIntArray},
     {"getShaderBoolArray", l_getShaderBoolArray}, {"createRuntimeShader", l_initLuaShader}, {"addGlitchEffect", l_stubNil},
-    {"runHaxeCode", l_runHaxeCode}, {"runHaxeFunction", l_runHaxeCode}, {"addHaxeLibrary", l_stubNil},
+    {"runHaxeCode", l_runHaxeCode}, {"runHaxeFunction", l_runHaxeFunction}, {"addHaxeLibrary", l_stubTrue},
     {"changePresence", l_stubNil}, {"changeDiscordPresence", l_stubNil}, {"changeDiscordClientID", l_stubNil},
     {"openCustomSubstate", l_stubNil}, {"closeCustomSubstate", l_stubNil}, {"insertToCustomSubstate", l_stubFalse},
     {"getModSetting", l_stubNil}, {"callMethod", l_callMethod}, {"callMethodFromClass", l_stubNil}, {"loadSong", l_stubNil}, {"setOnHScript", l_stubNil},
@@ -1512,14 +1634,16 @@ int l_setGlobalFromScript(lua_State* L) {
     return 0;
 }
 
-void reportError(ScriptHost::Script& s, const std::string& msg) {
+void reportScriptError(ScriptHost::Script& s, const std::string& msg) {
     ScriptHost& h = *s.host;
-    h.errors.push_back(msg);
     const double t = nowSec();
-    if (msg == s.lastErr && t - s.lastErrAt < 2.0) return;
+    if (msg == s.lastErr && t - s.lastErrAt < 2.0) {
+        h.errors.push_back(msg);
+        return;
+    }
     s.lastErr = msg;
     s.lastErrAt = t;
-    h.game.debugPrint(msg, 0xFFFF4050);
+    h.reportError(msg);
 }
 
 bool callOne(ScriptHost::Script& s, const char* fn, const std::vector<Value>& args, Value* result, std::string* err) {
@@ -1542,7 +1666,7 @@ bool callOne(ScriptHost::Script& s, const char* fn, const std::vector<Value>& ar
         const size_t tb = msg.find("\nstack traceback:");
         if (tb != std::string::npos) msg.resize(tb);
         msg = s.name + " (" + fn + "): " + msg;
-        reportError(s, msg);
+        reportScriptError(s, msg);
         if (err) *err = msg;
         lua_settop(L, top);
         return false;
@@ -1555,9 +1679,53 @@ bool callOne(ScriptHost::Script& s, const char* fn, const std::vector<Value>& ar
 
 // ----------------------------------------------------------------- ScriptHost --
 
-ScriptHost::ScriptHost(scene::Scene& sc, ScriptGame& g) : scene(sc), game(g) {}
+ScriptHost::ScriptHost(scene::Scene& sc, ScriptGame& g) : scene(sc), game(g) {
+    hxShared = std::make_shared<hx::Shared>();
+    hxShared->report = [this](const std::string& m) { reportError(m); };
+}
 ScriptHost::~ScriptHost() {
+    hxCallbacks.clear();
+    hxScripts_.clear();
     scripts_.clear();
+}
+
+void ScriptHost::reportError(const std::string& msg) {
+    errors.push_back(msg);
+    game.debugPrint(msg, 0xFFFF4050);
+}
+
+bool ScriptHost::loadHx(const std::string& path, const std::string& code, bool callCreate) {
+    auto s = std::make_unique<HxScript>();
+    s->path = path;
+    const size_t slash = path.find_last_of("/\\");
+    s->name = slash == std::string::npos ? path : path.substr(slash + 1);
+    s->ip = std::make_unique<hx::Interp>(scene, game, this, hxShared);
+    s->ip->scriptName = s->name;
+    s->ip->budget = loadBudget;
+    HxScript* raw = s.get();
+    hxScripts_.push_back(std::move(s));
+    hx::Value result;
+    std::string err;
+    if (!raw->ip->run(code, raw->name, result, err)) {
+        reportError(err);
+        raw->closed = true;
+        return false;
+    }
+    raw->ip->budget = callBudget;
+    if (callCreate) {
+        if (!raw->ip->call("onCreate", {}, result, err)) reportError(err);
+    }
+    return true;
+}
+
+void ScriptHost::registerHxCallback(const std::string& name, hx::Interp* owner, const hx::Value& fn) {
+    hxCallbacks[name] = {owner, fn};
+    for (auto& s : scripts_) {
+        if (s->closed || !s->L) continue;
+        lua_pushstring(s->L, name.c_str());
+        lua_pushcclosure(s->L, l_hxCallback, 1);
+        lua_setglobal(s->L, name.c_str());
+    }
 }
 
 size_t ScriptHost::count() const {
@@ -1570,6 +1738,8 @@ size_t ScriptHost::count() const {
 bool ScriptHost::isLoaded(const std::string& path) const {
     for (const auto& s : scripts_)
         if (s->path == path && !s->closed) return true;
+    for (const auto& s : hxScripts_)
+        if (s->path == path && !s->closed) return true;
     return false;
 }
 
@@ -1579,6 +1749,7 @@ bool ScriptHost::load(const std::string& path, bool callCreate) {
         errors.push_back("cannot read " + path);
         return false;
     }
+    if (endsWithI(path, ".hx") || endsWithI(path, ".hscript") || endsWithI(path, ".hxs")) return loadHx(path, code, callCreate);
     return loadString(path, code, callCreate);
 }
 
@@ -1656,7 +1827,7 @@ bool ScriptHost::loadString(const std::string& path, const std::string& code, bo
         std::string msg = lua_tostring(L, -1) ? lua_tostring(L, -1) : "error";
         const size_t tb = msg.find("\nstack traceback:");
         if (tb != std::string::npos) msg.resize(tb);
-        reportError(*raw, raw->name + ": " + msg);
+        reportScriptError(*raw, raw->name + ": " + msg);
         raw->closed = true;
         lua_settop(L, 0);
         return false;
@@ -1670,6 +1841,7 @@ bool ScriptHost::loadString(const std::string& path, const std::string& code, bo
 
 std::string ScriptHost::call(const char* fn, const std::vector<Value>& args) {
     std::string result;
+    if (!std::strcmp(fn, "onUpdate") && !args.empty()) hxShared->update(scene::toNum(args[0]));
     const size_t n = scripts_.size();
     for (size_t i = 0; i < n && i < scripts_.size(); ++i) {
         Script& s = *scripts_[i];
@@ -1679,6 +1851,39 @@ std::string ScriptHost::call(const char* fn, const std::vector<Value>& args) {
         if (const std::string* rs = std::get_if<std::string>(&r)) {
             if (*rs == kStopLua) break;
             if (*rs != kContinue && !rs->empty()) result = *rs;
+        }
+    }
+    if (hxScripts_.empty()) return result;
+    // HScript gets note objects where Lua gets (id, direction, type, sustain).
+    const bool noteCb = !std::strcmp(fn, "goodNoteHit") || !std::strcmp(fn, "opponentNoteHit") || !std::strcmp(fn, "noteMiss") ||
+                        !std::strcmp(fn, "goodNoteHitPre") || !std::strcmp(fn, "opponentNoteHitPre") || !std::strcmp(fn, "noteMissPre");
+    std::vector<hx::Value> hargs;
+    if (noteCb && args.size() >= 3) {
+        auto h = std::make_shared<hx::Host>();
+        h->kind = "noteobj";
+        h->extra = hx::Value::object({{"ID", hx::Interp::fromScene(args[0])},
+                                      {"noteData", hx::Interp::fromScene(args[1])},
+                                      {"noteType", hx::Interp::fromScene(args[2])},
+                                      {"isSustainNote", args.size() > 3 ? hx::Interp::fromScene(args[3]) : hx::Value(false)},
+                                      {"mustPress", hx::Value(std::strcmp(fn, "opponentNoteHit") != 0 && std::strcmp(fn, "opponentNoteHitPre") != 0)},
+                                      {"strumTime", hx::Value(game.songPosition())},
+                                      {"hitByOpponent", hx::Value(!std::strcmp(fn, "opponentNoteHit"))}});
+        hargs.push_back(hx::Value::hostOf(h));
+    } else {
+        for (const Value& a : args) hargs.push_back(hx::Interp::fromScene(a));
+    }
+    for (size_t i = 0; i < hxScripts_.size(); ++i) {
+        HxScript& s = *hxScripts_[i];
+        if (s.closed || !s.ip->hasFunction(fn)) continue;
+        hx::Value r;
+        std::string err;
+        if (!s.ip->call(fn, hargs, r, err)) {
+            reportError(err);
+            continue;
+        }
+        if (r.t == hx::T::Str) {
+            if (r.s == kStopLua) break;
+            if (r.s != kContinue && !r.s.empty()) result = r.s;
         }
     }
     return result;
@@ -1701,6 +1906,10 @@ void ScriptHost::dispatchCompletions() {
         std::vector<scene::Completion> list;
         list.swap(scene.completions);
         for (const scene::Completion& c : list) {
+            if (c.tag.rfind("__hx", 0) == 0) {  // HScript tween/timer callbacks
+                hxShared->complete(c.tag, c.timer ? c.left : 0);
+                continue;
+            }
             if (c.timer) {
                 call("onTimerCompleted", {Value(c.tag), Value(double(c.loops)), Value(double(c.left))});
             } else if (!c.fn.empty()) {
