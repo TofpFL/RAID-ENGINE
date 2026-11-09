@@ -1,0 +1,36 @@
+name: Mod packs
+
+# Publishes the mods listed in modpacks/packs.txt as zips on the "mods"
+# release. Packs that are already there are skipped, so the Git LFS content is
+# downloaded only once per mod.
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths: ["modpacks/**", ".github/workflows/mod-packs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mod-packs
+  cancel-in-progress: false
+
+jobs:
+  packs:
+    name: Build and upload mod packs
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h .
+      - name: Build and publish missing packs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          git lfs install
+          python3 modpacks/build_packs.py

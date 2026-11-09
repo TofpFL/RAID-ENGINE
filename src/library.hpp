@@ -1,0 +1,89 @@
+// Song library: the built-in songs plus any FNF-style songs found in the
+// `songs/` and `mods/` folders next to the executable.
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "audio.hpp"
+#include "chart.hpp"
+#include "composer.hpp"
+
+namespace gh {
+
+struct SongEntry {
+    std::string id;        // stable key for scores
+    std::string title;
+    std::string subtitle;  // blurb or source pack
+    bool builtin = false;
+    const SongDef* def = nullptr;
+    std::vector<std::string> diffs;
+    std::vector<std::string> chartPaths;  // parallel to diffs (custom songs)
+    std::string metaPath;                 // V-Slice metadata
+    std::string inst, voices, voicesP, voicesO;
+    uint32_t color = 0xB48CDC;
+    std::string opponent;  // built-in character id, "" for custom
+    // Psych content: the mod folder (or the song folder for songs/), the
+    // chart folder and the song's folder name (data/<songKey>/).
+    std::string modRoot, dataDir, songKey;
+    // Every folder the scene looks in for images, characters, stages and
+    // sounds: the content root plus, for full game builds, assets/shared,
+    // assets/week1 and so on.
+    std::vector<std::string> assetRoots;
+    bool autoChart = false;  // no chart: generated from the audio
+    bool noAudio = false;    // chart found but no audio for it anywhere
+};
+
+struct Prepared {
+    bool ok = false;
+    std::string error;
+    Chart chart;
+    PcmPtr inst, voiceP, voiceO;
+};
+
+class Library {
+public:
+    // progress: shown while .zip mods unpack (they can take a while).
+    void scan(const std::string& baseDir, const std::function<void(const std::string&, double)>& progress = {});
+    const std::vector<SongEntry>& songs() const { return songs_; }
+    const SongEntry* find(const std::string& id) const;
+    int customCount() const { return customCount_; }
+    const std::string& report() const { return report_; }
+    const std::string& installReport() const { return installReport_; }
+
+    // Heavy work (decoding, composing, parsing). Thread-safe.
+    Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror);
+    PcmPtr preview(const SongEntry& e);  // instrumental only, for menus
+
+    // Menu music (composed once).
+    PcmPtr menuMusic(double* loopSec);
+
+private:
+    struct BuiltinAudio {
+        std::string id;
+        std::shared_ptr<Composition> comp;
+        PcmPtr inst, vp, vo;
+    };
+    BuiltinAudio builtinAudio(const SongDef& def);
+    void scanSongFolder(const std::string& dir, const std::string& audioDir, const std::string& source,
+                        const std::string& modRoot);
+    void scanMods(const std::string& modsDir);
+
+    std::vector<SongEntry> songs_;
+    int customCount_ = 0;
+    std::string report_, installReport_;
+    std::mutex mtx_;
+    BuiltinAudio cache_;
+    std::mutex customMtx_;
+    std::string customCacheKey_, customInstKey_;
+    PcmPtr customInst_, customVoices_, customVp_, customVo_;
+    std::mutex menuMtx_;
+    PcmPtr menu_;
+    double menuLoop_ = 0;
+};
+
+}  // namespace gh
