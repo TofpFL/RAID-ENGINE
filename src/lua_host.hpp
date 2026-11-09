@@ -48,6 +48,12 @@ public:
     virtual bool startVideo(const std::string& name, bool canSkip) { return false; }
     virtual bool makeVideoSprite(const std::string& tag, const std::string& name, float x, float y, const std::string& cam,
                                  bool loop) { return false; }
+    virtual std::string saveDir() { return ""; }  // where initSaveData files live ("" = memory only)
+    virtual void precacheCharacter(const std::string& name, int who) {}
+    virtual void openCustomSubstate(const std::string& name, bool pauseGame) {}
+    virtual void closeCustomSubstate() {}
+    virtual void insertToCustomSubstate(const std::string& tag) {}
+    virtual bool loadSong(const std::string& name, int difficulty) { return false; }
     virtual void healthBarColors(uint32_t left, uint32_t right) {}
     virtual void timeBarColors(uint32_t left, uint32_t right) {}
 };
@@ -97,6 +103,7 @@ public:
     };
     std::map<std::string, HxCallback> hxCallbacks;
     void reportError(const std::string& msg);
+    void setHxGlobal(const std::string& name, const hx::Value& v);  // setOnHScript
 
 private:
     struct HxScript {

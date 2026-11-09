@@ -59,6 +59,12 @@ public:
     void healthBarColors(uint32_t left, uint32_t right) override;
     void timeBarColors(uint32_t left, uint32_t right) override;
     bool startVideo(const std::string& name, bool canSkip) override;
+    std::string saveDir() override;
+    void precacheCharacter(const std::string& name, int who) override;
+    void openCustomSubstate(const std::string& name, bool pauseGame) override;
+    void closeCustomSubstate() override;
+    void insertToCustomSubstate(const std::string& tag) override;
+    bool loadSong(const std::string& name, int difficulty) override;
     bool makeVideoSprite(const std::string& tag, const std::string& name, float x, float y, const std::string& cam,
                          bool loop) override;
 
@@ -137,11 +143,20 @@ private:
         Color c;
         double t;
     };
+    // Tagged script sounds stream (they can seek, report time and change pitch).
     struct ScriptSound {
-        Sound snd{};
-        double volume = 1, fadeFrom = 0, fadeTo = 0, fadeDur = 0, fadeT = 0;
+        Music mus{};
+        std::shared_ptr<std::vector<unsigned char>> bytes;  // the stream reads from here
+        double volume = 1, fadeFrom = 0, fadeTo = 0, fadeDur = 0, fadeT = 0, pitch = 1;
         bool loop = false, fading = false, paused = false, started = false, finishedSent = false;
     };
+    struct Substate {
+        std::string name;
+        bool active = false, pausesGame = false;
+        std::vector<std::string> members;  // objects inserted into it
+    };
+    Substate substate_;
+    Color timeBarFill_{0, 0, 0, 0}, timeBarBack_{0, 0, 0, 0};
     struct NoteVis {
         float alpha = 1, offsetX = 0, offsetY = 0, multSpeed = 1;
         bool visible = true;

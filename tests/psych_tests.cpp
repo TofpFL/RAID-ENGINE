@@ -50,6 +50,8 @@ struct StubGame : ScriptGame {
     }
     void debugPrint(const std::string& t, uint32_t) override { prints.push_back(t); }
     void startCountdown() override { ++countdownStarts; }
+    std::string saveRoot;
+    std::string saveDir() override { return saveRoot; }
 };
 
 const char* kAtlas = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
@@ -734,6 +736,57 @@ void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }')
     PCHECK(host.errors.empty());
 }
 
+void testLuaExtras() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "gh_lua_extras";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "mod" / "data", ec);
+    std::ofstream(root / "mod" / "data" / "settings.json")
+        << R"([{"name": "Flashy", "save": "flashy", "type": "bool", "value": true}, {"name": "Speed", "save": "spd", "type": "float", "value": 1.5}])";
+    for (int run = 0; run < 2; ++run) {
+        scene::Scene sc;
+        sc.files.setRoots({(root / "mod").string() + "/"});
+        sc.keys = 4;
+        sc.strums.resize(8);
+        StubGame game;
+        game.saveRoot = (root / "saves").string() + "/";
+        ScriptHost host(sc, game);
+        PCHECK(host.loadString("extras.lua", R"LUA(
+            function onCreate()
+                initSaveData('progress', 'mymod/')
+                local n = getDataFromSave('progress', 'plays', 0)
+                setDataFromSave('progress', 'plays', n + 1)
+                setDataFromSave('progress', 'name', 'bf "the" kid')
+                flushSaveData('progress')
+                debugPrint('plays=' .. getDataFromSave('progress', 'plays') .. ' ' .. getDataFromSave('progress', 'name'))
+                makeLuaSprite('a', '', 0, 0); makeGraphic('a', 100, 100, 'FFFFFF')
+                makeLuaSprite('b', '', 50, 50); makeGraphic('b', 100, 100, 'FFFFFF')
+                makeLuaSprite('c', '', 500, 0); makeGraphic('c', 10, 10, 'FFFFFF')
+                debugPrint(tostring(objectsOverlap('a', 'b')) .. ' ' .. tostring(objectsOverlap('a', 'c')))
+                debugPrint(tostring(getModSetting('flashy')) .. ' ' .. getModSetting('spd'))
+                callMethod('camGame.flash', {'FF0000', 0.5})
+                debugPrint(callMethodFromClass('flixel.math.FlxMath', 'lerp', {0, 10, 0.25}))
+                removeFromGroup('playerStrums', 1)
+                setOnHScript('fromLua', 7)
+                debugPrint(runHaxeCode('return fromLua * 6;'))
+            end)LUA"));
+        for (const std::string& e : host.errors) std::printf("  %s\n", e.c_str());
+        PCHECK(host.errors.empty());
+        PCHECK(game.prints.size() >= 5);
+        if (game.prints.size() >= 5) {
+            PCHECK(game.prints[0] == (run == 0 ? "plays=1 bf \"the\" kid" : "plays=2 bf \"the\" kid"));
+            PCHECK(game.prints[1] == "true false");
+            PCHECK(game.prints[2] == "true 1.5");
+            PCHECK(game.prints[3] == "2.5");
+        }
+        PCHECK(sc.camGame.flashTime > 0 && (sc.camGame.flashColor & 0xFFFFFF) == 0xFF0000);
+        PCHECK(!sc.strums[5].visible);
+    }
+    PCHECK(fs::exists(root / "saves" / "mymod" / "progress.json"));
+    fs::remove_all(root, ec);
+}
+
 void testZipInstall() {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "gh_zip_test";
@@ -773,6 +826,7 @@ void runExtraTests(bool audio) {
     testChartStreaming();
     testShaderTranslation();
     testHScript();
+    testLuaExtras();
     if (!audio) return;
     // AutoChart on the built-in songs: report the tempo it hears.
     for (const SongDef& def : builtinSongs()) {

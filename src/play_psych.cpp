@@ -978,22 +978,22 @@ void PlayState::updateSounds(double dt) {
             s.fadeT += dt;
             const double k = s.fadeDur > 0 ? std::min(1.0, s.fadeT / s.fadeDur) : 1.0;
             s.volume = s.fadeFrom + (s.fadeTo - s.fadeFrom) * k;
-            SetSoundVolume(s.snd, float(s.volume));
+            SetMusicVolume(s.mus, float(s.volume));
             if (k >= 1.0) s.fading = false;
         }
-        if (s.started && !s.paused && !IsSoundPlaying(s.snd) && phase_ != Phase::Paused) {
-            if (s.loop) PlaySound(s.snd);
-            else if (!s.finishedSent) {
-                s.finishedSent = true;
-                if (scripts_ && kv.first.rfind("__", 0) != 0) scripts_->call("onSoundFinished", {Value(kv.first)});
-            }
+        if (!s.started || s.paused || phase_ == Phase::Paused) continue;
+        UpdateMusicStream(s.mus);
+        if (!IsMusicStreamPlaying(s.mus) && !s.finishedSent) {
+            s.finishedSent = true;
+            s.started = false;
+            if (scripts_ && kv.first.rfind("__", 0) != 0) scripts_->call("onSoundFinished", {Value(kv.first)});
         }
     }
 }
 
 void PlayState::releaseAudio() {
     if (!IsAudioDeviceReady()) return;
-    for (auto& kv : sounds_) UnloadSound(kv.second.snd);
+    for (auto& kv : sounds_) UnloadMusicStream(kv.second.mus);
     sounds_.clear();
     for (Sound& s : oneShots_) UnloadSound(s);
     oneShots_.clear();
@@ -1009,20 +1009,25 @@ void PlayState::playSound(const std::string& file, double volume, const std::str
     for (const char* ext : {".ogg", ".mp3", ".wav"}) {
         path = scene_->files.find(std::string(music ? "music/" : "sounds/") + file + ext);
         if (path.empty()) path = scene_->files.find(file + ext);
+        if (path.empty() && endsWithI(file, ext)) path = scene_->files.find(file);
         if (!path.empty()) break;
     }
     if (path.empty()) { debugPrint("sound not found: " + file, 0xFFFFD040); return; }
-    std::string bytes;
-    if (!scene::readFile(path, bytes)) return;
+    auto bytes = std::make_shared<std::vector<unsigned char>>();
+    {
+        std::string data;
+        if (!scene::readFile(path, data)) return;
+        bytes->assign(data.begin(), data.end());
+    }
     const std::string ext = toLower(path.substr(path.find_last_of('.')));
-    Wave w = LoadWaveFromMemory(ext.c_str(), reinterpret_cast<const unsigned char*>(bytes.data()), int(bytes.size()));
-    if (!w.data) return;
-    Sound snd = LoadSoundFromWave(w);
-    UnloadWave(w);
     const float vol = float(clampv(volume, 0.0, 1.0)) * app().settings.sfxVol;
-    SetSoundVolume(snd, vol);
-    PlaySound(snd);
     if (tag.empty()) {
+        Wave w = LoadWaveFromMemory(ext.c_str(), bytes->data(), int(bytes->size()));
+        if (!w.data) return;
+        Sound snd = LoadSoundFromWave(w);
+        UnloadWave(w);
+        SetSoundVolume(snd, vol);
+        PlaySound(snd);
         oneShots_.push_back(snd);
         if (oneShots_.size() > 48) {  // keep memory bounded
             UnloadSound(oneShots_.front());
@@ -1030,9 +1035,15 @@ void PlayState::playSound(const std::string& file, double volume, const std::str
         }
         return;
     }
-    if (auto it = sounds_.find(tag); it != sounds_.end()) UnloadSound(it->second.snd);
+    Music mus = LoadMusicStreamFromMemory(ext.c_str(), bytes->data(), int(bytes->size()));
+    if (!IsMusicValid(mus)) return;
+    if (auto it = sounds_.find(tag); it != sounds_.end()) UnloadMusicStream(it->second.mus);
+    mus.looping = loop;
+    SetMusicVolume(mus, vol);
+    PlayMusicStream(mus);
     ScriptSound s;
-    s.snd = snd;
+    s.mus = mus;
+    s.bytes = bytes;
     s.volume = vol;
     s.loop = loop;
     s.started = true;
@@ -1043,13 +1054,20 @@ void PlayState::soundCommand(const std::string& tag, std::string_view cmd, doubl
     auto it = sounds_.find(tag);
     if (it == sounds_.end()) return;
     ScriptSound& s = it->second;
-    if (cmd == "stop") { StopSound(s.snd); s.started = false; }
-    else if (cmd == "pause") { PauseSound(s.snd); s.paused = true; }
-    else if (cmd == "resume") { ResumeSound(s.snd); s.paused = false; }
-    else if (cmd == "volume") { s.volume = clampv(a, 0.0, 1.0); SetSoundVolume(s.snd, float(s.volume)); }
+    if (cmd == "stop") { StopMusicStream(s.mus); s.started = false; s.finishedSent = true; }
+    else if (cmd == "pause") { PauseMusicStream(s.mus); s.paused = true; }
+    else if (cmd == "resume") { ResumeMusicStream(s.mus); s.paused = false; }
+    else if (cmd == "volume") { s.volume = clampv(a, 0.0, 1.0); SetMusicVolume(s.mus, float(s.volume)); }
     else if (cmd == "fadeIn") { s.fading = true; s.fadeT = 0; s.fadeDur = a; s.fadeFrom = b; s.fadeTo = c; }
     else if (cmd == "fadeOut") { s.fading = true; s.fadeT = 0; s.fadeDur = a; s.fadeFrom = s.volume; s.fadeTo = b; }
     else if (cmd == "fadeCancel") s.fading = false;
+    else if (cmd == "time") {
+        const float len = GetMusicTimeLength(s.mus);
+        SeekMusicStream(s.mus, float(clampv(a / 1000.0, 0.0, double(std::max(0.0f, len - 0.01f)))));
+    } else if (cmd == "pitch") {
+        s.pitch = clampv(a, 0.05, 8.0);
+        SetMusicPitch(s.mus, float(s.pitch));
+    }
 }
 
 double PlayState::soundQuery(const std::string& tag, std::string_view what) {
@@ -1057,6 +1075,9 @@ double PlayState::soundQuery(const std::string& tag, std::string_view what) {
     if (what == "exists") return it != sounds_.end() ? 1 : 0;
     if (it == sounds_.end()) return 0;
     if (what == "volume") return it->second.volume;
+    if (what == "time") return double(GetMusicTimePlayed(it->second.mus)) * 1000.0;
+    if (what == "length") return double(GetMusicTimeLength(it->second.mus)) * 1000.0;
+    if (what == "pitch") return it->second.pitch;
     return 0;
 }
 
@@ -1489,6 +1510,77 @@ void PlayState::healthBarColors(uint32_t left, uint32_t right) {
     rightColor_ = Color{(unsigned char)(right >> 16), (unsigned char)(right >> 8), (unsigned char)right, 255};
 }
 
-void PlayState::timeBarColors(uint32_t, uint32_t) {}
+void PlayState::timeBarColors(uint32_t left, uint32_t right) {
+    timeBarFill_ = Color{(unsigned char)(left >> 16), (unsigned char)(left >> 8), (unsigned char)left, 255};
+    timeBarBack_ = Color{(unsigned char)(right >> 16), (unsigned char)(right >> 8), (unsigned char)right, 255};
+}
+
+std::string PlayState::saveDir() { return app().base + "saves/"; }
+
+void PlayState::precacheCharacter(const std::string& name, int who) {
+    if (!psych_ || name.empty()) return;
+    who = clampv(who, 0, 2);
+    const std::string key = std::to_string(who) + ":" + name;
+    if (!charCache_.count(key)) charCache_[key] = makeCharacter(name, who == 0, who);
+    renderer_.preload(*scene_);
+}
+
+void PlayState::openCustomSubstate(const std::string& name, bool pauseGame) {
+    if (substate_.active) closeCustomSubstate();
+    substate_ = Substate{};
+    substate_.name = name;
+    substate_.active = true;
+    substate_.pausesGame = pauseGame;
+    if (pauseGame) {
+        app().mixer.pause();
+        for (auto& kv : sounds_)
+            if (kv.second.started && !kv.second.paused) PauseMusicStream(kv.second.mus);
+    }
+    if (scripts_) {
+        scripts_->call("onCustomSubstateCreate", {Value(name)});
+        scripts_->call("onCustomSubstateCreatePost", {Value(name)});
+    }
+}
+
+void PlayState::closeCustomSubstate() {
+    if (!substate_.active) return;
+    const Substate st = substate_;
+    substate_.active = false;
+    for (const std::string& tag : st.members)
+        if (auto it = scene_->objects.find(tag); it != scene_->objects.end()) scene_->remove(it->second);
+    if (st.pausesGame && phase_ == Phase::Playing) {
+        app().mixer.resume();
+        for (auto& kv : sounds_)
+            if (kv.second.started && !kv.second.paused) ResumeMusicStream(kv.second.mus);
+    }
+    if (scripts_) scripts_->call("onCustomSubstateDestroy", {Value(st.name)});
+}
+
+void PlayState::insertToCustomSubstate(const std::string& tag) {
+    if (!substate_.active) return;
+    auto it = scene_->objects.find(tag);
+    if (it == scene_->objects.end()) return;
+    it->second->cam = scene::Cam::Other;
+    scene_->addFront(it->second);
+    substate_.members.push_back(tag);
+}
+
+bool PlayState::loadSong(const std::string& name, int difficulty) {
+    // Another song of the same mod (Psych's loadSong).
+    App& a = app();
+    const std::string want = songPathName(name.empty() ? entry_->songKey : name);
+    for (const SongEntry& e : a.library.songs()) {
+        if (e.builtin || songPathName(e.songKey) != want || e.modRoot != entry_->modRoot) continue;
+        PlayRequest r = req_;
+        r.songId = e.id;
+        if (difficulty >= 0 && difficulty < int(e.diffs.size())) r.diff = e.diffs[size_t(difficulty)];
+        else if (std::find(e.diffs.begin(), e.diffs.end(), r.diff) == e.diffs.end() && !e.diffs.empty()) r.diff = e.diffs[0];
+        a.mixer.stop();
+        a.change(makePlay(r));
+        return true;
+    }
+    debugPrint("loadSong: no song " + name + " in this mod", 0xFFFFD040);
+    return false;
+}
 
 }  // namespace gh

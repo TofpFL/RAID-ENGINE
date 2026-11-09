@@ -5,9 +5,11 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <random>
 
 #include "common.hpp"
+#include "json.hpp"
 #include "lauxlib.h"
 #include "lua.h"
 #include "lualib.h"
@@ -1008,9 +1010,100 @@ int l_changeCharacter(lua_State* L) {
     return 0;
 }
 
-// Save data lives in the shared variable map for the session.
-int l_initSaveData(lua_State* L) { (void)L; return 0; }
-int l_flushSaveData(lua_State* L) { (void)L; return 0; }
+// Save data: kept in the variable map, stored as JSON in saves/<folder>/<name>.json.
+std::string safeName(std::string s) {
+    for (char& c : s)
+        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == ' ')) c = '_';
+    while (s.find("..") != std::string::npos) s.replace(s.find(".."), 2, "_");
+    return s;
+}
+
+std::map<std::string, std::string>& saveFiles() {  // save name -> file path
+    static std::map<std::string, std::string> m;
+    return m;
+}
+
+std::string jsonQuote(const std::string& v) {
+    std::string o = "\"";
+    for (char c : v) {
+        if (c == '"' || c == '\\') o += '\\', o += c;
+        else if (c == '\n') o += "\\n";
+        else if ((unsigned char)c < 0x20) o += ' ';
+        else o += c;
+    }
+    return o + "\"";
+}
+
+int l_initSaveData(lua_State* L) {
+    const std::string name = str(L, 1);
+    std::string folder = str(L, 2, "psychenginemods/");
+    const std::string dir = G(L).saveDir();
+    if (name.empty() || dir.empty()) return 0;
+    std::string sub;
+    for (size_t p = 0; p < folder.size();) {
+        size_t e = folder.find_first_of("/\\", p);
+        if (e == std::string::npos) e = folder.size();
+        const std::string part = safeName(folder.substr(p, e - p));
+        if (!part.empty() && part != "_") sub += part + "/";
+        p = e + 1;
+    }
+    const std::string path = dir + sub + safeName(name) + ".json";
+    saveFiles()[name] = path;
+    std::string text;
+    if (!scene::readFile(path, text)) return 0;
+    json::Document d;
+    if (!d.parse(text) || d.root().type != json::Type::Object) return 0;
+    for (size_t i = 0; i < d.size(d.root()); ++i) {
+        const json::Value& v = d.valAt(d.root(), i);
+        Value val;
+        if (v.type == json::Type::Number) val = v.num;
+        else if (v.type == json::Type::Bool) val = v.b;
+        else if (v.type == json::Type::String) val = std::string(d.str(v));
+        else continue;
+        const std::string key = "save:" + name + "." + std::string(d.keyAt(d.root(), i));
+        if (!SC(L).vars.count(key)) SC(L).vars[key] = val;
+    }
+    return 0;
+}
+
+int l_flushSaveData(lua_State* L) {
+    const std::string name = str(L, 1);
+    auto it = saveFiles().find(name);
+    if (it == saveFiles().end()) return 0;
+    const std::string prefix = "save:" + name + ".";
+    std::string out = "{";
+    bool first = true;
+    for (const auto& kv : SC(L).vars) {
+        if (kv.first.rfind(prefix, 0) != 0) continue;
+        const std::string field = kv.first.substr(prefix.size());
+        std::string v;
+        if (const double* d = std::get_if<double>(&kv.second)) v = scene::toStr(*d);
+        else if (const bool* b = std::get_if<bool>(&kv.second)) v = *b ? "true" : "false";
+        else if (const std::string* sv = std::get_if<std::string>(&kv.second)) v = jsonQuote(*sv);
+        else continue;
+        out += (first ? "\n  " : ",\n  ") + jsonQuote(field) + ": " + v;
+        first = false;
+    }
+    out += "\n}\n";
+    const std::string& path = it->second;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(std::u8string(path.begin(), path.end())).parent_path(), ec);
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(out.data(), 1, out.size(), f);
+        std::fclose(f);
+    }
+    return 0;
+}
+
+int l_eraseSaveData(lua_State* L) {
+    const std::string name = str(L, 1);
+    const std::string prefix = "save:" + name + ".";
+    auto& vars = SC(L).vars;
+    for (auto it = vars.begin(); it != vars.end();) it = it->first.rfind(prefix, 0) == 0 ? vars.erase(it) : std::next(it);
+    if (auto it = saveFiles().find(name); it != saveFiles().end()) std::remove(it->second.c_str());
+    return 0;
+}
+
 int l_setDataFromSave(lua_State* L) { SC(L).vars["save:" + str(L, 1) + "." + str(L, 2)] = toValue(L, 3); return 0; }
 int l_getDataFromSave(lua_State* L) {
     auto it = SC(L).vars.find("save:" + str(L, 1) + "." + str(L, 2));
@@ -1019,7 +1112,9 @@ int l_getDataFromSave(lua_State* L) {
     return 1;
 }
 
-// Psych 0.7.3 callMethod: only the common object methods.
+int bridgeCall(lua_State* L, const std::string& root, const std::string& objPath, const std::string& method, int argIdx);
+
+// Psych 0.7.3 callMethod: sprites here, anything else through the HScript bridge.
 int l_callMethod(lua_State* L) {
     const std::string full = str(L, 1);
     const size_t dot = full.rfind('.');
@@ -1032,7 +1127,7 @@ int l_callMethod(lua_State* L) {
         return out;
     }() : std::vector<Value>{};
     Sprite* s = obj(L, objName);
-    if (!s) { lua_pushnil(L); return 1; }
+    if (!s) return bridgeCall(L, "game", objName, method, 2);  // cameras, groups, game...
     auto arg = [&](size_t i) { return i < args.size() ? args[i] : Value(); };
     Character* c = dynamic_cast<Character*>(s);
     if (method == "getAnimationName") return ret(L, Value(c && c->builtin ? c->lastAnim : s->curAnimName()));
@@ -1048,8 +1143,7 @@ int l_callMethod(lua_State* L) {
     if (method == "screenCenter") { s->screenCenter(true, true); return 0; }
     if (method == "kill") { s->visible = s->active = false; return 0; }
     if (method == "revive") { s->visible = s->active = true; return 0; }
-    lua_pushnil(L);
-    return 1;
+    return bridgeCall(L, "game", objName, method, 2);
 }
 
 int l_stubFalse(lua_State* L) { return retBool(L, false); }
@@ -1180,6 +1274,77 @@ int l_getShaderIntArray(lua_State* L) { return intUniform(L, false, true); }
 int l_getShaderBool(lua_State* L) { return intUniform(L, true, false); }
 int l_getShaderBoolArray(lua_State* L) { return intUniform(L, true, true); }
 
+// -------------------------------------------------------- remaining API ----
+
+int l_objectsOverlap(lua_State* L) {
+    Sprite* a = obj(L, str(L, 1));
+    Sprite* b = obj(L, str(L, 2));
+    if (!a || !b || !a->visible || !b->visible) return retBool(L, false);
+    const bool hit = a->x < b->x + b->width && b->x < a->x + a->width && a->y < b->y + b->height && b->y < a->y + a->height;
+    return retBool(L, hit);
+}
+
+int l_removeFromGroup(lua_State* L) {
+    const std::string group = str(L, 1);
+    const int index = int(num(L, 2));
+    if (isNoteGroup(group)) {
+        G(L).noteSet(group, index, "ignoreNote", true);
+        G(L).noteSet(group, index, "visible", false);
+    } else if (scene::Strum* st = SC(L).strumByGroup(group, index)) {
+        st->visible = false;
+    }
+    return 0;
+}
+
+int l_addCharacterToList(lua_State* L) {
+    const std::string type = toLower(str(L, 2, "boyfriend"));
+    const int who = type == "dad" || type == "opponent" || type == "1" ? 1 : type == "gf" || type == "girlfriend" || type == "2" ? 2 : 0;
+    G(L).precacheCharacter(str(L, 1), who);
+    return 0;
+}
+
+// Psych 0.7 mod settings: defaults from data/settings.json (no options menu here).
+int l_getModSetting(lua_State* L) {
+    const std::string tag = str(L, 1);
+    const std::string f = SC(L).files.find("data/settings.json");
+    std::string text;
+    if (f.empty() || !scene::readFile(f, text)) { lua_pushnil(L); return 1; }
+    json::Document d;
+    if (!d.parse(text) || d.root().type != json::Type::Array) { lua_pushnil(L); return 1; }
+    for (size_t i = 0; i < d.size(d.root()); ++i) {
+        const json::Value& e = d.at(d.root(), i);
+        if (d.strOr(d.get(e, "save"), "") != tag) continue;
+        const json::Value* v = d.get(e, "value");
+        if (!v) break;
+        if (v->type == json::Type::Number) return retNum(L, v->num);
+        if (v->type == json::Type::Bool) return retBool(L, v->b);
+        if (v->type == json::Type::String) return ret(L, Value(std::string(d.str(*v))));
+        if (v->type == json::Type::Array) {  // keybind: [key, gamepad button]
+            lua_newtable(L);
+            for (size_t k = 0; k < d.size(*v); ++k) {
+                const json::Value& x = d.at(*v, k);
+                if (x.type == json::Type::String) lua_pushstring(L, std::string(d.str(x)).c_str());
+                else lua_pushnumber(L, x.num);
+                lua_rawseti(L, -2, lua_Integer(k + 1));
+            }
+            return 1;
+        }
+        break;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+int l_openCustomSubstate(lua_State* L) { G(L).openCustomSubstate(str(L, 1), boolean(L, 2, false)); return 0; }
+int l_closeCustomSubstate(lua_State* L) { G(L).closeCustomSubstate(); return retBool(L, true); }
+int l_insertToCustomSubstate(lua_State* L) { G(L).insertToCustomSubstate(str(L, 1)); return retBool(L, true); }
+int l_loadSong(lua_State* L) {
+    G(L).loadSong(str(L, 1), lua_isnoneornil(L, 2) ? -1 : int(num(L, 2)));
+    return 0;
+}
+int l_setSoundPitch(lua_State* L) { G(L).soundCommand(str(L, 1), "pitch", num(L, 2, 1), 0, 0); return 0; }
+int l_getSoundPitch(lua_State* L) { return retNum(L, G(L).soundQuery(str(L, 1), "pitch")); }
+
 // ------------------------------------------------------------------ HScript --
 
 hx::Value luaToHx(lua_State* L, int i, int depth = 0) {
@@ -1309,6 +1474,49 @@ int l_hxCallback(lua_State* L) {
     return 1;
 }
 
+// callMethod / callMethodFromClass on anything the HScript bridge knows.
+hx::Value bridgeTarget(lua_State* L, hx::Interp& ip, const std::string& root, const std::string& path) {
+    hx::Value cur;
+    bool found = false;
+    cur = hx::globalLookup(ip, root, found);
+    size_t p = 0;
+    while (p < path.size() && cur.t == hx::T::Host) {
+        size_t e = path.find('.', p);
+        if (e == std::string::npos) e = path.size();
+        cur = hx::hostGet(ip, *cur.host, path.substr(p, e - p));
+        p = e + 1;
+    }
+    (void)L;
+    return cur;
+}
+
+int bridgeCall(lua_State* L, const std::string& root, const std::string& objPath, const std::string& method, int argIdx) {
+    hx::Interp& ip = hxOf(L);
+    std::vector<hx::Value> args = hxArgs(L, argIdx);
+    try {
+        hx::Value target = bridgeTarget(L, ip, root, objPath);
+        if (target.t != hx::T::Host) { lua_pushnil(L); return 1; }
+        pushHx(L, hx::hostCall(ip, *target.host, method, args));
+    } catch (std::exception& e) {
+        H(L).reportError(S(L).name + ": " + e.what());
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int l_callMethodFromClass(lua_State* L) {
+    std::string cls = str(L, 1);
+    if (const size_t dot = cls.rfind('.'); dot != std::string::npos) cls = cls.substr(dot + 1);
+    const std::string fn = str(L, 2);
+    const size_t dot = fn.rfind('.');
+    return bridgeCall(L, cls, dot == std::string::npos ? "" : fn.substr(0, dot), dot == std::string::npos ? fn : fn.substr(dot + 1), 3);
+}
+
+int l_setOnHScript(lua_State* L) {
+    H(L).setHxGlobal(str(L, 1), luaToHx(L, 2));
+    return 0;
+}
+
 // ----------------------------------------------------------- script control --
 
 int l_getRunningScripts(lua_State* L);
@@ -1420,7 +1628,7 @@ const Fn kFunctions[] = {
     {"getPropertyFromClass", l_getPropertyFromClass}, {"setPropertyFromClass", l_setPropertyFromClass},
     {"getPropertyLuaSprite", [](lua_State* L) { lua_pushstring(L, (str(L, 1) + "." + str(L, 2)).c_str()); lua_replace(L, 1); return l_getProperty(L); }},
     {"setPropertyLuaSprite", [](lua_State* L) { SC(L).setProp(str(L, 1) + "." + str(L, 2), toValue(L, 3)); return 0; }},
-    {"removeFromGroup", l_stubNil},
+    {"removeFromGroup", l_removeFromGroup},
     {"makeLuaSprite", l_makeLuaSprite}, {"makeAnimatedLuaSprite", l_makeAnimatedLuaSprite},
     {"makeGraphic", l_makeGraphic}, {"luaSpriteMakeGraphic", l_makeGraphic},
     {"loadGraphic", l_loadGraphic}, {"loadFrames", l_loadFrames},
@@ -1442,7 +1650,7 @@ const Fn kFunctions[] = {
     {"getCharacterX", l_getCharacterX}, {"getCharacterY", l_getCharacterY},
     {"setCharacterX", l_setCharacterX}, {"setCharacterY", l_setCharacterY},
     {"precacheImage", l_precacheImage}, {"precacheSound", l_stubNil}, {"precacheMusic", l_stubNil},
-    {"objectsOverlap", l_stubFalse},
+    {"objectsOverlap", l_objectsOverlap},
     {"makeLuaText", l_makeLuaText}, {"setTextString", l_setTextString}, {"setTextSize", l_setTextSize},
     {"setTextWidth", l_setTextWidth}, {"setTextBorder", l_setTextBorder}, {"setTextColor", l_setTextColor},
     {"setTextFont", l_setTextFont}, {"setTextItalic", l_setTextItalic}, {"setTextAlignment", l_setTextAlignment},
@@ -1488,8 +1696,8 @@ const Fn kFunctions[] = {
     {"setRatingPercent", l_setRatingPercent}, {"setRatingName", l_setRatingName}, {"setRatingFC", l_setRatingFC},
     {"endSong", l_endSong}, {"restartSong", l_restartSong}, {"exitSong", l_exitSong},
     {"startCountdown", l_startCountdown}, {"startVideo", l_startVideo}, {"makeVideoSprite", l_makeVideoSprite}, {"startDialogue", l_startDialogue},
-    {"addCharacterToList", l_stubNil}, {"changeCharacter", l_changeCharacter},
-    {"initSaveData", l_initSaveData}, {"flushSaveData", l_flushSaveData}, {"eraseSaveData", l_stubNil},
+    {"addCharacterToList", l_addCharacterToList}, {"changeCharacter", l_changeCharacter},
+    {"initSaveData", l_initSaveData}, {"flushSaveData", l_flushSaveData}, {"eraseSaveData", l_eraseSaveData},
     {"setDataFromSave", l_setDataFromSave}, {"getDataFromSave", l_getDataFromSave},
     {"getRunningScripts", l_getRunningScripts}, {"callOnLuas", l_callOnLuas}, {"callOnScripts", l_callOnLuas},
     {"callScript", l_callScript}, {"setOnLuas", l_setOnLuas}, {"setOnScripts", l_setOnLuas},
@@ -1504,8 +1712,9 @@ const Fn kFunctions[] = {
     {"getShaderBoolArray", l_getShaderBoolArray}, {"createRuntimeShader", l_initLuaShader}, {"addGlitchEffect", l_stubNil},
     {"runHaxeCode", l_runHaxeCode}, {"runHaxeFunction", l_runHaxeFunction}, {"addHaxeLibrary", l_stubTrue},
     {"changePresence", l_stubNil}, {"changeDiscordPresence", l_stubNil}, {"changeDiscordClientID", l_stubNil},
-    {"openCustomSubstate", l_stubNil}, {"closeCustomSubstate", l_stubNil}, {"insertToCustomSubstate", l_stubFalse},
-    {"getModSetting", l_stubNil}, {"callMethod", l_callMethod}, {"callMethodFromClass", l_stubNil}, {"loadSong", l_stubNil}, {"setOnHScript", l_stubNil},
+    {"openCustomSubstate", l_openCustomSubstate}, {"closeCustomSubstate", l_closeCustomSubstate}, {"insertToCustomSubstate", l_insertToCustomSubstate},
+    {"getModSetting", l_getModSetting}, {"callMethod", l_callMethod}, {"callMethodFromClass", l_callMethodFromClass}, {"loadSong", l_loadSong}, {"setOnHScript", l_setOnHScript},
+    {"setSoundPitch", l_setSoundPitch}, {"getSoundPitch", l_getSoundPitch},
     // Kade Engine modcharts
     {"setActorX", l_setActorX}, {"setActorY", l_setActorY}, {"setActorAngle", l_setActorAngle},
     {"setActorAlpha", l_setActorAlpha}, {"setActorScale", l_setActorScale}, {"setActorScaleXY", l_setActorScaleXY},
@@ -1691,6 +1900,13 @@ ScriptHost::~ScriptHost() {
     hxCallbacks.clear();
     hxScripts_.clear();
     scripts_.clear();
+}
+
+void ScriptHost::setHxGlobal(const std::string& name, const hx::Value& v) {
+    for (auto& s : hxScripts_)
+        if (!s->closed) s->ip->setGlobal(name, v);
+    for (auto& s : scripts_)
+        if (s->hx) s->hx->setGlobal(name, v);
 }
 
 void ScriptHost::reportError(const std::string& msg) {

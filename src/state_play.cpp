@@ -100,6 +100,19 @@ void PlayState::update(double dt) {
     if (phase_ == Phase::Paused) { updatePause(); return; }
     if (phase_ == Phase::Dead) { updateDead(); return; }
     if (psych_ && updateVideos(dt)) return;  // a cutscene holds the game
+    if (psych_ && substate_.active) {
+        const std::string name = substate_.name;
+        if (scripts_) scripts_->call("onCustomSubstateUpdate", {scene::Value(name), scene::Value(dt)});
+        if (substate_.active && substate_.pausesGame) {
+            scene_->update(dt, chart_.stepMs(std::max(0.0, songMs_)), false);  // tweens on its objects keep going
+            if (scripts_) {
+                scripts_->dispatchCompletions();
+                scripts_->call("onCustomSubstateUpdatePost", {scene::Value(name), scene::Value(dt)});
+            }
+            return;
+        }
+        if (scripts_) scripts_->call("onCustomSubstateUpdatePost", {scene::Value(name), scene::Value(dt)});
+    }
     if (phase_ == Phase::Waiting) {
         // A script stopped the countdown (cutscene, dialogue): keep scripts
         // running, start anyway if nothing resumes it.
@@ -619,7 +632,7 @@ void PlayState::pause() {
     pauseSel_ = 0;
     a.mixer.pause();
     for (auto& kv : sounds_)
-        if (IsSoundPlaying(kv.second.snd)) PauseSound(kv.second.snd);
+        if (kv.second.started && !kv.second.paused) PauseMusicStream(kv.second.mus);
     sfxPlay(Sfx::Scroll);
 }
 
@@ -627,7 +640,7 @@ void PlayState::resume() {
     App& a = app();
     a.mixer.resume();
     for (auto& kv : sounds_)
-        if (kv.second.started && !kv.second.paused) ResumeSound(kv.second.snd);
+        if (kv.second.started && !kv.second.paused) ResumeMusicStream(kv.second.mus);
     phase_ = Phase::Playing;
     a.input.clear();
     const auto lk = a.settings.laneKeys(chart_.keys);
@@ -944,8 +957,10 @@ void PlayState::drawHud() {
     if (hudShown("timeBar")) {
         const float ty = s.downscroll ? gfx::H - 26.0f : 12.0f;
         const float prog = float(clampv(songMs_ / std::max(1.0, chart_.lengthMs), 0.0, 1.0));
-        DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, Color{8, 4, 14, 200});
-        DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8, gfx::mix(leftColor_, WHITE, 0.3f));
+        // setTimeBarColors() overrides the theme colours.
+        DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200});
+        DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
+                             timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f));
         const double remain = std::max(0.0, (chart_.lengthMs - songMs_) / 1000.0 / rate_);
         if (hudShown("timeTxt"))
             gfx::text(FontId::Ui, chart_.title + "  -  " + req_.diff + "  -  " + fmtTime(remain), gfx::W / 2,
