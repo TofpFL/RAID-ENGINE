@@ -342,6 +342,7 @@ public:
             sfxPlay(Sfx::Confirm);
         }
         if (in.back()) { sfxPlay(Sfx::Cancel); a.change(makeMainMenu()); return; }
+        if (in.pressed(KEY_M)) { sfxPlay(Sfx::Confirm); a.change(makeModPacks()); return; }
         if ((in.pressed(KEY_SEVEN) || in.pressed(KEY_KP_7)) && n > 0) {  // chart editor, as in Psych
             const SongEntry* e = list_[size_t(sel)];
             if (!e->diffs.empty()) {
@@ -446,7 +447,7 @@ public:
             gfx::text(FontId::Ui, "Tip: drop FNF / Psych Engine songs into the 'songs' or 'mods' folder, then press R",
                       40, 640, 20, fade(kIvory, 0.65f));
         if (modsOpen_) drawMods();
-        hints("ENTER play   LEFT/RIGHT difficulty   TAB modifiers   7 chart editor   R rescan songs   ESC back");
+        hints("ENTER play   LEFT/RIGHT difficulty   TAB modifiers   7 chart editor   M mod packs   R rescan   ESC back");
         gfx::endCanvas();
     }
 

@@ -8,18 +8,8 @@
 #include <thread>
 
 #include "common.hpp"
+#include "process.hpp"
 
-#if defined(_WIN32)
-#define NOGDI
-#define NOUSER
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#undef DrawText
-#undef PlaySound
-#undef LoadImage
-#undef CloseWindow
-#undef ShowCursor
-#endif
 
 #define PL_MPEG_IMPLEMENTATION
 #include "pl_mpeg.h"
@@ -153,52 +143,13 @@ struct Job {
 std::mutex g_jobsMtx;
 std::map<std::string, std::shared_ptr<Job>> g_jobs;  // by output path
 
-int runCommand(const std::string& exe, const std::vector<std::string>& args) {
-#if defined(_WIN32)
-    std::wstring cmd = L"\"" + toPath(exe).wstring() + L"\"";
-    for (const std::string& a : args) cmd += L" \"" + toPath(a).wstring() + L"\"";
-    STARTUPINFOW si{};
-    si.cb = sizeof si;
-    PROCESS_INFORMATION pi{};
-    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return -1;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    return int(code);
-#else
-    std::string cmd = "'" + exe + "'";
-    for (const std::string& a : args) {
-        std::string q;
-        for (char c : a) q += c == '\'' ? std::string("'\\''") : std::string(1, c);
-        cmd += " '" + q + "'";
-    }
-    cmd += " >/dev/null 2>&1 </dev/null";
-    return std::system(cmd.c_str());
-#endif
-}
-
 std::string findFfmpeg(const std::string& baseDir) {
     static std::string cached;
     static bool probed = false;
     static std::mutex m;
     std::lock_guard<std::mutex> lk(m);
-    if (probed) return cached;
+    if (!probed) cached = findProgram(baseDir, "ffmpeg", "-version");
     probed = true;
-#if defined(_WIN32)
-    const char* names[] = {"ffmpeg.exe"};
-#else
-    const char* names[] = {"ffmpeg"};
-#endif
-    for (const char* n : names) {
-        const std::string local = baseDir + n;
-        std::error_code ec;
-        if (fs::exists(toPath(local), ec) && runCommand(local, {"-version"}) == 0) return cached = local;
-        if (runCommand(n, {"-version"}) == 0) return cached = n;
-    }
     return cached;
 }
 
@@ -257,7 +208,7 @@ VideoSource findVideo(const scene::Files& files, const std::string& nameIn, cons
     }
     std::thread([ffmpeg, src, dest, job] {
         const std::string part = dest + ".part";
-        const int rc = runCommand(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-i", src, "-vf",
+        const int rc = runProcess(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-i", src, "-vf",
                                            "scale='trunc(min(1280,iw)/2)*2':-2", "-r", "30", "-c:v", "mpeg1video", "-q:v",
                                            "4", "-bf", "0", "-c:a", "mp2", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-f",
                                            "mpeg", part});

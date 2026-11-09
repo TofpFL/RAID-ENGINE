@@ -165,6 +165,7 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "options") state_ = makeOptions();
     else if (autoRun.state == "credits") state_ = makeCredits();
     else if (autoRun.state == "calibration") state_ = makeCalibration();
+    else if (autoRun.state == "modpacks") state_ = makeModPacks();
     else state_ = makeTitle();
     state_->enter();
 

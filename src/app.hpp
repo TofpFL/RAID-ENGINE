@@ -118,6 +118,7 @@ std::unique_ptr<State> makeCalibration();
 std::unique_ptr<State> makePlay(const PlayRequest& req);
 std::unique_ptr<State> makeResults(const ResultData& r);
 std::unique_ptr<State> makeChartEditor(const std::string& songId, const std::string& diff);
+std::unique_ptr<State> makeModPacks();
 
 // Waits (bounded) for detached preview/compose jobs before shutdown.
 void waitForBackgroundJobs();
