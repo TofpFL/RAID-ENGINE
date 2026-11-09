@@ -175,8 +175,9 @@ VideoSource findVideo(const scene::Files& files, const std::string& nameIn, cons
     // Cache key: source path, size and time, so an edited video converts again.
     std::error_code ec;
     const auto size = fs::file_size(toPath(src), ec);
-    const auto time = fs::last_write_time(toPath(src), ec).time_since_epoch().count();
-    const size_t key = std::hash<std::string>{}(src + "|" + std::to_string(size) + "|" + std::to_string(time));
+    // (libc++ counts file times in __int128: narrow it before formatting.)
+    const long long time = (long long)fs::last_write_time(toPath(src), ec).time_since_epoch().count();
+    const size_t key = std::hash<std::string>{}(src + "|" + std::to_string((unsigned long long)size) + "|" + std::to_string(time));
     const fs::path cacheDir = toPath(baseDir) / "cache" / "videos";
     char hex[32];
     std::snprintf(hex, sizeof hex, "%016llx", (unsigned long long)key);
