@@ -1,10 +1,14 @@
 #include "platform.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
+#include "common.hpp"
 #include "raylib.h"
 
 #if defined(__ANDROID__)
@@ -14,6 +18,7 @@
 #include <android/window.h>
 #include <android_native_app_glue.h>
 #include <jni.h>
+#include <time.h>
 
 extern "C" struct android_app* GetAndroidApp(void);  // raylib, rcore_android.c
 #endif
@@ -31,6 +36,85 @@ void logInfo(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, "Gods
 std::atomic<bool> g_background{false}, g_resumed{false};
 std::atomic<float> g_volume{0.8f};
 void (*g_raylibCmd)(android_app*, int32_t) = nullptr;
+int32_t (*g_raylibInput)(android_app*, AInputEvent*) = nullptr;
+std::vector<TouchEvent> g_touches;  // filled and read on the game thread
+
+// Touch events carry their time in the CLOCK_MONOTONIC base: move it to nowSec().
+double eventTime(int64_t ns) {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double now = nowSec();
+    const double ago = double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9 - double(ns) * 1e-9;
+    return now - std::clamp(ago, 0.0, 1.0);
+}
+
+int32_t onInputEvent(android_app* app, AInputEvent* ev) {
+    const int32_t handled = g_raylibInput ? g_raylibInput(app, ev) : 0;
+    if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) return handled;
+    const int32_t src = AInputEvent_getSource(ev);
+    if ((src & AINPUT_SOURCE_TOUCHSCREEN) != AINPUT_SOURCE_TOUCHSCREEN && (src & AINPUT_SOURCE_MOUSE) != AINPUT_SOURCE_MOUSE)
+        return handled;
+    const int32_t action = AMotionEvent_getAction(ev);
+    const size_t idx = size_t((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+    const double t = eventTime(AMotionEvent_getEventTime(ev));
+    auto push = [&](TouchEvent::Kind k, size_t i) {
+        g_touches.push_back({k, int(AMotionEvent_getPointerId(ev, i)), AMotionEvent_getX(ev, i), AMotionEvent_getY(ev, i), t});
+    };
+    switch (action & AMOTION_EVENT_ACTION_MASK) {
+        case AMOTION_EVENT_ACTION_DOWN:
+        case AMOTION_EVENT_ACTION_POINTER_DOWN: push(TouchEvent::Down, idx); break;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_POINTER_UP: push(TouchEvent::Up, idx); break;
+        case AMOTION_EVENT_ACTION_MOVE:
+            for (size_t i = 0; i < AMotionEvent_getPointerCount(ev); ++i) push(TouchEvent::Move, i);
+            break;
+        case AMOTION_EVENT_ACTION_CANCEL: g_touches.push_back({TouchEvent::Cancel, -1, 0, 0, t}); break;
+        default: break;
+    }
+    if (g_touches.size() > 4096) g_touches.erase(g_touches.begin(), g_touches.begin() + 2048);
+    return handled;
+}
+
+// raylib opens files through the APK's assets and then <internal data path>/<name>,
+// even for absolute paths, so fonts and audio in the game folder would not load:
+// plain stdio instead.
+unsigned char* loadFileData(const char* fileName, int* size) {
+    *size = 0;
+    FILE* f = std::fopen(fileName, "rb");
+    if (!f) return nullptr;
+    std::vector<unsigned char> buf;
+    unsigned char tmp[1 << 16];
+    size_t n;
+    while ((n = std::fread(tmp, 1, sizeof tmp, f)) > 0) buf.insert(buf.end(), tmp, tmp + n);
+    std::fclose(f);
+    auto* out = static_cast<unsigned char*>(std::malloc(std::max<size_t>(1, buf.size())));
+    if (!out) return nullptr;
+    if (!buf.empty()) std::memcpy(out, buf.data(), buf.size());
+    *size = int(buf.size());
+    return out;
+}
+
+char* loadFileText(const char* fileName) {
+    int size = 0;
+    unsigned char* d = loadFileData(fileName, &size);
+    if (!d) return nullptr;
+    auto* text = static_cast<char*>(std::realloc(d, size_t(size) + 1));
+    if (!text) {
+        std::free(d);
+        return nullptr;
+    }
+    text[size] = 0;
+    return text;
+}
+
+bool saveFileData(const char* fileName, void* data, int size) {
+    FILE* f = std::fopen(fileName, "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(data, 1, size_t(size), f) == size_t(size);
+    return std::fclose(f) == 0 && ok;
+}
+
+bool saveFileText(const char* fileName, char* text) { return saveFileData(fileName, text, int(std::strlen(text))); }
 
 void onAppCmd(android_app* app, int32_t cmd) {
     if (g_raylibCmd) g_raylibCmd(app, cmd);
@@ -144,6 +228,14 @@ int staticInt(const char* name, int fallback) {
 }  // namespace
 
 bool touchFirst() { return true; }
+bool touchEvents() { return true; }
+
+void takeTouchEvents(std::vector<TouchEvent>& out) {
+    out.insert(out.end(), g_touches.begin(), g_touches.end());
+    g_touches.clear();
+}
+
+void log(const std::string& s) { logInfo(s); }
 
 bool pickModZips() {
     Jni j;
@@ -202,12 +294,21 @@ void prepareDataDir(const std::string& base) {
 void afterWindowInit() {
     g_background = false;
     g_resumed = false;
+    g_touches.clear();
+    SetLoadFileDataCallback(loadFileData);
+    SetLoadFileTextCallback(loadFileText);
+    SetSaveFileDataCallback(saveFileData);
+    SetSaveFileTextCallback(saveFileText);
     android_app* app = GetAndroidApp();
     if (!app) return;
     ANativeActivity_setWindowFlags(app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0);
     if (app->onAppCmd != onAppCmd) {
         g_raylibCmd = app->onAppCmd;
         app->onAppCmd = onAppCmd;
+    }
+    if (app->onInputEvent != onInputEvent) {
+        g_raylibInput = app->onInputEvent;
+        app->onInputEvent = onInputEvent;
     }
 }
 
@@ -292,6 +393,9 @@ bool download(const std::string& url, const std::string& dest, std::string& err)
 #else  // desktop
 
 bool touchFirst() { return false; }
+bool touchEvents() { return false; }
+void takeTouchEvents(std::vector<TouchEvent>&) {}
+void log(const std::string&) {}
 std::string dataDir() { return ""; }
 void prepareDataDir(const std::string&) {}
 void afterWindowInit() {}

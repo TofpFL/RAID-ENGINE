@@ -17,9 +17,11 @@ bool loadAudioFile(const std::string& path, Pcm& out, std::string& err) {
     Wave w = LoadWave(path.c_str());
     if (w.data == nullptr || w.frameCount == 0) {
         err = "could not decode audio: " + path;
+        platform::log(err);
         if (w.data) UnloadWave(w);
         return false;
     }
+    platform::log("decoded " + path);
     WaveFormat(&w, Mixer::kRate, 16, 2);
     out.channels = 2;
     const int16_t* p = static_cast<const int16_t*>(w.data);

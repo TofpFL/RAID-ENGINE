@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace gh::platform {
 
@@ -16,6 +17,20 @@ constexpr bool kAndroid =
 
 // Touch-first device (no keyboard assumed): menus get the on-screen pad.
 bool touchFirst();
+
+// Android: every touch since the last call, in order, with the moment it
+// happened (nowSec() clock), so a quick tap between two polls is not lost.
+struct TouchEvent {
+    enum Kind { Down, Move, Up, Cancel } kind;
+    int id;
+    float x, y;  // window pixels
+    double t;
+};
+bool touchEvents();  // true where takeTouchEvents() is the source of touches
+void takeTouchEvents(std::vector<TouchEvent>& out);  // appends
+
+// Android log ("GodsHand" tag); nothing elsewhere.
+void log(const std::string& s);
 
 // Android: the app's storage folder (ends with '/'), "" on desktop.
 std::string dataDir();

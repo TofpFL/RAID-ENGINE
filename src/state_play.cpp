@@ -402,6 +402,7 @@ void PlayState::beginCountdown() {
     App& a = app();
     if (countdownStarted_ && phase_ == Phase::Playing) return;
     countdownStarted_ = true;
+    platform::log("song " + req_.songId + " " + req_.diff);
     a.mixer.play(-leadMs_ / 1000.0);
     songMs_ = -leadMs_;
     phase_ = Phase::Playing;
@@ -650,6 +651,8 @@ void PlayState::onSection(int s) {
 
 void PlayState::pause() {
     App& a = app();
+    platform::log(TextFormat("paused at %.1f s: %d hits, %d misses", songMs_ / 1000.0,
+                             session_.counts[0] + session_.counts[1] + session_.counts[2] + session_.counts[3], session_.misses));
     phase_ = Phase::Paused;
     pauseSel_ = 0;
     a.mixer.pause();

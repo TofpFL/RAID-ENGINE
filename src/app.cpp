@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <typeinfo>
 
 #include "common.hpp"
 #include "gfx.hpp"
@@ -21,6 +22,9 @@ int App::start(int argc, char** argv) {
     g_app = new App();
     return g_app->run(argc, argv);
 }
+
+// Android log: which screen is open (the emulator test follows the game by it).
+static void logScreen(const State& s) { platform::log(std::string("screen ") + typeid(s).name()); }
 
 static std::vector<double> parseList(const char* s) {
     std::vector<double> v;
@@ -189,6 +193,7 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "modpacks") state_ = makeModPacks();
     else state_ = makeTitle();
     state_->enter();
+    logScreen(*state_);
 
     double last = nowSec(), nextFrame = last;
     while (!quit && !WindowShouldClose()) {
@@ -226,7 +231,10 @@ int App::run(int argc, char** argv) {
 
 void App::frame() {
     input.beginFrame(dt);
-    if (platform::takeResumed()) state_->onResume();
+    if (platform::takeResumed()) {
+        platform::log("back from the background");
+        state_->onResume();
+    }
     if (touchMode) touch.setLayout(input, state_->touchLayout(), now);
     if (input.pressed(KEY_F11) || (input.pressed(KEY_ENTER) && (input.isDown(KEY_LEFT_ALT) || input.isDown(KEY_RIGHT_ALT))))
         toggleFullscreen();
@@ -244,6 +252,7 @@ void App::frame() {
             state_ = std::move(next_);
             input.clear();
             state_->enter();
+            logScreen(*state_);
             fadeDir_ = -1;
         }
     } else if (fadeDir_ < 0) {

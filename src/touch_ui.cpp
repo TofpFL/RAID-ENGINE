@@ -8,12 +8,6 @@
 
 namespace gh {
 
-namespace {
-
-bool has(const std::vector<int>& v, int id) { return std::find(v.begin(), v.end(), id) != v.end(); }
-
-}  // namespace
-
 std::vector<TouchPoint> touchPoints() {
     std::vector<TouchPoint> v;
     const int n = GetTouchPointCount();
@@ -100,48 +94,76 @@ void TouchUi::setLayout(Input& in, const TouchLayout& l, double now) {
     lanes_ = std::clamp(l.lanes, 0, 9);
     laneHeld_.assign(size_t(lanes_), false);
     // Fingers already down belong to the old screen: ignore them until lifted.
-    ignoreIds_ = knownIds_;
-    freeIds_.clear();
+    for (Finger& f : fingers_) f.kind = kIgnored;
 }
 
 void TouchUi::update(Input& in, double now) {
-    const std::vector<TouchPoint> pts = touchPoints();
-    std::vector<int> known;
-    for (const TouchPoint& p : pts) {
-        known.push_back(p.id);
-        if (!has(knownIds_, p.id) && buttonAt(p.pos, 0) < 0) freeIds_.push_back(p.id);
+    events_.clear();
+    if (platform::touchEvents()) {
+        platform::takeTouchEvents(events_);
+    } else {
+        // Polled fingers (desktop: the mouse while clicked) become events.
+        const std::vector<TouchPoint> pts = touchPoints();
+        for (const Finger& f : fingers_) {
+            const bool still = std::any_of(pts.begin(), pts.end(), [&](const TouchPoint& p) { return p.id == f.id; });
+            if (!still) events_.push_back({platform::TouchEvent::Up, f.id, f.pos.x, f.pos.y, now});
+        }
+        for (const TouchPoint& p : pts) {
+            const bool known = std::any_of(fingers_.begin(), fingers_.end(), [&](const Finger& f) { return f.id == p.id; });
+            events_.push_back({known ? platform::TouchEvent::Move : platform::TouchEvent::Down, p.id, p.pos.x, p.pos.y, now});
+        }
     }
-    auto lifted = [&](int id) { return !has(known, id); };
-    freeIds_.erase(std::remove_if(freeIds_.begin(), freeIds_.end(), lifted), freeIds_.end());
-    ignoreIds_.erase(std::remove_if(ignoreIds_.begin(), ignoreIds_.end(), lifted), ignoreIds_.end());
-    knownIds_ = std::move(known);
+    for (const platform::TouchEvent& e : events_) {
+        apply(e);
+        refresh(in, std::min(e.t, now));
+    }
+}
 
+void TouchUi::apply(const platform::TouchEvent& e) {
+    auto same = [&](const Finger& f) { return f.id == e.id; };
+    switch (e.kind) {
+        case platform::TouchEvent::Down:
+            fingers_.erase(std::remove_if(fingers_.begin(), fingers_.end(), same), fingers_.end());
+            fingers_.push_back({e.id, {e.x, e.y}, buttonAt({e.x, e.y}, 0) >= 0 ? kButton : kFree});
+            break;
+        case platform::TouchEvent::Move:
+            for (Finger& f : fingers_)
+                if (f.id == e.id) f.pos = {e.x, e.y};
+            break;
+        case platform::TouchEvent::Up:
+            fingers_.erase(std::remove_if(fingers_.begin(), fingers_.end(), same), fingers_.end());
+            break;
+        case platform::TouchEvent::Cancel: fingers_.clear(); break;
+    }
+}
+
+void TouchUi::refresh(Input& in, double t) {
     std::vector<bool> held(buttons_.size(), false), lanes(size_t(lanes_), false);
     bool anyFree = false;
     const float sw = float(std::max(1, GetScreenWidth()));
-    for (const TouchPoint& p : pts) {
-        if (has(ignoreIds_, p.id)) continue;
-        if (has(freeIds_, p.id)) {
+    for (const Finger& f : fingers_) {
+        if (f.kind == kIgnored) continue;
+        if (f.kind == kFree) {
             anyFree = true;
-            if (lanes_ > 0) lanes[size_t(std::clamp(int(p.pos.x / sw * float(lanes_)), 0, lanes_ - 1))] = true;
+            if (lanes_ > 0) lanes[size_t(std::clamp(int(f.pos.x / sw * float(lanes_)), 0, lanes_ - 1))] = true;
             continue;
         }
-        const int b = buttonAt(p.pos, 14 * unit_);
+        const int b = buttonAt(f.pos, 14 * unit_);
         if (b >= 0) held[size_t(b)] = true;
     }
     for (size_t i = 0; i < buttons_.size(); ++i)
         if (held[i] != buttons_[i].held) {
             buttons_[i].held = held[i];
-            in.setVirtual(buttons_[i].code, held[i], now);
+            in.setVirtual(buttons_[i].code, held[i], t);
         }
     if (tapCode_ && anyFree != tapHeld_) {
         tapHeld_ = anyFree;
-        in.setVirtual(tapCode_, anyFree, now);
+        in.setVirtual(tapCode_, anyFree, t);
     }
     for (int l = 0; l < lanes_; ++l)
         if (lanes[size_t(l)] != laneHeld_[size_t(l)]) {
             laneHeld_[size_t(l)] = lanes[size_t(l)];
-            in.setVirtual(kTouchLane + l, lanes[size_t(l)], now);
+            in.setVirtual(kTouchLane + l, lanes[size_t(l)], t);
         }
 }
 

@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "platform.hpp"
 #include "raylib.h"
 
 namespace gh {
@@ -34,6 +35,8 @@ public:
     // Once per frame: the current screen's buttons (rebuilt when they change).
     void setLayout(Input& in, const TouchLayout& layout, double now);
     // After every Input::poll: fingers press and release the buttons' keys.
+    // Android delivers each touch with its own time, so even a tap shorter
+    // than a frame presses and releases its key, at the right moments.
     void update(Input& in, double now);
     void draw() const;
     bool covers(Vector2 screenPos) const;  // on one of the buttons
@@ -49,16 +52,23 @@ private:
         bool round;
         bool held = false;
     };
+    enum Kind { kButton, kFree, kIgnored };  // a finger that began on a button, elsewhere, or on the last screen
+    struct Finger {
+        int id;
+        Vector2 pos;
+        Kind kind;
+    };
     void build(const TouchLayout& l, int sw, int sh);
     int buttonAt(Vector2 p, float slop) const;
+    void apply(const platform::TouchEvent& e);
+    void refresh(Input& in, double t);  // keys follow the fingers
 
     std::vector<Button> buttons_;
     std::string sig_;            // layout + screen size the buttons were built for
     int tapCode_ = 0, lanes_ = 0;
     bool tapHeld_ = false;
-    std::vector<int> knownIds_;  // touches seen at the last update
-    std::vector<int> freeIds_;   // touches that began outside the buttons
-    std::vector<int> ignoreIds_; // touches that began on the previous layout
+    std::vector<Finger> fingers_;
+    std::vector<platform::TouchEvent> events_;
     std::vector<bool> laneHeld_;
     float unit_ = 1;
 };
