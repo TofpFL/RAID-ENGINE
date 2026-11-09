@@ -143,7 +143,8 @@ adb logcat -d -s GodsHand:I | grep "paused at" | tail -n1 | grep -qE ": [1-9][0-
 shot 7-lanes
 
 adb logcat -d > "$out/logcat.txt"
-if grep -qE "FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT" "$out/logcat.txt"; then fail "crash in the log"; fi
-if grep -q "Failed to open file" "$out/logcat.txt"; then fail "a file could not be opened"; fi
+# Only the game's own lines count: other apps on the emulator log their own errors.
+if grep -A2 -E "FATAL EXCEPTION|Fatal signal" "$out/logcat.txt" | grep -q "godshand"; then fail "the game crashed"; fi
+if grep -qE " raylib *: FILEIO: .*Failed to open file" "$out/logcat.txt"; then fail "the game could not open a file"; fi
 grep -E " (GodsHand|raylib) *:" "$out/logcat.txt" | tail -40
 echo "Android smoke test passed"
