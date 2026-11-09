@@ -26,14 +26,35 @@ alive() {
 }
 tap() { adb shell input tap "$1" "$2"; }
 
-wait_log() {  # pattern, seconds: the game logs each screen it opens
+seen() { adb logcat -d -s GodsHand:I | grep -c "$1"; }
+wait_quiet() {  # pattern, seconds, how many times it must appear
   local end=$((SECONDS + $2))
   while [ $SECONDS -lt $end ]; do
-    adb logcat -d -s GodsHand:I | grep -q "$1" && return 0
+    [ "$(seen "$1")" -ge "${3:-1}" ] && return 0
     sleep 1
   done
-  fail "the game did not log '$1'"
+  return 1
 }
+wait_log() {  # pattern, seconds: the game logs each screen it opens
+  wait_quiet "$1" "$2" || fail "the game did not log '$1'"
+}
+# Tap, then wait for the game to log pattern. If it did not and the game is
+# still on the same screen, the tap was lost: send it once more.
+tap_wait() {  # x, y, pattern, seconds
+  local before screens
+  before=$(seen "$3"); screens=$(seen "screen ")
+  tap "$1" "$2"
+  wait_quiet "$3" "$4" $((before + 1)) && return 0
+  [ "$(seen "screen ")" -eq "$screens" ] || fail "the game opened another screen instead of logging '$3'"
+  echo "note: tapping again ($3)"
+  tap "$1" "$2"
+  wait_log "$3" "$4"
+}
+
+# Right after boot Android is still starting every app's boot receivers;
+# taps sent then can get lost. Let it settle first.
+adb shell cmd activity wait-for-broadcast-idle > /dev/null 2>&1 || true
+sleep 10
 
 adb install -r "$apk" || fail "install"
 # The first launch creates the game's folder (Android does not let adb create it).
@@ -75,13 +96,24 @@ pause_x=$(( m + 50 * u / 1000 )); pause_y=$(( m + 29 * u / 1000 ))
 echo "screen ${W}x${H}: down ($down_x,$down_y) ok ($ok_x,$ok_y) pause ($pause_x,$pause_y)"
 
 wait_log "screen .*TitleState" 30
+# The game must draw for the landscape window, even when it was started upright.
+wait_log "screen size ${W}x${H}" 15
 shot 1-title
-tap $(( W / 2 )) $(( H / 2 ))           # TAP TO BEGIN
-wait_log "screen .*MainMenuState" 15; sleep 1
+python3 - "$out/1-title.png" <<'PY' || fail "the screen is one flat colour (the game is not drawing for this window)"
+import sys, zlib, struct
+data = open(sys.argv[1], "rb").read()
+pos, chunks = 8, []
+while pos < len(data):
+    n, kind = struct.unpack(">I4s", data[pos:pos + 8]); chunks.append((kind, data[pos + 8:pos + 8 + n])); pos += 12 + n
+w, h, depth, ctype = struct.unpack(">IIBB", dict(chunks)[b"IHDR"][:10])
+raw = zlib.decompress(b"".join(c for k, c in chunks if k == b"IDAT"))
+# Distinct byte values across the image (filter bytes included): a flat screen has very few.
+sys.exit(0 if len(set(raw[::97])) > 24 else 1)
+PY
+tap_wait $(( W / 2 )) $(( H / 2 )) "screen .*MainMenuState" 15; sleep 1   # TAP TO BEGIN
 shot 2-menu
-tap $down_x $down_y; sleep 1            # STORY MODE -> FREEPLAY
-tap $ok_x $ok_y
-wait_log "screen .*FreeplayState" 15; sleep 2
+tap $down_x $down_y; sleep 2            # STORY MODE -> FREEPLAY
+tap_wait $ok_x $ok_y "screen .*FreeplayState" 15; sleep 2
 shot 3-freeplay
 if [ "$pushed" = 1 ]; then
   tap $cx $(( cy - s - g ))             # UP: the last song, Test Tone (its preview decodes the file)
@@ -89,25 +121,26 @@ if [ "$pushed" = 1 ]; then
   shot 3b-preview
   tap $down_x $down_y; sleep 1          # back to the first song
 fi
-tap $ok_x $ok_y                         # play it
-wait_log "song builtin:" 60; sleep 4
+tap $(( cx - s - g )) $cy; sleep 1       # LEFT: Easy, so missed notes take longer to add up
+tap_wait $ok_x $ok_y "song builtin:" 60; sleep 4   # play it
 alive "song"; shot 4-song
-# Each adb tap takes a second or two: pause early, before the misses add up.
-tap $pause_x $pause_y
-wait_log "paused at" 10; sleep 1
+# Each adb tap takes a second or more, and missed notes drain health: keep
+# the time spent playing short.
+tap_wait $pause_x $pause_y "paused at" 10; sleep 1
 shot 5-pause
-tap $ok_x $ok_y                         # Resume
-wait_log "resumed" 10
-for i in 0 1 2 3; do                    # taps on the lanes
+tap_wait $ok_x $ok_y "resumed" 10      # Resume
+adb shell input keyevent KEYCODE_HOME; sleep 3
+adb shell am start -n "$pkg/.GameActivity"
+wait_log "back from the background" 20; sleep 1
+wait_quiet "paused at" 10 2 || fail "the song did not pause after coming back"
+alive "resume"; shot 6-resumed
+tap_wait $ok_x $ok_y "resumed" 10      # Resume again
+for i in 0 1 3; do                      # taps on the lanes
   tap $(( W * (2 * i + 1) / 8 )) $(( H * 3 / 4 ))
 done
-shot 6-lanes
-adb shell input keyevent KEYCODE_HOME; sleep 4
-adb shell am start -n "$pkg/.GameActivity"
-wait_log "back from the background" 20; sleep 2
-[ "$(adb logcat -d -s GodsHand:I | grep -c 'paused at')" -ge 2 ] || fail "the song did not pause after coming back"
+tap_wait $pause_x $pause_y "paused at" 10
 adb logcat -d -s GodsHand:I | grep "paused at" | tail -n1 | grep -qE ": [1-9][0-9]* presses" || fail "the taps on the lanes did not press them"
-alive "resume"; shot 7-resumed
+shot 7-lanes
 
 adb logcat -d > "$out/logcat.txt"
 if grep -qE "FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT" "$out/logcat.txt"; then fail "crash in the log"; fi

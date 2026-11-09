@@ -231,6 +231,11 @@ int App::run(int argc, char** argv) {
 
 void App::frame() {
     input.beginFrame(dt);
+    if (GetScreenWidth() != shownW_ || GetScreenHeight() != shownH_) {
+        shownW_ = GetScreenWidth();
+        shownH_ = GetScreenHeight();
+        platform::log(TextFormat("screen size %dx%d", shownW_, shownH_));
+    }
     if (platform::takeResumed()) {
         platform::log("back from the background");
         state_->onResume();

@@ -114,6 +114,7 @@ private:
     std::future<PcmPtr> menuJob_;
     size_t shotIndex_ = 0;
     int winW_ = 1280, winH_ = 720;
+    int shownW_ = 0, shownH_ = 0;  // window size last frame (logged on Android when it changes)
 };
 
 App& app();
