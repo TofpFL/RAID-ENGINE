@@ -26,7 +26,20 @@ alive() {
 }
 tap() { adb shell input tap "$1" "$2"; }
 
+wait_log() {  # pattern, seconds: the game logs each screen it opens
+  local end=$((SECONDS + $2))
+  while [ $SECONDS -lt $end ]; do
+    adb logcat -d -s GodsHand:I | grep -q "$1" && return 0
+    sleep 1
+  done
+  fail "the game did not log '$1'"
+}
+
 adb install -r "$apk" || fail "install"
+# The first launch creates the game's folder (Android does not let adb create it).
+adb logcat -c
+adb shell am start -W -n "$pkg/.GameActivity" || fail "start"
+wait_log "screen .*TitleState" 30
 # A song made of a plain audio file (AutoChart) checks that audio files load.
 python3 - "$out/tone.wav" <<'PY'
 import math, struct, sys, wave
@@ -34,11 +47,11 @@ with wave.open(sys.argv[1], "wb") as w:
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(44100)
     w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 44100))) for i in range(44100 * 4)))
 PY
-songs="/sdcard/Android/data/$pkg/files/songs"
-adb shell mkdir -p "$songs" && adb push "$out/tone.wav" "$songs/Test Tone.wav" || fail "push a song"
+adb push "$out/tone.wav" "/sdcard/Android/data/$pkg/files/songs/Test Tone.wav" || fail "push a song"
+adb shell am force-stop "$pkg"; sleep 1
 adb logcat -c
-adb shell am start -W -n "$pkg/.GameActivity" || fail "start"
-sleep 5
+adb shell am start -W -n "$pkg/.GameActivity" || fail "restart"
+sleep 3
 alive "start"
 
 # Screen size in the game's (landscape) orientation.
@@ -53,15 +66,6 @@ ok=$(( 124 * u / 1000 ))
 ok_x=$(( W - m - ok / 2 )); ok_y=$(( H - m - 36 * u / 1000 - ok / 2 ))
 pause_x=$(( m + 50 * u / 1000 )); pause_y=$(( m + 29 * u / 1000 ))
 echo "screen ${W}x${H}: down ($down_x,$down_y) ok ($ok_x,$ok_y) pause ($pause_x,$pause_y)"
-
-wait_log() {  # pattern, seconds: the game logs each screen it opens
-  local end=$((SECONDS + $2))
-  while [ $SECONDS -lt $end ]; do
-    adb logcat -d -s GodsHand:I | grep -q "$1" && return 0
-    sleep 1
-  done
-  fail "the game did not log '$1'"
-}
 
 wait_log "screen .*TitleState" 30
 shot 1-title
