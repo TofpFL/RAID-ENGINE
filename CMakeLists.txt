@@ -157,6 +157,7 @@ if(GH_BUILD_GAME)
     src/scene_draw.cpp
     src/video.cpp
     src/state_results.cpp
+    src/state_editor.cpp
   )
   target_link_libraries(godshand PRIVATE gh_core raylib)
   target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})

@@ -79,6 +79,7 @@ public:
         std::string shotPrefix = "shot";
         double quitAfter = -1;
         bool botplay = true;
+        std::string editorSong, editorExport;  // --editor <song> [diff], --editor-export <file>
     } autoRun;
 
     int run(int argc, char** argv);
@@ -116,6 +117,7 @@ std::unique_ptr<State> makeCredits();
 std::unique_ptr<State> makeCalibration();
 std::unique_ptr<State> makePlay(const PlayRequest& req);
 std::unique_ptr<State> makeResults(const ResultData& r);
+std::unique_ptr<State> makeChartEditor(const std::string& songId, const std::string& diff);
 
 // Waits (bounded) for detached preview/compose jobs before shutdown.
 void waitForBackgroundJobs();

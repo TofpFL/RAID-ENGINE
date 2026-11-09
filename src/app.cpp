@@ -86,6 +86,11 @@ int App::run(int argc, char** argv) {
         else if (!std::strcmp(a, "--rate")) mods.rate = clampv(std::atof(next()), 0.5, 2.0);
         else if (!std::strcmp(a, "--mirror")) mods.mirror = true;
         else if (!std::strcmp(a, "--base")) base = next();
+        else if (!std::strcmp(a, "--editor")) {
+            autoRun.enabled = true;
+            autoRun.editorSong = next();
+            if (i + 1 < argc && argv[i + 1][0] != '-') autoRun.diff = next();
+        } else if (!std::strcmp(a, "--editor-export")) autoRun.editorExport = next();
         else if (!std::strcmp(a, "--list-songs")) listSongs = true;
     }
     if (listSongs) {
@@ -153,7 +158,8 @@ int App::run(int argc, char** argv) {
         r.diff = autoRun.diff;
         mods.botplay = autoRun.botplay;
         state_ = makePlay(r);
-    } else if (autoRun.state == "menu") state_ = makeMainMenu();
+    } else if (!autoRun.editorSong.empty()) state_ = makeChartEditor(autoRun.editorSong, autoRun.diff);
+    else if (autoRun.state == "menu") state_ = makeMainMenu();
     else if (autoRun.state == "freeplay") state_ = makeFreeplay();
     else if (autoRun.state == "story") state_ = makeStory();
     else if (autoRun.state == "options") state_ = makeOptions();
