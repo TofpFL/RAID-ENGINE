@@ -96,7 +96,20 @@ pause_x=$(( m + 50 * u / 1000 )); pause_y=$(( m + 29 * u / 1000 ))
 echo "screen ${W}x${H}: down ($down_x,$down_y) ok ($ok_x,$ok_y) pause ($pause_x,$pause_y)"
 
 wait_log "screen .*TitleState" 30
+# The game must draw for the landscape window, even when it was started upright.
+wait_log "screen size ${W}x${H}" 15
 shot 1-title
+python3 - "$out/1-title.png" <<'PY' || fail "the screen is one flat colour (the game is not drawing for this window)"
+import sys, zlib, struct
+data = open(sys.argv[1], "rb").read()
+pos, chunks = 8, []
+while pos < len(data):
+    n, kind = struct.unpack(">I4s", data[pos:pos + 8]); chunks.append((kind, data[pos + 8:pos + 8 + n])); pos += 12 + n
+w, h, depth, ctype = struct.unpack(">IIBB", dict(chunks)[b"IHDR"][:10])
+raw = zlib.decompress(b"".join(c for k, c in chunks if k == b"IDAT"))
+# Distinct byte values across the image (filter bytes included): a flat screen has very few.
+sys.exit(0 if len(set(raw[::97])) > 24 else 1)
+PY
 tap_wait $(( W / 2 )) $(( H / 2 )) "screen .*MainMenuState" 15; sleep 1   # TAP TO BEGIN
 shot 2-menu
 tap $down_x $down_y; sleep 2            # STORY MODE -> FREEPLAY

@@ -157,6 +157,30 @@ if(GH_BUILD_GAME)
   # The main loop polls input ~1000 times per second and only renders at the
   # frame limit, so raylib must not swap/poll/sleep inside EndDrawing().
   target_compile_definitions(raylib PRIVATE SUPPORT_CUSTOM_FRAME_CONTROL=1)
+  if(ANDROID)
+    # Android: make raylib follow the window when it changes size (see
+    # cmake/raylib_android_resize.c). Applied once, in raylib's own source.
+    set(gh_rcore ${raylib_SOURCE_DIR}/src/platforms/rcore_android.c)
+    file(READ ${gh_rcore} gh_src)
+    if(NOT gh_src MATCHES "GhFollowWindowSize")
+      file(READ ${CMAKE_SOURCE_DIR}/cmake/raylib_android_resize.c gh_fn)
+      set(gh_def "static void AndroidCommandCallback(struct android_app *app, int32_t cmd)\n{")
+      string(REPLACE "${gh_def}" "${gh_fn}${gh_def}" gh_src "${gh_src}")
+      string(REPLACE "        case APP_CMD_CONFIG_CHANGED:"
+        "        case APP_CMD_WINDOW_RESIZED:\n        case APP_CMD_CONTENT_RECT_CHANGED:\n        case APP_CMD_CONFIG_CHANGED:"
+        gh_src "${gh_src}")
+      string(REPLACE "            // Check screen orientation here!" "            GhFollowWindowSize(app);" gh_src "${gh_src}")
+      string(REPLACE "platform.contextRebindRequired = false;"
+        "platform.contextRebindRequired = false;\n                    GhFollowWindowSize(app);" gh_src "${gh_src}")
+      string(REGEX MATCHALL "GhFollowWindowSize\\(app\\)" gh_calls "${gh_src}")
+      list(LENGTH gh_calls gh_count)
+      if(NOT gh_count EQUAL 2 OR NOT gh_src MATCHES "case APP_CMD_WINDOW_RESIZED")
+        message(FATAL_ERROR "Could not patch ${gh_rcore} (raylib 5.5 expected)")
+      endif()
+      file(WRITE ${gh_rcore} "${gh_src}")
+      message(STATUS "Patched raylib's rcore_android.c to follow window size changes")
+    endif()
+  endif()
 
   set(GH_GAME_SOURCES
     src/main.cpp
