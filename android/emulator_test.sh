@@ -90,18 +90,22 @@ if [ "$pushed" = 1 ]; then
   tap $down_x $down_y; sleep 1          # back to the first song
 fi
 tap $ok_x $ok_y                         # play it
-wait_log "song builtin:" 60; sleep 5
+wait_log "song builtin:" 60; sleep 4
 alive "song"; shot 4-song
-for i in 0 1 2 3 3 2 1 0 0 1 2 3; do    # taps on the lanes
-  tap $(( W * (2 * i + 1) / 8 )) $(( H * 3 / 4 )); sleep 0.25
-done
-shot 5-lanes
+# Each adb tap takes a second or two: pause early, before the misses add up.
 tap $pause_x $pause_y
 wait_log "paused at" 10; sleep 1
-shot 6-pause
+shot 5-pause
+tap $ok_x $ok_y                         # Resume
+wait_log "resumed" 10
+for i in 0 1 2 3; do                    # taps on the lanes
+  tap $(( W * (2 * i + 1) / 8 )) $(( H * 3 / 4 ))
+done
+shot 6-lanes
 adb shell input keyevent KEYCODE_HOME; sleep 4
 adb shell am start -n "$pkg/.GameActivity"
 wait_log "back from the background" 20; sleep 2
+[ "$(adb logcat -d -s GodsHand:I | grep -c 'paused at')" -ge 2 ] || fail "the song did not pause after coming back"
 alive "resume"; shot 7-resumed
 
 adb logcat -d > "$out/logcat.txt"

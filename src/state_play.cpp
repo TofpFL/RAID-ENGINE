@@ -663,6 +663,7 @@ void PlayState::pause() {
 
 void PlayState::resume() {
     App& a = app();
+    platform::log("resumed");
     a.mixer.resume();
     for (auto& kv : sounds_)
         if (kv.second.started && !kv.second.paused) ResumeMusicStream(kv.second.mus);
