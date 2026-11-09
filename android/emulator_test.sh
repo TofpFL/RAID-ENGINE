@@ -48,7 +48,7 @@ tap_wait() {  # x, y, pattern, seconds
   [ "$(seen "screen ")" -eq "$screens" ] || fail "the game opened another screen instead of logging '$3'"
   echo "note: tapping again ($3)"
   tap "$1" "$2"
-  wait_log "$3" "$4"
+  wait_quiet "$3" "$4" $((before + 1)) || fail "the game did not log '$3'"
 }
 
 # Right after boot Android is still starting every app's boot receivers;
