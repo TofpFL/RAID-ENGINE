@@ -19,6 +19,7 @@
 #include "replay.hpp"
 #include "scene.hpp"
 #include "scene_draw.hpp"
+#include "video.hpp"
 #include "stage.hpp"
 
 namespace gh {
@@ -57,6 +58,9 @@ public:
     void changeCharacter(int who, const std::string& name) override;
     void healthBarColors(uint32_t left, uint32_t right) override;
     void timeBarColors(uint32_t left, uint32_t right) override;
+    bool startVideo(const std::string& name, bool canSkip) override;
+    bool makeVideoSprite(const std::string& tag, const std::string& name, float x, float y, const std::string& cam,
+                         bool loop) override;
 
 private:
     enum class Phase { Loading, Waiting, Playing, Paused, Dead, Ending, Error };
@@ -178,6 +182,16 @@ private:
     std::string stageName_ = "stage";
     bool baseStage_ = false;  // stage built from the original game's layout
     RenderTexture2D camRt_{};  // a camera with shaders is drawn here first
+    struct VideoSlot {
+        std::unique_ptr<VideoPlayer> player;
+        std::string name, tag;
+        bool loop = false, skippable = true, waiting = false;
+    };
+    std::unique_ptr<VideoSlot> cutscene_;
+    std::map<std::string, VideoSlot> videoSprites_;
+    bool openVideo(VideoSlot& v);
+    bool updateVideos(double dt);  // true while a cutscene holds the game
+    void drawCutscene();
     bool capturing_ = false;
     std::unique_ptr<ScriptHost> scripts_;
     SceneRenderer renderer_;

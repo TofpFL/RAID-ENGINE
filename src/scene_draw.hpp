@@ -27,6 +27,9 @@ public:
     // World point -> canvas point for a camera and scroll factor.
     static Vector2 toScreen(const scene::Camera& c, float x, float y, float sfx, float sfy);
     Texture2D* texture(const std::string& file);
+    // Textures owned elsewhere (video frames), drawn for graphics whose file is `key`.
+    void setDynamicTexture(const std::string& key, const Texture2D& t) { dynamic_[key] = t; }
+    void removeDynamicTexture(const std::string& key) { dynamic_.erase(key); }
     void clear();
     // Draws `src` (a camera rendered to a texture) through the camera's
     // shaders into `dest` on the current target.
@@ -52,6 +55,7 @@ private:
     void drawText(scene::Sprite& s, const scene::Camera& c);
     Font* font(const std::string& file);
     std::map<std::string, Texture2D> tex_;
+    std::map<std::string, Texture2D> dynamic_;
     std::map<std::string, int> filter_;
     std::map<std::string, Font> fonts_;
     int blend_ = 0;

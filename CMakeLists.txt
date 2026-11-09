@@ -59,6 +59,14 @@ else()
   target_compile_options(gh_miniz PRIVATE -w)
 endif()
 
+# ---- pl_mpeg (MPEG-1 video for cutscenes) -----------------------------------------
+# Set FETCHCONTENT_SOURCE_DIR_PL_MPEG to use a local checkout.
+FetchContent_Declare(pl_mpeg
+  GIT_REPOSITORY https://github.com/phoboslab/pl_mpeg.git
+  GIT_TAG c871f2be022ece7ef4f64230b4fb8e1fb9eb6023
+  SOURCE_SUBDIR do-not-add)  # single header, included by src/video.cpp
+FetchContent_MakeAvailable(pl_mpeg)
+
 # ---- engine core: pure C++, no window/audio dependency ----------------------
 add_library(gh_core STATIC
   src/json.cpp
@@ -147,9 +155,11 @@ if(GH_BUILD_GAME)
     src/state_play.cpp
     src/play_psych.cpp
     src/scene_draw.cpp
+    src/video.cpp
     src/state_results.cpp
   )
   target_link_libraries(godshand PRIVATE gh_core raylib)
+  target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})
   if(MSVC)
     target_compile_options(godshand PRIVATE /W3 /utf-8)
     target_link_options(godshand PRIVATE /ENTRY:mainCRTStartup)

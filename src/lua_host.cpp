@@ -990,9 +990,13 @@ int l_restartSong(lua_State* L) { G(L).restartSong(); return retBool(L, true); }
 int l_exitSong(lua_State* L) { G(L).exitSong(); return retBool(L, true); }
 int l_startCountdown(lua_State* L) { G(L).startCountdown(); return retBool(L, true); }
 int l_startVideo(lua_State* L) {
-    warn(L, "videos are not supported, skipping " + str(L, 1));
+    if (G(L).startVideo(str(L, 1), boolean(L, 2, true))) return retBool(L, true);
     G(L).startAndEnd();
     return retBool(L, false);
+}
+int l_makeVideoSprite(lua_State* L) {
+    return retBool(L, G(L).makeVideoSprite(cleanTag(str(L, 1)), str(L, 2), float(num(L, 3)), float(num(L, 4)),
+                                           str(L, 5, "camGame"), boolean(L, 6, false)));
 }
 int l_startDialogue(lua_State* L) {
     G(L).startAndEnd();
@@ -1483,7 +1487,7 @@ const Fn kFunctions[] = {
     {"addHits", l_addHits}, {"setHits", l_setHits}, {"getHits", l_getHits},
     {"setRatingPercent", l_setRatingPercent}, {"setRatingName", l_setRatingName}, {"setRatingFC", l_setRatingFC},
     {"endSong", l_endSong}, {"restartSong", l_restartSong}, {"exitSong", l_exitSong},
-    {"startCountdown", l_startCountdown}, {"startVideo", l_startVideo}, {"startDialogue", l_startDialogue},
+    {"startCountdown", l_startCountdown}, {"startVideo", l_startVideo}, {"makeVideoSprite", l_makeVideoSprite}, {"startDialogue", l_startDialogue},
     {"addCharacterToList", l_stubNil}, {"changeCharacter", l_changeCharacter},
     {"initSaveData", l_initSaveData}, {"flushSaveData", l_flushSaveData}, {"eraseSaveData", l_stubNil},
     {"setDataFromSave", l_setDataFromSave}, {"getDataFromSave", l_getDataFromSave},

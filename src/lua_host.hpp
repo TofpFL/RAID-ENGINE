@@ -44,6 +44,10 @@ public:
     virtual bool noteGet(std::string_view group, int index, std::string_view field, scene::Value& out) { return false; }
     virtual bool noteSet(std::string_view group, int index, std::string_view field, const scene::Value& v) { return false; }
     virtual void changeCharacter(int who, const std::string& name) {}
+    // Videos: false when the video cannot play (the script then moves on).
+    virtual bool startVideo(const std::string& name, bool canSkip) { return false; }
+    virtual bool makeVideoSprite(const std::string& tag, const std::string& name, float x, float y, const std::string& cam,
+                                 bool loop) { return false; }
     virtual void healthBarColors(uint32_t left, uint32_t right) {}
     virtual void timeBarColors(uint32_t left, uint32_t right) {}
 };

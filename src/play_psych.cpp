@@ -966,6 +966,7 @@ void PlayState::psychDraw() {
     gfx::endCanvas();
     for (const std::string& e : renderer_.errors) debugPrint(e, 0xFFFF6060);
     renderer_.errors.clear();
+    drawCutscene();
 }
 
 // ------------------------------------------------------------------ sound --
@@ -1057,6 +1058,131 @@ double PlayState::soundQuery(const std::string& tag, std::string_view what) {
     if (it == sounds_.end()) return 0;
     if (what == "volume") return it->second.volume;
     return 0;
+}
+
+
+// ----------------------------------------------------------------- videos --
+
+bool PlayState::openVideo(VideoSlot& v) {
+    const VideoSource src = findVideo(scene_->files, v.name, app().base);
+    if (src.converting) {
+        v.waiting = true;
+        return true;
+    }
+    v.waiting = false;
+    if (!src.error.empty()) {
+        debugPrint(src.error, 0xFFFFD040);
+        return false;
+    }
+    v.player = std::make_unique<VideoPlayer>();
+    if (!v.player->open(src.playable, v.loop)) {
+        debugPrint("cannot play video " + v.name, 0xFFFFD040);
+        v.player.reset();
+        return false;
+    }
+    v.player->setVolume(app().settings.musicVol);
+    return true;
+}
+
+bool PlayState::startVideo(const std::string& name, bool canSkip) {
+    if (!psych_) return false;
+    auto slot = std::make_unique<VideoSlot>();
+    slot->name = name;
+    slot->skippable = canSkip;
+    if (!openVideo(*slot)) return false;
+    cutscene_ = std::move(slot);
+    inCutscene_ = true;
+    return true;
+}
+
+bool PlayState::makeVideoSprite(const std::string& tag, const std::string& name, float x, float y, const std::string& cam,
+                                bool loop) {
+    if (!psych_ || tag.empty()) return false;
+    scene::Scene& sc = *scene_;
+    auto s = std::make_shared<scene::Sprite>();
+    s->tag = tag;
+    s->x = x;
+    s->y = y;
+    s->cam = scene::Scene::camFromName(cam);
+    if (auto it = sc.objects.find(tag); it != sc.objects.end()) sc.remove(it->second);
+    sc.objects[tag] = s;
+    sc.addFront(s);
+    VideoSlot& v = videoSprites_[tag];
+    v = VideoSlot{};
+    v.name = name;
+    v.tag = tag;
+    v.loop = loop;
+    return openVideo(v);
+}
+
+bool PlayState::updateVideos(double dt) {
+    // Video sprites: (re)attach the frame texture once the video is open.
+    for (auto it = videoSprites_.begin(); it != videoSprites_.end();) {
+        VideoSlot& v = it->second;
+        if (v.waiting && !openVideo(v)) { it = videoSprites_.erase(it); continue; }
+        if (v.player) {
+            v.player->update(dt);
+            const std::string key = "video:" + v.tag;
+            scene::Sprite* s = scene_->find(v.tag);
+            if (s && (!s->graphic || s->graphic->files.empty() || s->graphic->files[0] != key)) {
+                auto g = std::make_shared<scene::Graphic>();
+                g->files.push_back(key);
+                g->sizes.push_back({v.player->width(), v.player->height()});
+                psych::AtlasFrame f;
+                f.w = f.fw = float(v.player->width());
+                f.h = f.fh = float(v.player->height());
+                g->frames.push_back(f);
+                s->setGraphic(g);
+            }
+            renderer_.setDynamicTexture(key, v.player->texture());
+            if (v.player->ended()) {
+                renderer_.removeDynamicTexture(key);
+                if (scripts_) scripts_->call("onVideoFinished", {Value(v.tag)});
+                if (s) s->visible = false;
+                it = videoSprites_.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+    if (!cutscene_) return false;
+    App& a = app();
+    VideoSlot& c = *cutscene_;
+    bool done = false;
+    if (c.waiting) {
+        if (!openVideo(c)) done = true;
+        if (a.input.back()) done = true;
+    } else if (c.player) {
+        c.player->update(dt);
+        done = c.player->ended() || (c.skippable && (a.input.accept() || a.input.back()));
+    } else {
+        done = true;
+    }
+    if (done) {
+        cutscene_.reset();
+        inCutscene_ = false;
+        waitStart_ = a.now;
+        if (scripts_) scripts_->call("onVideoFinished", {Value(std::string("cutscene"))});
+        startAndEnd();
+    }
+    return true;
+}
+
+void PlayState::drawCutscene() {
+    if (!cutscene_) return;
+    gfx::beginCanvas();
+    DrawRectangleRec({-10, -10, gfx::W + 20, gfx::H + 20}, BLACK);
+    if (cutscene_->player && cutscene_->player->texture().id) {
+        const Texture2D& t = cutscene_->player->texture();
+        const float s = std::min(gfx::W / float(t.width), gfx::H / float(t.height));
+        const float w = t.width * s, h = t.height * s;
+        DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {(gfx::W - w) * 0.5f, (gfx::H - h) * 0.5f, w, h}, {0, 0}, 0, WHITE);
+    } else {
+        gfx::text(gfx::FontId::Ui, "Preparing video...", gfx::W * 0.5f, gfx::H * 0.5f - 15, 30, gfx::fade(WHITE, 0.8f), gfx::Align::Center);
+    }
+    if (cutscene_->skippable)
+        gfx::text(gfx::FontId::Ui, "Enter: skip", gfx::W - 30.0f, gfx::H - 40.0f, 20, gfx::fade(WHITE, 0.45f), gfx::Align::Right);
+    gfx::endCanvas();
 }
 
 // ------------------------------------------------------------- script API --

@@ -200,6 +200,8 @@ void SceneRenderer::clear() {
 }
 
 Texture2D* SceneRenderer::texture(const std::string& file) {
+    if (auto d = dynamic_.find(file); d != dynamic_.end()) return d->second.id ? &d->second : nullptr;
+    if (file.rfind("video:", 0) == 0) return nullptr;
     auto it = tex_.find(file);
     if (it != tex_.end()) return it->second.id ? &it->second : nullptr;
     Texture2D t{};

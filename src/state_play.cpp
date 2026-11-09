@@ -99,6 +99,7 @@ void PlayState::update(double dt) {
     fx_.update(float(dt));
     if (phase_ == Phase::Paused) { updatePause(); return; }
     if (phase_ == Phase::Dead) { updateDead(); return; }
+    if (psych_ && updateVideos(dt)) return;  // a cutscene holds the game
     if (phase_ == Phase::Waiting) {
         // A script stopped the countdown (cutscene, dialogue): keep scripts
         // running, start anyway if nothing resumes it.
