@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish an official release with this tag (e.g. v1.0.0). Empty: only build."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -153,7 +158,7 @@ jobs:
     needs: [tests, build, android, android-test, source]
     # Publish whatever platforms built, so one unavailable runner does not hold
     # back the other downloads.
-    if: always() && github.event_name == 'push' && needs.tests.result == 'success'
+    if: always() && (github.event_name == 'push' || inputs.release != '') && needs.tests.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -164,6 +169,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release }}
         run: |
           shopt -s nullglob
           files=(artifacts/*.zip artifacts/*.apk)
@@ -180,8 +186,12 @@ jobs:
 
           Mod packs: Freeplay > MOD PACKS in the game, or the [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) release.
           EOF
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "God's Hand $GITHUB_REF_NAME" --notes-file notes.md
+          # An official release: a pushed v* tag, or a manual run with a tag to create.
+          tag="$RELEASE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tag="$GITHUB_REF_NAME"; fi
+          if [ -n "$tag" ]; then
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tags look like v1.2.3, not '$tag'."; exit 1; }
+            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "God's Hand $tag" --notes-file notes.md
           else
             gh release delete nightly --cleanup-tag -y || true
             printf '\nAutomatic build of %s from %s.\n' "${GITHUB_SHA::7}" "$GITHUB_REF_NAME" >> notes.md
