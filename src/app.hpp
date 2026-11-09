@@ -12,6 +12,7 @@
 #include "library.hpp"
 #include "session.hpp"
 #include "settings.hpp"
+#include "touch_ui.hpp"
 
 namespace gh {
 
@@ -22,6 +23,10 @@ public:
     virtual void update(double dt) = 0;
     virtual void draw() = 0;
     virtual bool wantsMenuMusic() const { return true; }
+    // On-screen buttons for touchscreens (arrows, OK and BACK by default).
+    virtual TouchLayout touchLayout() const { return {}; }
+    // The app came back from the background (Android).
+    virtual void onResume() {}
 };
 
 struct Modifiers {
@@ -64,6 +69,8 @@ public:
     Library library;
     Mixer mixer;
     Input input;
+    TouchUi touch;
+    bool touchMode = false;  // on-screen buttons (Android, or --touch)
     Modifiers mods;
     double now = 0, dt = 0, startTime = 0;
     float fps = 0;
@@ -82,6 +89,9 @@ public:
         std::string editorSong, editorExport;  // --editor <song> [diff], --editor-export <file>
     } autoRun;
 
+    // Runs the game with a fresh App (Android can call main() again in the
+    // same process after the game was closed).
+    static int start(int argc, char** argv);
     int run(int argc, char** argv);
     void change(std::unique_ptr<State> next);
     void startMenuMusic();
@@ -103,6 +113,7 @@ private:
     PcmPtr menuPcm_;
     std::future<PcmPtr> menuJob_;
     size_t shotIndex_ = 0;
+    int winW_ = 1280, winH_ = 720;
 };
 
 App& app();

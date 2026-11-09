@@ -102,6 +102,12 @@ public:
     }
 
     bool wantsMenuMusic() const override { return false; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        if (loaded_ && error_.empty())
+            t.keys = {{"PLAY", KEY_SPACE}, {"SAVE", KEY_F2}, {"UNDO", KEY_F3}, {"SECTION -", KEY_A}, {"SECTION +", KEY_D}};
+        return t;
+    }
 
     void update(double dt) override {
         App& a = app();
@@ -137,7 +143,7 @@ public:
         }
 
         // Navigation
-        const float wheel = GetMouseWheelMove();
+        const float wheel = in.wheel();
         if (wheel != 0 || in.pressed(KEY_UP) || in.pressed(KEY_DOWN) || in.pressed(KEY_W) || in.pressed(KEY_S)) {
             if (playing_) stopPlay();
             int steps = wheel != 0 ? -int(std::round(wheel)) : (in.pressed(KEY_UP) || in.pressed(KEY_W) ? -1 : 1);
@@ -158,9 +164,9 @@ public:
         if (in.pressed(KEY_X)) zoom_ = std::min(8.0f, zoom_ * 1.25f);
 
         // Editing
-        if (ctrl && in.pressed(KEY_Z)) undo();
+        if ((ctrl && in.pressed(KEY_Z)) || in.pressed(KEY_F3)) undo();
         if (ctrl && in.pressed(KEY_Y)) redo();
-        if (ctrl && in.pressed(KEY_S)) save(false);
+        if ((ctrl && in.pressed(KEY_S)) || in.pressed(KEY_F2)) save(false);
         if (in.pressed(KEY_TAB)) {
             snapshot();
             EdSection& s = section(sectionAt(cur_));
@@ -434,10 +440,12 @@ private:
     }
 
     void handleMouse() {
+        const Input& in = app().input;
         int col = 0;
         double t = 0;
-        const bool inGrid = mouseCell(col, t);
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && inGrid) {
+        // A finger on an on-screen button is not a click on the grid.
+        const bool inGrid = mouseCell(col, t) && !(app().touchMode && app().touch.covers(GetMousePosition()));
+        if (in.mousePressed(MOUSE_BUTTON_LEFT) && inGrid) {
             const long hit = findNote(t, col, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
             snapshot();
             if (hit >= 0) {
@@ -467,8 +475,8 @@ private:
                 n->len = std::max(0.0, end - n->t);
             }
         }
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) dragging_ = false;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && inGrid) {
+        if (in.mouseReleased(MOUSE_BUTTON_LEFT)) dragging_ = false;
+        if (in.mousePressed(MOUSE_BUTTON_RIGHT) && inGrid) {
             const long hit = findNote(t, col, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
             if (hit >= 0) {
                 snapshot();
@@ -752,7 +760,7 @@ private:
             "Drag down  hold length",    "Right click  delete",         "Q/E  shorter / longer hold",
             "T  note type",              "TAB  camera side of section", "[ ]  BPM (SHIFT: 0.1)",
             "- =  scroll speed",         "Z/X  zoom",                   "Ctrl+C / Ctrl+V  copy section",
-            "DEL  clear section",        "Ctrl+Z / Ctrl+Y  undo, redo", "Ctrl+S  save",
+            "DEL  clear section",        "Ctrl+Z / Ctrl+Y  undo, redo", "Ctrl+S or F2  save",
             "ENTER  save and play",      "ESC  back"};
         for (const char* h : help) {
             gfx::text(FontId::Ui, h, hx, hy, 18, gfx::fade(WHITE, 0.75f));

@@ -1,7 +1,8 @@
 // Psych Engine / Flixel shaders are OpenFL fragment shaders in GLSL ES 1.0
 // style ("#pragma header", bitmap, openfl_TextureCoordv, flixel_texture2D,
 // gl_FragColor). translateShader() turns one into a GLSL 330 fragment shader
-// that runs with raylib's default vertex shader.
+// (or GLSL ES 100 for OpenGL ES 2, on Android) that runs with raylib's
+// default vertex shader.
 //
 // Uniforms the renderer sets on top of the shader's own:
 //   openfl_TextureSize  size of the texture being drawn
@@ -16,6 +17,6 @@
 
 namespace gh {
 
-std::string translateShader(std::string_view openflFragment);
+std::string translateShader(std::string_view openflFragment, bool gles = false);
 
 }  // namespace gh

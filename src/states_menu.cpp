@@ -8,6 +8,7 @@
 #include "characters.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
+#include "platform.hpp"
 #include "raylib.h"
 
 namespace gh {
@@ -31,6 +32,7 @@ Color diffColor(const std::string& d) {
 }
 
 void hints(const char* s) {
+    if (app().touchMode) return;  // the on-screen buttons speak for themselves
     DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
     gfx::text(FontId::Ui, s, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
 }
@@ -111,6 +113,12 @@ void waitForBackgroundJobs() {
 
 class TitleState : public State {
 public:
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        t.tapCode = KEY_ENTER;
+        return t;
+    }
     void update(double) override {
         App& a = app();
         flash_ = std::max(0.0f, flash_ - float(a.dt) * 1.8f);
@@ -141,7 +149,8 @@ public:
         gfx::text(FontId::Title, "of Principality and Demise", gfx::W / 2, 286, 38, kIvory, Align::Center, 2.0f);
         const float blink = leaving_ ? (std::fmod(float(now) * 12.0f, 2.0f) < 1.0f ? 1.0f : 0.2f)
                                      : 0.55f + 0.45f * std::sin(float(now) * 3.5f);
-        gfx::text(FontId::Ui, "PRESS ENTER TO BEGIN", gfx::W / 2, 470, 40, fade(WHITE, blink), Align::Center, 2.0f);
+        gfx::text(FontId::Ui, a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN", gfx::W / 2, 470, 40, fade(WHITE, blink),
+                  Align::Center, 2.0f);
         gfx::text(FontId::Ui, "A rhythm duel  -  v1.0.0", gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
         if (!a.mixer.audioOk())
             gfx::text(FontId::Ui, "No audio device found - the game will run silently", gfx::W / 2, 520, 22,
@@ -298,6 +307,12 @@ public:
         bg_ = currentColor();
     }
     bool wantsMenuMusic() const override { return !previewPlaying_; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        if (!modsOpen_) t.keys = {{"MODIFIERS", KEY_TAB}, {"MOD PACKS", KEY_M}, {"CHART EDITOR", KEY_SEVEN}, {"RESCAN", KEY_R}};
+        if (!modsOpen_ && platform::kAndroid) t.keys.insert(t.keys.begin() + 2, {"IMPORT ZIP", KEY_I});
+        return t;
+    }
 
     void update(double dt) override {
         App& a = app();
@@ -333,9 +348,31 @@ public:
             }
         }
         if (in.pressed(KEY_TAB)) { modsOpen_ = true; sfxPlay(Sfx::Scroll); }
-        if (in.pressed(KEY_R)) {
+        // Android: mod zips picked in the system file browser are copied to mods/.
+        if (platform::kAndroid && in.pressed(KEY_I) && !importing_) {
+            importing_ = platform::pickModZips();
+            note(importing_ ? "Pick one or more mod .zip files" : "The file picker is not available");
+        }
+        bool rescan = in.pressed(KEY_R);
+        if (importing_) {
+            int count = 0;
+            const platform::Import st = platform::importStatus(&count);
+            if (st == platform::Import::Done || st == platform::Import::Nothing) {
+                importing_ = false;
+                platform::resetImport();
+                if (st == platform::Import::Done) {
+                    rescan = true;
+                    note(TextFormat("Imported %d mod zip(s)", count));
+                } else {
+                    note("Nothing imported (mods must be .zip files)");
+                }
+            } else if (st == platform::Import::Copying) {
+                note("Copying...");
+            }
+        }
+        if (rescan) {
             const std::string id = n > 0 ? list_[size_t(sel)]->id : "";
-            a.library.scan(a.base);
+            a.library.scan(a.base, installProgress);
             rebuild();
             for (int i = 0; i < int(list_.size()); ++i)
                 if (list_[size_t(i)]->id == id) sel = i;
@@ -443,9 +480,14 @@ public:
             gfx::text(FontId::Ui, ms, 1035, 586, 22, (m.rate != 1.0 || m.botplay || m.practice || m.mirror) ? kGold : fade(kIvory, 0.5f),
                       Align::Center);
         }
-        if (a.library.customCount() == 0)
-            gfx::text(FontId::Ui, "Tip: drop FNF / Psych Engine songs into the 'songs' or 'mods' folder, then press R",
-                      40, 640, 20, fade(kIvory, 0.65f));
+        if (a.library.customCount() == 0) {
+            const std::string tip = a.touchMode
+                ? "Tip: get mods in MOD PACKS, or copy them to " + platform::displayPath(a.base + "mods") + " and tap RESCAN"
+                : std::string("Tip: drop FNF / Psych Engine songs into the 'songs' or 'mods' folder, then press R");
+            gfx::text(FontId::Ui, tip, 40, 640, 20, fade(kIvory, 0.65f));
+        }
+        if (!note_.empty() && a.now - noteAt_ < 4.0)
+            gfx::text(FontId::Ui, note_, 40, 600, 24, fade(kGold, float(std::min(1.0, 4.0 - (a.now - noteAt_)))), Align::Left, 1.5f);
         if (modsOpen_) drawMods();
         hints("ENTER play   LEFT/RIGHT difficulty   TAB modifiers   7 chart editor   M mod packs   R rescan   ESC back");
         gfx::endCanvas();
@@ -460,6 +502,23 @@ private:
     void changed() {
         sfxPlay(Sfx::Scroll);
         selChangedAt_ = app().now;
+    }
+    void note(const std::string& s) {
+        note_ = s;
+        noteAt_ = app().now;
+    }
+    // Unpacking big zips takes a while: keep the screen alive.
+    static void installProgress(const std::string& zip, double f) {
+        BeginDrawing();
+        ClearBackground(Color{12, 8, 20, 255});
+        const char* t1 = TextFormat("Installing %s", zip.c_str());
+        const int w = GetScreenWidth(), h = GetScreenHeight();
+        DrawText(t1, (w - MeasureText(t1, 24)) / 2, h / 2 - 30, 24, RAYWHITE);
+        DrawRectangle(w / 4, h / 2 + 10, w / 2, 10, Color{60, 50, 80, 255});
+        DrawRectangle(w / 4, h / 2 + 10, int(w / 2 * f), 10, Color{200, 160, 255, 255});
+        EndDrawing();
+        PollInputEvents();
+        SwapScreenBuffer();
     }
     int diffIndex() const {
         if (list_.empty()) return 0;
@@ -493,6 +552,9 @@ private:
     bool previewPlaying_ = false;
     bool modsOpen_ = false;
     int modSel_ = 0;
+    bool importing_ = false;
+    std::string note_;
+    double noteAt_ = 0;
 };
 
 // ---------------------------------------------------------------- Credits --

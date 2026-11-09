@@ -13,7 +13,27 @@ in vec4 fragColor;
 uniform sampler2D texture0;
 uniform vec4 colDiffuse;
 out vec4 gh_FragColor;
-uniform vec2 openfl_TextureSize;
+#define gh_sample texture
+#define gh_sampleLod textureLod
+)GLSL";
+
+// OpenGL ES 2 (Android): GLSL ES 1.0, like the shaders themselves.
+constexpr const char* kPreludeEs = R"GLSL(#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+#define gh_FragColor gl_FragColor
+#define gh_sample texture2D
+#define gh_sampleLod(s, uv, lod) texture2D(s, uv)
+)GLSL";
+
+constexpr const char* kCommon = R"GLSL(uniform vec2 openfl_TextureSize;
 uniform float gh_flipY;
 uniform float gh_premul;
 uniform bool hasTransform;
@@ -24,10 +44,10 @@ uniform bool openfl_HasColorTransform;
 #define openfl_Alphav (fragColor.a)
 #define openfl_ColorMultiplierv vec4(fragColor.rgb, 1.0)
 #define openfl_ColorOffsetv vec4(0.0)
-vec4 gh_tex(sampler2D s, vec2 uv) { vec4 c = texture(s, uv); return vec4(c.rgb * c.a, c.a); }
-vec4 gh_texLod(sampler2D s, vec2 uv, float lod) { vec4 c = textureLod(s, uv, lod); return vec4(c.rgb * c.a, c.a); }
+vec4 gh_tex(sampler2D s, vec2 uv) { vec4 c = gh_sample(s, uv); return vec4(c.rgb * c.a, c.a); }
+vec4 gh_texLod(sampler2D s, vec2 uv, float lod) { vec4 c = gh_sampleLod(s, uv, lod); return vec4(c.rgb * c.a, c.a); }
 vec4 gh_texBitmap(vec2 uv) {
-    vec4 c = texture(texture0, vec2(uv.x, mix(uv.y, 1.0 - uv.y, gh_flipY)));
+    vec4 c = gh_sample(texture0, vec2(uv.x, mix(uv.y, 1.0 - uv.y, gh_flipY)));
     return gh_premul > 0.5 ? vec4(c.rgb * c.a, c.a) : c;
 }
 vec4 flixel_texture2D(sampler2D s, vec2 uv) {
@@ -86,7 +106,7 @@ bool declaresBuiltin(const std::string& line) {
 
 }  // namespace
 
-std::string translateShader(std::string_view src) {
+std::string translateShader(std::string_view src, bool gles) {
     // Line pass: drop directives and declarations the prelude provides.
     std::string body;
     size_t p = 0;
@@ -143,7 +163,7 @@ std::string translateShader(std::string_view src) {
     body = replaceWord(body, "varying", "");
     // gl_FragData[0] -> gh_FragColor
     for (size_t q; (q = body.find("gl_FragData[0]")) != std::string::npos;) body.replace(q, 14, "gh_FragColor");
-    return std::string(kPrelude) + body;
+    return std::string(gles ? kPreludeEs : kPrelude) + kCommon + body;
 }
 
 }  // namespace gh

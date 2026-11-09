@@ -1146,7 +1146,6 @@ int l_callMethod(lua_State* L) {
     return bridgeCall(L, "game", objName, method, 2);
 }
 
-int l_stubFalse(lua_State* L) { return retBool(L, false); }
 int l_stubNil(lua_State* L) { (void)L; return 0; }
 
 int l_stubTrue(lua_State* L) { return retBool(L, true); }

@@ -627,6 +627,12 @@ void testShaderTranslation() {
     PCHECK(out.find("uniform sampler2D bitmap") == std::string::npos);  // supplied by the prelude
     PCHECK(out.find("varying") == std::string::npos && out.find("#pragma") == std::string::npos);
     PCHECK(out.find("uniform float iTime;") != std::string::npos);
+    // OpenGL ES 2 (Android): GLSL ES 1.0 with a float precision and varyings.
+    const std::string es = translateShader("#pragma header\nvoid main() { gl_FragColor = texture2D(bitmap, openfl_TextureCoordv); }\n", true);
+    PCHECK(es.rfind("#version 100", 0) == 0);
+    PCHECK(es.find("precision mediump float;") != std::string::npos && es.find("varying vec2 fragTexCoord;") != std::string::npos);
+    PCHECK(es.find("gh_FragColor = gh_texBitmap( openfl_TextureCoordv)") != std::string::npos);
+    PCHECK(es.find("#define gh_FragColor gl_FragColor") != std::string::npos && es.find(" in vec2") == std::string::npos);
 }
 
 void testHScript() {

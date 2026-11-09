@@ -8,12 +8,19 @@
 
 #include "common.hpp"
 #include "gfx.hpp"
+#include "platform.hpp"
 #include "raylib.h"
 
 namespace gh {
 
-static App g_app;
-App& app() { return g_app; }
+static App* g_app = nullptr;
+App& app() { return *g_app; }
+
+int App::start(int argc, char** argv) {
+    delete g_app;
+    g_app = new App();
+    return g_app->run(argc, argv);
+}
 
 static std::vector<double> parseList(const char* s) {
     std::vector<double> v;
@@ -58,7 +65,8 @@ double App::menuBeat() {
 }
 
 void App::applyVolumes() {
-    SetMasterVolume(settings.masterVol);
+    platform::rememberVolume(settings.masterVol);
+    if (!platform::inBackground()) SetMasterVolume(settings.masterVol);
     mixer.setVolume(settings.musicVol);
     sfxSetVolume(settings.sfxVol);
 }
@@ -66,6 +74,7 @@ void App::applyVolumes() {
 void App::saveSettings() { settings.save(base + "settings.cfg"); }
 
 void App::toggleFullscreen() {
+    if (platform::kAndroid) return;
     ToggleBorderlessWindowed();
     settings.fullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
 }
@@ -92,6 +101,8 @@ int App::run(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') autoRun.diff = next();
         } else if (!std::strcmp(a, "--editor-export")) autoRun.editorExport = next();
         else if (!std::strcmp(a, "--list-songs")) listSongs = true;
+        else if (!std::strcmp(a, "--touch")) touchMode = true;
+        else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
     if (listSongs) {
         // Prints what the song library finds (no window): --list-songs [--base dir]
@@ -112,6 +123,11 @@ int App::run(int argc, char** argv) {
         return 0;
     }
 
+    if (platform::kAndroid) {
+        base = platform::dataDir();
+        platform::prepareDataDir(base);
+        touchMode = true;
+    }
     if (base.empty()) base = GetApplicationDirectory();
     if (!FileExists((base + "assets/fonts/Rajdhani-Bold.ttf").c_str())) {
         std::string cwd = std::string(GetWorkingDirectory()) + "/";
@@ -120,14 +136,19 @@ int App::run(int argc, char** argv) {
     settings.load(base + "settings.cfg");
     scores.load(base + "scores.cfg");
 
-    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT;
+    unsigned flags = platform::kAndroid ? 0u : (FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     if (settings.vsync) flags |= FLAG_VSYNC_HINT;
     SetConfigFlags(flags);
     SetTraceLogLevel(LOG_WARNING);
-    InitWindow(1280, 720, "God's Hand of Principality and Demise");
+    // Android: the whole screen, whatever its size.
+    InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
+               "God's Hand of Principality and Demise");
+    platform::afterWindowInit();
     SetExitKey(KEY_NULL);
-    SetWindowMinSize(640, 360);
-    if (settings.fullscreen && !autoRun.enabled) ToggleBorderlessWindowed();
+    if (!platform::kAndroid) {
+        SetWindowMinSize(640, 360);
+        if (settings.fullscreen && !autoRun.enabled) ToggleBorderlessWindowed();
+    }
 
     InitAudioDevice();
     mixer.init();
@@ -174,6 +195,7 @@ int App::run(int argc, char** argv) {
         PollInputEvents();
         now = nowSec();
         input.poll(now);
+        if (touchMode) touch.update(input, now);
         const int cap = settings.vsync ? 0 : settings.fpsCap;
         if (cap > 0 && now < nextFrame) {
             const double wait = nextFrame - now;
@@ -204,6 +226,8 @@ int App::run(int argc, char** argv) {
 
 void App::frame() {
     input.beginFrame(dt);
+    if (platform::takeResumed()) state_->onResume();
+    if (touchMode) touch.setLayout(input, state_->touchLayout(), now);
     if (input.pressed(KEY_F11) || (input.pressed(KEY_ENTER) && (input.isDown(KEY_LEFT_ALT) || input.isDown(KEY_RIGHT_ALT))))
         toggleFullscreen();
 
@@ -236,6 +260,7 @@ void App::frame() {
     if (settings.showFps) gfx::text(gfx::FontId::Ui, TextFormat("%d FPS", int(fps + 0.5f)), 8, 4, 20, WHITE, gfx::Align::Left, 1.5f);
     gfx::endCanvas();
     gfx::drawLetterbox();
+    if (touchMode) touch.draw();
     EndDrawing();
 
     if (autoRun.enabled) {

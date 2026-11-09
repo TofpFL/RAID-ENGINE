@@ -29,6 +29,11 @@ const Color kRatingCols[4] = {{255, 215, 100, 255}, {120, 220, 255, 255}, {205, 
 class ResultsState : public State {
 public:
     explicit ResultsState(ResultData r) : r_(std::move(r)) {}
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        if (!r_.replayPath.empty()) t.keys = {{"WATCH REPLAY", KEY_R}};
+        return t;
+    }
     void enter() override {
         t0_ = app().now;
         sfxPlay(r_.rank == "S" || r_.rank == "S+" ? Sfx::Unlock : Sfx::Confirm);
@@ -124,8 +129,9 @@ public:
             gfx::text(FontId::Title, "WEEK COMPLETE  -  " + fmtThousands(r_.req.storyScore), 250, 540, 28, kGold, Align::Center, 2.0f);
         DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
         const bool next = r_.req.story && !r_.req.storyQueue.empty();
-        std::string hint = next ? "ENTER next song" : "ENTER continue";
-        if (!r_.replayPath.empty()) hint += "      R watch replay";
+        const char* ok = a.touchMode ? "OK" : "ENTER";
+        std::string hint = std::string(ok) + (next ? " next song" : " continue");
+        if (!r_.replayPath.empty() && !a.touchMode) hint += "      R watch replay";
         if (r_.replay) hint = "REPLAY      " + hint;
         gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         gfx::endCanvas();

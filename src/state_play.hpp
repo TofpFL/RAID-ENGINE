@@ -29,6 +29,8 @@ public:
     explicit PlayState(PlayRequest r);
     ~PlayState() override;
     bool wantsMenuMusic() const override { return false; }
+    TouchLayout touchLayout() const override;
+    void onResume() override;
     void enter() override;
     void update(double dt) override;
     void draw() override;

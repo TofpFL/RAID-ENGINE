@@ -1,5 +1,6 @@
 // Mod packs screen (Freeplay: M): downloads the packs published on the
-// game's "mods" release with the system's curl and installs them.
+// game's "mods" release (with the system's curl; on Android through Java)
+// and installs them.
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
@@ -10,6 +11,7 @@
 #include "app.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
+#include "platform.hpp"
 #include "process.hpp"
 #include "raylib.h"
 
@@ -51,8 +53,8 @@ class ModPacksState : public State {
 public:
     void enter() override {
         App& a = app();
-        curl_ = findProgram(a.base, "curl", "--version");
-        if (curl_.empty()) {
+        if (!platform::kAndroid) curl_ = findProgram(a.base, "curl", "--version");
+        if (!canDownload()) {
             sh_->status = "curl was not found. Download the packs from the game's Releases page (tag 'mods') and put the zips in mods/.";
             return;
         }
@@ -89,7 +91,7 @@ public:
         if (!busy) {
             if (in.up()) { sel_ = (sel_ + n - 1) % n; sfxPlay(Sfx::Scroll); }
             if (in.down()) { sel_ = (sel_ + 1) % n; sfxPlay(Sfx::Scroll); }
-            if (in.accept() && !curl_.empty() && n > 1) {
+            if (in.accept() && canDownload() && n > 1) {
                 std::vector<Pack> todo;
                 if (sel_ == 0) {
                     for (const Pack& p : packs())
@@ -111,8 +113,8 @@ public:
 
     void draw() override {
         App& a = app();
-        drawMenuBackground(a.now, 0x5A3C8C, menuPulse());
         gfx::beginCanvas();
+        drawMenuBackground(a.now, 0x5A3C8C, menuPulse());
         gfx::text(FontId::Title, "MOD PACKS", gfx::W / 2, 40, 54, gfx::rgb(0xFFE08A), Align::Center, 3);
         std::string status, current;
         bool busy;
@@ -144,8 +146,8 @@ public:
         if (busy && !current.empty())
             status += TextFormat("  (%.1f MB)", double(fileSizeOf(current)) / 1e6);
         gfx::text(FontId::Ui, status, gfx::W / 2, 620, 20, gfx::fade(WHITE, 0.8f), Align::Center);
-        gfx::text(FontId::Ui, busy ? "Working... please wait" : "UP/DOWN select   ENTER download   ESC back", gfx::W / 2, 670, 20,
-                  gfx::fade(WHITE, 0.55f), Align::Center);
+        const char* help = busy ? "Working... please wait" : a.touchMode ? "OK download" : "UP/DOWN select   ENTER download   ESC back";
+        gfx::text(FontId::Ui, help, gfx::W / 2, 670, 20, gfx::fade(WHITE, 0.55f), Align::Center);
         gfx::endCanvas();
     }
 
@@ -158,6 +160,7 @@ private:
         std::lock_guard<std::mutex> lk(sh_->m);
         return sh_->packs;
     }
+    bool canDownload() const { return platform::kAndroid || !curl_.empty(); }
     bool installed(const Pack& p) const {
         std::error_code ec;
         return fs::is_directory(toPath(app().base + "mods/" + p.folder), ec);
@@ -186,8 +189,15 @@ private:
         }
         std::error_code ec;
         fs::create_directories(toPath(dest).parent_path(), ec);
-        const int rc = runProcess(curl_, {"-L", "--fail", "--silent", "--show-error", "--retry", "3", "-o", dest + ".part", url});
-        if (rc != 0) {
+        bool ok;
+        if (platform::kAndroid) {
+            std::string err;
+            ok = false;
+            for (int attempt = 0; attempt < 3 && !ok; ++attempt) ok = platform::download(url, dest + ".part", err);
+        } else {
+            ok = runProcess(curl_, {"-L", "--fail", "--silent", "--show-error", "--retry", "3", "-o", dest + ".part", url}) == 0;
+        }
+        if (!ok) {
             fs::remove(toPath(dest + ".part"), ec);
             return false;
         }

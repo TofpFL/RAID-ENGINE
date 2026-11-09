@@ -6,8 +6,12 @@ spam charts of any size, has a chart editor, charts any song by itself, records 
 
 *Um duelo de ritmo ao estilo de Friday Night Funkin', escrito de raiz em C++20 e unido ao melhor do PulseForge.*
 
-**Downloads (Windows / Linux / macOS):** [Releases](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases) — extract the zip and run `godshand` (`godshand.exe` on Windows).
-**Mod packs:** release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods), or press `M` in Freeplay.
+**Downloads:** [Releases](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases)
+- Windows / Linux / macOS: extract the zip and run `godshand` (`godshand.exe` on Windows).
+- Android 7+: install `GodsHand-android.apk` (allow installing from that source when asked).
+- `GodsHand-complete-source.zip`: the game plus every library it uses; builds without internet.
+
+**Mod packs:** release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods), or MOD PACKS (`M`) in Freeplay.
 
 ---
 
@@ -36,6 +40,13 @@ Os mods do PulseForge estão publicados como **pacotes** no release [`mods`](htt
 - **AutoChart**: uma pasta só com o áudio (ou um `.mp3`/`.ogg` solto em `songs/`) ganha charts Easy/Normal/Hard gerados a partir da música; abre-os no editor para os afinar.
 - **Replays** (`R` nos resultados), **mods por `.zip`** (põe em `mods/`, `R` no Freeplay), **controlos táteis** (Opções).
 
+### Android
+- Instala o `GodsHand-android.apk` (Android 7 ou mais recente; o telemóvel pede para permitir instalar desta origem).
+- **Controlos no ecrã**: setas, OK e VOLTAR nos menus; numa música o ecrã inteiro divide-se nas pistas (toca em qualquer ponto da coluna) e há um botão PAUSA. O botão "voltar" do Android também pausa.
+- **Mods**: Freeplay → **MOD PACKS** descarrega e instala os pacotes; **IMPORT ZIP** abre o explorador de ficheiros e copia os `.zip` que escolheres. A pasta do jogo é `Android/data/com.godshand.game/files/` (`mods/`, `songs/`, `replays/`...).
+- Ao sair da app a música para e o jogo fica em pausa até voltares.
+- Shaders e Lua/HScript funcionam como no PC. Vídeos `.mpg` tocam; `.mp4`/`.webm` precisam do ffmpeg, que não existe no Android.
+
 ### Conteúdo
 | Música | Adversário | BPM | Dificuldades |
 |---|---|---|---|
@@ -56,7 +67,8 @@ Modo **História**, **Freeplay** com pré-visualização, **Opções**, **calibr
 | Ecrã inteiro | `F11` |
 
 ### Compilar
-Precisas de CMake ≥ 3.20 e de um compilador C++20. O raylib 5.5, o Lua 5.4.7, o miniz e o pl_mpeg são descarregados automaticamente.
+Precisas de CMake ≥ 3.20 e de um compilador C++20. O raylib 5.5, o Lua 5.4.7, o miniz e o pl_mpeg são descarregados automaticamente
+(o `GodsHand-complete-source.zip` dos releases já os traz em `third_party/` e compila sem internet).
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
@@ -64,6 +76,8 @@ cmake --build build --config Release
 ```
 Linux precisa de: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev`.
 Para gerar um `.exe` de Windows a partir de Linux: `-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake`.
+Android: com o Android SDK (`platforms;android-34`, `build-tools;34.0.0`, `ndk;27.2.12479018`), um JDK, Ninja e zip,
+`ANDROID_SDK=/caminho/android-sdk android/build_apk.sh` cria `build/GodsHand-android.apk`.
 
 ### Porquê assim
 O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, conteúdo em LFS no próprio repositório) e ficou difícil de manter. Aqui o núcleo pequeno e testado do God's Hand fica como base e o que o PulseForge tinha de melhor foi reescrito por cima, com testes. O conteúdo dos mods vive fora do código: pacotes no release `mods`, gerados uma vez a partir do LFS do PulseForge pelo workflow *Mod packs*.
@@ -86,6 +100,10 @@ O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, 
 
 **Also** – chart editor (Freeplay `7`), in-game mod pack downloader (Freeplay `M`), AutoChart for songs without charts, deterministic replays, `.zip` mod installs, touch controls.
 
+**Android** – `GodsHand-android.apk` (Android 7+, arm64/armv7/x86_64). On-screen arrows, OK and BACK in the menus; during a song the whole screen is split into the lanes, with a PAUSE button (the system back button pauses too). Freeplay has MOD PACKS (download) and IMPORT ZIP (system file picker). Game files live in `Android/data/com.godshand.game/files/`. The app pauses and goes silent in the background. Shaders run as GLSL ES 1.0; `.mp4`/`.webm` videos need ffmpeg, which Android does not have (`.mpg` plays). Built with `android/build_apk.sh` (NDK + CMake, a small Java activity for fullscreen and the file picker); signed with `android/godshand.keystore` (password `godshand`) so every build installs over the previous one, or with your own key through the `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASS` repository secrets.
+
+**Complete source** – `GodsHand-complete-source.zip` in each release is the game with the exact sources of raylib, Lua, miniz and pl_mpeg in `third_party/` (used automatically by CMake), so it builds offline; `tools/make_source_package.sh` makes it.
+
 **Engine** – the song position comes from the audio mixer's frame counter; input is polled at ~1 kHz with timestamps. Pure-logic core (`json`, `chart`, `chart_stream`, `session`, `synth`, `composer`, `psych`, `scene`, `lua_host`, `hscript`, `shader_glsl`, `basegame`, `autochart`, `replay`, `mod_install`) with a headless test suite:
 ```sh
 build/gh_tests                          # all tests (add --audio to render the songs too)
@@ -97,6 +115,8 @@ build/godshand --list-songs --base dir/ # what the song library finds in dir/son
 **Layout**
 ```
 src/        engine + game (C++20, raylib for window/audio/drawing, Lua 5.4, miniz, pl_mpeg)
+android/    APK build: manifest, icons, Java activity, build and emulator test scripts
+tools/      complete source package
 tests/      headless tests, chart benchmark and mod corpus checker
 assets/     fonts (SIL OFL)
 songs/      your own songs (charts, or just audio for AutoChart)

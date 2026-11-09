@@ -5,6 +5,7 @@
 #include "app.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
+#include "platform.hpp"
 #include "raylib.h"
 #include "synth.hpp"
 
@@ -87,6 +88,17 @@ public:
         int lane = 0;
         for (Row& r : rows_)
             if (r.kind == Row::Key) r.lane = lane++;
+        if (platform::kAndroid) {
+            // No keyboard and no window: the lanes are the screen itself.
+            bool controls = false;
+            std::vector<Row> kept;
+            for (Row& r : rows_) {
+                if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0;
+                if (controls || r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "VSync") continue;
+                kept.push_back(std::move(r));
+            }
+            rows_ = std::move(kept);
+        }
         sel_ = 1;
     }
 
@@ -201,9 +213,11 @@ public:
         const Row& r = rows_[size_t(sel_)];
         DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
         gfx::text(FontId::Ui, r.help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
-        DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-        gfx::text(FontId::Ui, "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC save and back", gfx::W / 2, gfx::H - 33, 22,
-                  Color{220, 214, 235, 255}, Align::Center);
+        if (!a.touchMode) {
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
+            gfx::text(FontId::Ui, "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC save and back", gfx::W / 2, gfx::H - 33,
+                      22, Color{220, 214, 235, 255}, Align::Center);
+        }
         gfx::endCanvas();
     }
 
@@ -224,6 +238,13 @@ private:
 class CalibrationState : public State {
 public:
     bool wantsMenuMusic() const override { return false; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        t.tapCode = KEY_SPACE;  // tap anywhere on the beat
+        t.keys = {{"APPLY", KEY_ENTER}, {"RESET", KEY_R}, {"CANCEL", KEY_ESCAPE}};
+        return t;
+    }
     void enter() override {
         App& a = app();
         a.stopMenuMusic();
@@ -275,8 +296,10 @@ public:
         gfx::beginCanvas();
         drawMenuBackground(a.now, 0x5CC8FF, 0);
         gfx::text(FontId::Title, "CALIBRATE OFFSET", gfx::W / 2, 40, 48, kGold, Align::Center, 2.0f);
-        gfx::text(FontId::Ui, "Tap any key on every beat you HEAR (not see). Keep going for a few bars.", gfx::W / 2, 110, 28,
-                  kIvory, Align::Center, 1.5f);
+        gfx::text(FontId::Ui,
+                  a.touchMode ? "Tap the screen on every beat you HEAR (not see). Keep going for a few bars."
+                              : "Tap any key on every beat you HEAR (not see). Keep going for a few bars.",
+                  gfx::W / 2, 110, 28, kIvory, Align::Center, 1.5f);
         // visual metronome, compensated with the current offset
         const double vis = clock_ - a.settings.offsetMs;
         const double frac = std::fmod(vis / 500.0 + 1000.0, 1.0);
@@ -301,8 +324,8 @@ public:
         gfx::text(FontId::Ui, TextFormat("Current offset: %+d ms", int(a.settings.offsetMs)), gfx::W / 2, 450, 24,
                   fade(kIvory, 0.7f), Align::Center);
         DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-        gfx::text(FontId::Ui, "ENTER apply (needs 4+ taps)   R reset   ESC cancel", gfx::W / 2, gfx::H - 33, 22,
-                  Color{220, 214, 235, 255}, Align::Center);
+        gfx::text(FontId::Ui, a.touchMode ? "APPLY needs 4+ taps" : "ENTER apply (needs 4+ taps)   R reset   ESC cancel", gfx::W / 2,
+                  gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         gfx::endCanvas();
     }
 

@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "common.hpp"
+#include "platform.hpp"
 #include "raylib.h"
 #include "synth.hpp"
 
@@ -232,7 +233,8 @@ void Mixer::audioCallback(float* out, unsigned frames) {
         g_seq.fetch_add(1, std::memory_order_acq_rel);
     };
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
-    if (!playing_ || !lk.owns_lock()) {
+    // In the background (Android) the song holds its place instead of playing on.
+    if (!playing_ || !lk.owns_lock() || platform::inBackground()) {
         std::memset(out, 0, size_t(frames) * 2 * sizeof(float));
         publish(pos_.load());
         return;

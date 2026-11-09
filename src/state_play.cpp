@@ -265,6 +265,7 @@ void PlayState::setup() {
     for (int l = 0; l < int(lk.size()); ++l)
         for (int code : lk[size_t(l)])
             if (code > 0 && code < Input::kMaxCodes) keyLane_[size_t(code)] = l;
+    for (int l = 0; l < chart_.keys && l < 9; ++l) keyLane_[size_t(kTouchLane + l)] = l;  // on-screen lanes
 
     // Script note ids: every note in chart order.
     noteOrder_.clear();
@@ -415,7 +416,7 @@ void PlayState::beginCountdown() {
 void PlayState::handleInput() {
     App& a = app();
     for (const InputEvent& e : a.input.events()) {
-        const bool pauseKey = e.code == KEY_ESCAPE || e.code == kPadBase + GAMEPAD_BUTTON_MIDDLE_RIGHT ||
+        const bool pauseKey = e.code == KEY_ESCAPE || e.code == KEY_BACK || e.code == kPadBase + GAMEPAD_BUTTON_MIDDLE_RIGHT ||
                               (e.code == KEY_ENTER && !a.input.isDown(KEY_LEFT_ALT) && !a.input.isDown(KEY_RIGHT_ALT));
         if (e.down && pauseKey && (e.code <= 0 || e.code >= Input::kMaxCodes || keyLane_[size_t(e.code)] < 0)) {
             if (scripts_ && scripts_->callStops("onPause")) continue;
@@ -432,7 +433,7 @@ void PlayState::handleInput() {
             laneUp(lane, t);
         }
     }
-    if (a.settings.touchControls && !replaying_) handleTouch();
+    if (a.settings.touchControls && !a.touchMode && !replaying_) handleTouch();
     // Replays feed the recorded presses at their song times.
     while (replaying_ && replayIdx_ < playback_.events.size() && playback_.events[replayIdx_].t <= songMs_) {
         const ReplayEvent& ev = playback_.events[replayIdx_++];
@@ -454,7 +455,28 @@ void PlayState::laneUp(int lane, double t) {
     if (scripts_) scripts_->call("onKeyRelease", {scene::Value(double(lane))});
 }
 
-// Touchscreens: each player lane is a full-height column around its strum.
+// Touchscreens (the on-screen buttons): the whole screen is split into the
+// player's lanes, with a PAUSE button in the corner.
+TouchLayout PlayState::touchLayout() const {
+    TouchLayout t;
+    if (phase_ != Phase::Playing || (substate_.active && substate_.pausesGame)) return t;  // menus: arrows, OK, BACK
+    t.pad = false;
+    t.keysLeft = true;
+    if (cutscene_) {
+        t.keys = {{"SKIP", KEY_ENTER}};
+        return t;
+    }
+    t.keys = {{"PAUSE", KEY_ESCAPE}};
+    if (!replaying_ && !cfg_.botplay) t.lanes = chart_.keys;
+    return t;
+}
+
+// Back from the background: wait in the pause menu instead of throwing notes at the player.
+void PlayState::onResume() {
+    if (phase_ == Phase::Playing && !cutscene_) pause();
+}
+
+// Touch controls option (desktop): each player lane is a full-height column around its strum.
 void PlayState::handleTouch() {
     const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
     const float sc = std::min(sw / gfx::W, sh / gfx::H);
@@ -462,8 +484,8 @@ void PlayState::handleTouch() {
     bool want[9] = {};
     const int K = chart_.keys;
     const float half = std::min(112.0f, 500.0f / float(K)) * 0.5f + 4.0f;
-    for (int i = 0; i < GetTouchPointCount(); ++i) {
-        const float x = (GetTouchPosition(i).x - ox) / sc;
+    for (const TouchPoint& tp : touchPoints()) {  // fingers, or the mouse while clicked
+        const float x = (tp.pos.x - ox) / sc;
         int best = -1;
         float bestD = 1e9f;
         for (int l = 0; l < K; ++l) {
@@ -646,7 +668,7 @@ void PlayState::resume() {
     const auto lk = a.settings.laneKeys(chart_.keys);
     for (int l = 0; l < chart_.keys; ++l) {
         if (heldCount_[l] <= 0) continue;
-        bool down = false;
+        bool down = a.input.isDown(kTouchLane + l);
         for (int code : lk[size_t(l)]) down |= a.input.isDown(code);
         if (!down) {
             heldCount_[l] = 0;
@@ -942,7 +964,7 @@ void PlayState::drawHud() {
     if ((cfg_.botplay || replaying_) && hudShown("botplayTxt"))
         gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
                   fade(kGold, 0.55f + 0.35f * std::sin(float(now) * 3.0f)), Align::Center, 2.0f);
-    if (s.touchControls && !replaying_) {
+    if (s.touchControls && !a.touchMode && !replaying_) {
         const float half = std::min(112.0f, 500.0f / float(chart_.keys)) * 0.5f;
         for (int l = 0; l < chart_.keys; ++l) {
             const Vector2 c = strumCenter(1, l);
@@ -1017,7 +1039,8 @@ void PlayState::drawDead() {
     const float al = saturate(t * 1.5f - 0.3f);
     gfx::glowText(FontId::Title, "YOU HAVE FALLEN", gfx::W / 2, 220, 72, fade(Color{255, 80, 90, 255}, al),
                   Color{255, 40, 60, 255});
-    gfx::text(FontId::Ui, "ENTER rise again      ESC leave", gfx::W / 2, 360, 34, fade(kIvory, al), Align::Center, 2.0f);
+    gfx::text(FontId::Ui, a.touchMode ? "OK rise again      BACK leave" : "ENTER rise again      ESC leave", gfx::W / 2, 360, 34,
+              fade(kIvory, al), Align::Center, 2.0f);
 }
 
 void PlayState::drawDebugLog() {
@@ -1038,7 +1061,7 @@ void PlayState::drawLoading() {
     if (phase_ == Phase::Error) {
         gfx::text(FontId::Title, "THE HEAVENS ARE SILENT", gfx::W / 2, 230, 50, kMissColor, Align::Center, 2.0f);
         gfx::text(FontId::Ui, error_, gfx::W / 2, 330, 28, kIvory, Align::Center, 1.5f);
-        gfx::text(FontId::Ui, "ENTER return", gfx::W / 2, 420, 26, fade(kIvory, 0.7f), Align::Center);
+        gfx::text(FontId::Ui, a.touchMode ? "OK return" : "ENTER return", gfx::W / 2, 420, 26, fade(kIvory, 0.7f), Align::Center);
     } else {
         for (int i = 0; i < 4; ++i) {
             const float ang = float(now) * 2.5f + i * 1.5707963f;

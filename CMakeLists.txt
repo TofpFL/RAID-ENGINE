@@ -9,7 +9,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(GH_BUILD_GAME "Build the game executable (needs raylib)" ON)
-option(GH_BUILD_TESTS "Build the headless test executable" ON)
+if(ANDROID)
+  # Android (NDK toolchain): the game is libgodshand.so inside an APK, see android/.
+  option(GH_BUILD_TESTS "Build the headless test executable" OFF)
+else()
+  option(GH_BUILD_TESTS "Build the headless test executable" ON)
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -17,6 +22,16 @@ find_package(Threads REQUIRED)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 include(FetchContent)
+
+# The complete source package ships every library in third_party/: use those
+# copies instead of downloading (the game then builds without internet).
+foreach(dep IN ITEMS lua miniz pl_mpeg raylib)
+  string(TOUPPER ${dep} dep_upper)
+  if(NOT FETCHCONTENT_SOURCE_DIR_${dep_upper} AND IS_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/${dep})
+    set(FETCHCONTENT_SOURCE_DIR_${dep_upper} ${CMAKE_SOURCE_DIR}/third_party/${dep})
+    message(STATUS "Using third_party/${dep}")
+  endif()
+endforeach()
 
 # ---- Lua 5.4 (mod scripts) -----------------------------------------------------
 # Compiled as C++ so script errors unwind with exceptions instead of longjmp.
@@ -130,6 +145,9 @@ if(GH_BUILD_GAME)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
   set(CUSTOMIZE_BUILD OFF CACHE BOOL "" FORCE)
+  if(ANDROID)
+    set(PLATFORM "Android" CACHE STRING "" FORCE)  # raylib's NativeActivity + OpenGL ES 2 backend
+  endif()
   # Pinned raylib release. Set FETCHCONTENT_SOURCE_DIR_RAYLIB to use a local copy.
   FetchContent_Declare(raylib
     GIT_REPOSITORY https://github.com/raysan5/raylib.git
@@ -140,7 +158,7 @@ if(GH_BUILD_GAME)
   # frame limit, so raylib must not swap/poll/sleep inside EndDrawing().
   target_compile_definitions(raylib PRIVATE SUPPORT_CUSTOM_FRAME_CONTROL=1)
 
-  add_executable(godshand WIN32
+  set(GH_GAME_SOURCES
     src/main.cpp
     src/app.cpp
     src/audio.cpp
@@ -160,7 +178,18 @@ if(GH_BUILD_GAME)
     src/state_editor.cpp
     src/state_modpacks.cpp
     src/process.cpp
+    src/platform.cpp
+    src/touch_ui.cpp
   )
+  if(ANDROID)
+    # NativeActivity loads libgodshand.so; raylib's android_main() calls main().
+    add_library(godshand SHARED ${GH_GAME_SOURCES})
+    target_include_directories(godshand PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
+    target_link_libraries(godshand PRIVATE gh_core raylib android log EGL GLESv2 OpenSLES m)
+    target_link_options(godshand PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,-z,max-page-size=16384)
+  else()
+    add_executable(godshand WIN32 ${GH_GAME_SOURCES})
+  endif()
   target_link_libraries(godshand PRIVATE gh_core raylib)
   target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})
   if(MSVC)
@@ -177,12 +206,14 @@ if(GH_BUILD_GAME)
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/
-  add_custom_command(TARGET godshand POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:godshand>/assets
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/songs $<TARGET_FILE_DIR:godshand>/songs
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:godshand>/mods)
+  if(NOT ANDROID)
+    add_custom_command(TARGET godshand POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:godshand>/assets
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/songs $<TARGET_FILE_DIR:godshand>/songs
+      COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:godshand>/mods)
 
-  install(TARGETS godshand RUNTIME DESTINATION .)
-  install(DIRECTORY assets songs DESTINATION .)
-  install(FILES README.md LICENSE DESTINATION .)
+    install(TARGETS godshand RUNTIME DESTINATION .)
+    install(DIRECTORY assets songs DESTINATION .)
+    install(FILES README.md LICENSE DESTINATION .)
+  endif()
 endif()
