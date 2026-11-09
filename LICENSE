@@ -28,5 +28,11 @@ Third-party components keep their own licenses:
 - raylib (fetched at build time): zlib/libpng license
 - Lua 5.4 (fetched at build time): MIT license, Copyright (C) 1994-2024 Lua.org, PUC-Rio
 - miniz (fetched at build time): MIT license, Copyright 2013-2014 RAD Game Tools and Valve Software
+- pl_mpeg (fetched at build time): MIT license, Copyright Dominic Szablewski
+- The original game's character offsets and stage layouts used for older
+  builds (src/basegame.cpp) follow Friday Night Funkin' (Apache-2.0,
+  The Funkin' Crew); the images themselves come from the mods.
+- Mod packs on the "mods" release are the user's own content and are not
+  part of this repository.
 - assets/fonts/CinzelDecorative-Bold.ttf: SIL Open Font License 1.1 (see OFL-CinzelDecorative.txt)
 - assets/fonts/Rajdhani-Bold.ttf: SIL Open Font License 1.1 (see OFL-Rajdhani.txt)
