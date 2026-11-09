@@ -651,7 +651,8 @@ void PlayState::onSection(int s) {
 
 void PlayState::pause() {
     App& a = app();
-    platform::log(TextFormat("paused at %.1f s: %d hits, %d misses", songMs_ / 1000.0,
+    const long presses = std::count_if(record_.events.begin(), record_.events.end(), [](const ReplayEvent& e) { return e.down; });
+    platform::log(TextFormat("paused at %.1f s: %ld presses, %d hits, %d misses", songMs_ / 1000.0, presses,
                              session_.counts[0] + session_.counts[1] + session_.counts[2] + session_.counts[3], session_.misses));
     phase_ = Phase::Paused;
     pauseSel_ = 0;

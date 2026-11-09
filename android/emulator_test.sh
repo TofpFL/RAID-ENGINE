@@ -106,6 +106,7 @@ adb shell input keyevent KEYCODE_HOME; sleep 4
 adb shell am start -n "$pkg/.GameActivity"
 wait_log "back from the background" 20; sleep 2
 [ "$(adb logcat -d -s GodsHand:I | grep -c 'paused at')" -ge 2 ] || fail "the song did not pause after coming back"
+adb logcat -d -s GodsHand:I | grep "paused at" | tail -n1 | grep -qE ": [1-9][0-9]* presses" || fail "the taps on the lanes did not press them"
 alive "resume"; shot 7-resumed
 
 adb logcat -d > "$out/logcat.txt"
