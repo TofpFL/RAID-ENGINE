@@ -108,22 +108,26 @@ if [ "$pushed" = 1 ]; then
   shot 3b-preview
   tap $down_x $down_y; sleep 1          # back to the first song
 fi
+tap $(( cx - s - g )) $cy; sleep 1       # LEFT: Easy, so missed notes take longer to add up
 tap_wait $ok_x $ok_y "song builtin:" 60; sleep 4   # play it
 alive "song"; shot 4-song
-# Each adb tap takes a second or two: pause early, before the misses add up.
+# Each adb tap takes a second or more, and missed notes drain health: keep
+# the time spent playing short.
 tap_wait $pause_x $pause_y "paused at" 10; sleep 1
 shot 5-pause
 tap_wait $ok_x $ok_y "resumed" 10      # Resume
-for i in 0 1 2 3; do                    # taps on the lanes
+adb shell input keyevent KEYCODE_HOME; sleep 3
+adb shell am start -n "$pkg/.GameActivity"
+wait_log "back from the background" 20; sleep 1
+wait_quiet "paused at" 10 2 || fail "the song did not pause after coming back"
+alive "resume"; shot 6-resumed
+tap_wait $ok_x $ok_y "resumed" 10      # Resume again
+for i in 0 1 3; do                      # taps on the lanes
   tap $(( W * (2 * i + 1) / 8 )) $(( H * 3 / 4 ))
 done
-shot 6-lanes
-adb shell input keyevent KEYCODE_HOME; sleep 4
-adb shell am start -n "$pkg/.GameActivity"
-wait_log "back from the background" 20; sleep 2
-[ "$(adb logcat -d -s GodsHand:I | grep -c 'paused at')" -ge 2 ] || fail "the song did not pause after coming back"
+tap_wait $pause_x $pause_y "paused at" 10
 adb logcat -d -s GodsHand:I | grep "paused at" | tail -n1 | grep -qE ": [1-9][0-9]* presses" || fail "the taps on the lanes did not press them"
-alive "resume"; shot 7-resumed
+shot 7-lanes
 
 adb logcat -d > "$out/logcat.txt"
 if grep -qE "FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT" "$out/logcat.txt"; then fail "crash in the log"; fi
