@@ -260,19 +260,21 @@ private:
         StreamedNote n;
         n.time = t;
         n.length = std::isfinite(l) && l > 0 ? float(l) : 0.0f;
-        n.data = uint8_t(d);
-        n.alt = altBool;
+        const int data = int(d) & 63;
+        n.data = uint8_t(data | (altBool ? 128 : 0));
         if (hasType && !typeText.empty()) n.type = out_.typeIndex(typeText);
-        out_.maxData = std::max(out_.maxData, int(n.data));
+        out_.maxData = std::max(out_.maxData, data);
+        ++out_.dataCount[size_t(data)];
         ++out_.rawCount;
-        double& last = lastT[n.data];
+        double& last = lastT[size_t(data)];
         if (std::fabs(n.time - last) < 1.0 && !out_.notes.empty()) {
-            // Stacked note: merge into the kept one (search the recent tail).
+            // Stacked note: counted on the kept one (search the recent tail).
             for (size_t i = out_.notes.size(); i-- > out_.rangeStart.back();) {
                 StreamedNote& k = out_.notes[i];
-                if (k.data == n.data && std::fabs(k.time - n.time) < 1.0) {
+                if (k.noteData() == data && std::fabs(k.time - n.time) < 1.0 && k.stack < 255) {
                     k.length = std::max(k.length, n.length);
                     if (n.type && !k.type) k.type = n.type;
+                    ++k.stack;
                     return;
                 }
                 if (out_.notes.size() - i > 64) break;

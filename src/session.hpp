@@ -32,7 +32,8 @@ struct LaneNote {
     uint8_t flags = 0;
     uint8_t state = kPending;
     uint16_t type = 0;
-    uint32_t id = 0;  // index of the note in the chart (script note id)
+    uint16_t stack = 1;  // stacked notes of the file it stands for
+    uint32_t id = 0;     // index of the note in the chart (script note id)
 };
 
 struct GameEvent {
@@ -75,10 +76,11 @@ public:
 
     std::vector<GameEvent> events;  // consumed (cleared) by the caller
 
-    // Stats
+    // Stats. Every note of the file counts, stacked ones included.
     long long score = 0;
     int combo = 0, maxCombo = 0, misses = 0;
     std::array<int, kRatingCount> counts{};
+    long long opponentHits = 0;
     double health = 1.0;  // 0..2
     void setHealth(double v) { health = 0; addHealth(v); }
     bool dead = false;

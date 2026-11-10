@@ -37,13 +37,15 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
         ln.len = n.length;
         ln.kind = n.kind;
         ln.flags = n.flags;
+        ln.stack = std::max<uint16_t>(1, n.stack);
         lanes_[n.side][n.lane].push_back(ln);
         maxSus_[n.side][n.lane] = std::max(maxSus_[n.side][n.lane], n.length);
-        if (n.side == 1 && n.kind == kNormal) ++totalPlayerNotes;
+        if (n.side == 1 && n.kind == kNormal) totalPlayerNotes += ln.stack;
     }
     events.clear();
     score = 0;
     combo = maxCombo = misses = 0;
+    opponentHits = 0;
     counts.fill(0);
     health = 1.0;
     dead = false;
@@ -74,12 +76,14 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
     if (n.len > 0) { n.state = kHolding; ah = (long long)idx; }
     else n.state = kHit;
 
+    // A stack of notes is one press but every note in it counts.
     const RatingInfo& info = kRatings[r];
-    score += info.score;
-    ++combo;
+    const int k = n.stack;
+    score += (long long)info.score * k;
+    combo += k;
     maxCombo = std::max(maxCombo, combo);
-    counts[r]++;
-    accSum_ += info.accuracy;
+    counts[r] += k;
+    accSum_ += info.accuracy * k;
     addHealth(info.health);
     hitErrors.push_back({float(n.t), float(err)});
     GameEvent e{};
@@ -98,10 +102,10 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
 void Session::missNote(int lane, size_t idx) {
     LaneNote& n = lanes_[1][lane][idx];
     n.state = kMissed;
-    ++misses;
+    misses += n.stack;
     combo = 0;
-    score -= 10;
-    addHealth(-0.0475);
+    score -= 10LL * n.stack;
+    addHealth(-0.0475);  // once per stack, like Psych removing the stacked duplicates
     GameEvent e{};
     e.type = GameEvent::PlayerMiss;
     e.lane = uint8_t(lane);
@@ -237,6 +241,7 @@ void Session::update(double songMs) {
                 } else {
                     if (oh >= 0) o[size_t(oh)].state = kHeldDone;
                     oh = -1;
+                    opponentHits += n.stack;
                     n.state = n.len > 0 ? kHolding : kHit;
                     if (n.len > 0) oh = (long long)oc;
                     GameEvent e{};

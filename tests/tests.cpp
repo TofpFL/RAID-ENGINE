@@ -80,16 +80,50 @@ static void testPsychV1AndExtraKeys() {
     CHECK(c.notes[0].side == 1 && c.notes[0].lane == 1);  // v1: 0-3 always player
     CHECK(c.notes[1].side == 0 && c.notes[1].lane == 2);
 
-    const char* nine = R"({"song": {"song": "9K", "bpm": 150, "speed": 3,
+    const char* nine = R"({"song": {"song": "9K", "bpm": 150, "speed": 3, "mania": 8,
       "notes": [{"mustHitSection": true, "sectionNotes": [[0, 0, 0], [5, 8, 0], [10, 17, 0], [15, 9, 0]]}]}})";
     CHECK(parseChart(nine, "Hard", c, err));
     CHECK(c.keys == 9);
     CHECK(c.notes.size() == 4 && c.playerNotes == 2 && c.opponentNotes == 2);
 
+    // No key count in the file: 4 keys like Psych and JS Engine, whatever
+    // values the notes use (lane = value % 4, 4 and up is the other side).
+    const char* noCount = R"({"song": {"song": "Eons", "bpm": 150, "speed": 3,
+      "notes": [{"mustHitSection": true, "sectionNotes": [[0, 0, 0], [5, 8, 0], [10, 17, 0], [15, 9, 0]]}]}})";
+    CHECK(parseChart(noCount, "Hard", c, err));
+    CHECK(c.keys == 4);
+    CHECK(c.notes.size() == 4 && c.playerNotes == 1 && c.opponentNotes == 3);
+    CHECK(c.notes[2].side == 0 && c.notes[2].lane == 1);  // 17 -> opponent lane 1
+
+    // "mania": 3 is 9 keys in Kade forks and 4 keys in Psych Extra Keys: the notes decide.
+    std::string kade = R"({"song": {"song": "K", "bpm": 150, "mania": 3, "notes": [{"mustHitSection": true, "sectionNotes": [)";
+    std::string ek = kade;
+    for (int i = 0; i < 40; ++i) {
+        kade += (i ? "," : "") + std::string("[") + std::to_string(i * 10) + "," + std::to_string(i % 18) + ",0]";
+        ek += (i ? "," : "") + std::string("[") + std::to_string(i * 10) + "," + std::to_string(i % 8) + ",0]";
+    }
+    kade += "]}]}}";
+    ek += "]}]}}";
+    CHECK(parseChart(kade, "Hard", c, err) && c.keys == 9);
+    CHECK(parseChart(ek, "Hard", c, err) && c.keys == 4);
+
+    // Stacked notes (same lane within 1 ms) are one note that counts as all of them.
     const char* stacked = R"({"song": {"song": "S", "bpm": 100, "notes": [{"mustHitSection": true,
-      "sectionNotes": [[100, 0, 0], [100.4, 0, 0], [100, 1, 0]]}]}})";
+      "sectionNotes": [[100, 0, 0], [100.4, 0, 0], [100, 1, 0], [100.2, 0, 0]]}]}})";
     CHECK(parseChart(stacked, "", c, err));
-    CHECK(c.notes.size() == 2);  // duplicate in lane 0 removed
+    CHECK(c.notes.size() == 2);
+    CHECK(c.notes[0].lane == 0 && c.notes[0].stack == 3 && c.notes[1].stack == 1);
+    CHECK(c.playerNotes == 4 && c.rawNoteCount == 4);
+    Session s;
+    SessionConfig bot;
+    bot.botplay = true;
+    s.init(c, bot);
+    CHECK(s.totalPlayerNotes == 4);
+    s.update(200);
+    CHECK(s.judged() == 4 && s.combo == 4 && s.misses == 0);
+    s.init(c, SessionConfig{});
+    s.update(1000);  // nothing pressed: every stacked note is a miss
+    CHECK(s.misses == 4 && s.judged() == 0);
 }
 
 static void testVSlice() {

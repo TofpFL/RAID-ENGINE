@@ -27,7 +27,10 @@ struct Note {
     uint8_t kind = kNormal;
     uint8_t flags = 0;
     uint16_t type = 0;   // index into Chart::noteTypes (0 = default)
+    uint16_t stack = 1;  // notes of the file stacked here (same lane within 1 ms): each one counts
 };
+
+constexpr uint16_t kMaxStack = 65535;
 
 struct TempoPoint { double timeMs = 0; double bpm = 120; double beat = 0; };
 struct FocusPoint { double timeMs = 0; uint8_t side = 0; };
@@ -46,7 +49,7 @@ struct Chart {
     std::vector<TempoPoint> tempo;
     std::vector<FocusPoint> focus;
     double lengthMs = 0;       // end of the last note
-    size_t playerNotes = 0, opponentNotes = 0;
+    uint64_t playerNotes = 0, opponentNotes = 0;  // stacked notes included
     uint64_t rawNoteCount = 0;  // notes in the file, before stacked notes were merged
 
     double bpmAt(double ms) const;

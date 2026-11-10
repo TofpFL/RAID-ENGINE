@@ -746,6 +746,7 @@ void PlayState::finish() {
     r.misses = session_.misses;
     r.maxCombo = session_.maxCombo;
     r.counts = session_.counts;
+    r.totalNotes = (long long)session_.totalPlayerNotes;
     r.rank = session_.rank();
     r.clear = session_.clearLabel();
     r.errors = session_.hitErrors;
@@ -875,9 +876,10 @@ void PlayState::drawLanes() {
                     const float al = (n.state == kMissed || n.state == kDropped ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
                     gfx::drawSustain(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
                 }
-                // Level of detail: notes closer than ~15% of a note overlap into
-                // a solid wall anyway, so only one of them is drawn.
-                const float minGap = std::max(2.0f, ns * 0.15f);
+                // Notes less than a pixel apart look the same drawn once, so a
+                // lane never draws more notes than it has pixels (spam charts
+                // stay smooth). Every note is still played and counted.
+                const float minGap = 1.0f;
                 float lastY = 1e9f;
                 for (auto it = hi; it != lo;) {
                     --it;

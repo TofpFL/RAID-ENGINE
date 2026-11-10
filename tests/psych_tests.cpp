@@ -603,12 +603,15 @@ void testChartStreaming() {
         const Note& a = dom.notes[i];
         const Note& b = streamed.notes[i];
         same = std::fabs(a.time - b.time) < 1e-6 && std::fabs(a.length - b.length) < 1e-3 && a.lane == b.lane &&
-               a.side == b.side && a.kind == b.kind && a.flags == b.flags;
+               a.side == b.side && a.kind == b.kind && a.flags == b.flags && a.stack == b.stack;
     }
     PCHECK(same);
     PCHECK(streamed.title == "Blocked" && streamed.stage == "farm" && streamed.opponent == "bambi");
     PCHECK(streamed.events.size() == dom.events.size() && streamed.events.size() == 40 && streamed.events[0].name == "Hey!");
     PCHECK(streamed.rawNoteCount == streamed.notes.size() + size_t(stacked));
+    // Every note of the file is still counted.
+    PCHECK(streamed.playerNotes + streamed.opponentNotes == streamed.rawNoteCount);
+    PCHECK(dom.playerNotes + dom.opponentNotes == streamed.rawNoteCount);
     const ChartPeek pk = peekChart(path);
     PCHECK(pk.song == "Blocked" && pk.player2 == "bambi" && pk.stage == "farm" && pk.isChart);
     std::filesystem::remove(path);

@@ -51,6 +51,7 @@ struct ResultData {
     double acc = 0;
     int misses = 0, maxCombo = 0;
     std::array<int, kRatingCount> counts{};
+    long long totalNotes = 0;  // player notes in the chart, stacked ones included
     std::string rank, clear;
     std::vector<Session::HitError> errors;
     double lengthMs = 1;
