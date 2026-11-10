@@ -16,7 +16,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-${{ github.ref }}
+  # A newer push cancels an older build of the same branch, but a manual
+  # release run and a push build never cancel each other (a merge followed by
+  # a release run left the merge commit with a cancelled, red build).
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
