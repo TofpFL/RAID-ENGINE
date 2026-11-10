@@ -135,6 +135,17 @@ private:
     void loadIcons();
     void updateSounds(double dt);
     void releaseAudio();
+    bool shadersEnabled() override;
+    std::string modsDir() override;
+    void loopSong(double ms) override;
+    bool gamepadState(int pad, std::string_view button, int mode) override;
+    double gamepadAxis(int pad, int axis) override;
+    // JS Engine events: camera twist, fake length, popups, credits, bot energy...
+    bool handleJsEngineEvent(const psych::ChartEvent& e);
+    void updateJsEngine(double dt);
+    void drawNotices();
+    void drawBotEnergy();
+    double shownLengthMs() const { return fakeLenMs_ >= 0 ? fakeLenMs_ : chart_.lengthMs; }
     struct NoteRef { uint8_t side, lane; uint32_t idx; };
     LaneNote* noteRef(std::string_view group, int index, int* sideOut = nullptr, int* laneOut = nullptr);
 
@@ -234,6 +245,23 @@ private:
     double mustHitSectionFlag_ = 1;
     bool camZoomOnBeat_ = true, cameraZoomsSet_ = false, inCutscene_ = false;
     int bopEvery_ = 4;
+    // JS Engine events
+    bool camTwist_ = false, twisted_ = false;
+    double twistIntensity_ = 0;
+    double fakeLenMs_ = -1, fakeLenFrom_ = 0, fakeLenTo_ = 0, fakeLenT_ = 0, fakeLenDur_ = 0;
+    std::string songNameShown_;  // "Change Song Name" ("" = the chart's title)
+    int rainbowEndStep_ = -1;
+    scene::ShaderPtr rainbow_;
+    struct Notice {
+        std::string title, text;
+        double t0 = 0;
+        int kind = 0;  // 0 credits popup, 1 notification, 2 popup window
+    };
+    std::vector<Notice> notices_;
+    bool popupHold_ = false;  // "Popup": the song waits until it is closed
+    bool botEnergyOn_ = false, noEnergy_ = false, usingBotEnergy_ = false;
+    double botEnergy_ = 1, energyDrain_ = 1, energyRefill_ = 1, energyCooldown_ = 0;
+    float energyAlpha_ = 0;
     bool prevKeys_[9] = {};
     bool keyNow_[9] = {};
     bool prevMouse_[3] = {}, mouseNow_[3] = {};

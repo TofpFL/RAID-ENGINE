@@ -46,6 +46,8 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
     score = 0;
     combo = maxCombo = misses = 0;
     opponentHits = 0;
+    autoLanes_ = 0;
+    mult_[0] = mult_[1] = 1;
     counts.fill(0);
     health = 1.0;
     dead = false;
@@ -78,7 +80,7 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
 
     // A stack of notes is one press but every note in it counts.
     const RatingInfo& info = kRatings[r];
-    const int k = n.stack;
+    const int k = n.stack * mult_[1];
     score += (long long)info.score * k;
     combo += k;
     maxCombo = std::max(maxCombo, combo);
@@ -119,7 +121,7 @@ void Session::missNote(int lane, size_t idx) {
 void Session::press(int lane, double songMs) {
     if (lane < 0 || lane >= keys_) return;
     held_[lane] = true;
-    if (cfg_.botplay) return;
+    if (cfg_.botplay || (autoLanes_ >> lane & 1u)) return;
     std::vector<LaneNote>& v = lanes_[1][lane];
     const double win = kMissWindowMs * cfg_.rate;
     const double mineWin = kRatings[kDivine].windowMs * cfg_.rate;
@@ -164,7 +166,7 @@ void Session::press(int lane, double songMs) {
 void Session::release(int lane, double songMs) {
     if (lane < 0 || lane >= keys_) return;
     held_[lane] = false;
-    if (cfg_.botplay) return;
+    if (cfg_.botplay || (autoLanes_ >> lane & 1u)) return;
     long long& h = activeHold_[1][lane];
     if (h < 0) return;
     LaneNote& n = lanes_[1][lane][size_t(h)];
@@ -214,7 +216,7 @@ void Session::update(double songMs) {
             }
         }
         size_t& c = cursor_[1][lane];
-        if (cfg_.botplay) {
+        if (cfg_.botplay || (autoLanes_ >> lane & 1u)) {
             for (size_t j = c; j < v.size() && v[j].t <= songMs; ++j) {
                 if (v[j].state != kPending) continue;
                 if (v[j].kind == kMine || (v[j].flags & kFlagIgnore)) v[j].state = kMinePassed;
@@ -241,7 +243,7 @@ void Session::update(double songMs) {
                 } else {
                     if (oh >= 0) o[size_t(oh)].state = kHeldDone;
                     oh = -1;
-                    opponentHits += n.stack;
+                    opponentHits += (long long)n.stack * mult_[0];
                     n.state = n.len > 0 ? kHolding : kHit;
                     if (n.len > 0) oh = (long long)oc;
                     GameEvent e{};
@@ -262,6 +264,19 @@ void Session::update(double songMs) {
             oh = -1;
         }
     }
+}
+
+void Session::rewindTo(double songMs) {
+    for (int s = 0; s < 2; ++s)
+        for (int l = 0; l < keys_; ++l) {
+            std::vector<LaneNote>& v = lanes_[s][l];
+            const size_t first = size_t(std::lower_bound(v.begin(), v.end(), songMs,
+                                                         [](const LaneNote& n, double t) { return n.t < t; }) - v.begin());
+            for (size_t i = first; i < v.size(); ++i) v[i].state = kPending;
+            cursor_[s][l] = first;
+            activeHold_[s][l] = -1;
+        }
+    lastMs_ = -1e18;
 }
 
 int Session::judged() const {

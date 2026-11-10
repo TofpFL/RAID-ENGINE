@@ -59,13 +59,14 @@ public:
             {Row::Action, "Reset controls", "Restore D F J K and the arrow keys."},
             {Row::Header, "GRAPHICS", ""},
             {Row::Bool, "Fullscreen", "Borderless fullscreen (F11 works anywhere).", &s.fullscreen},
-            {Row::Bool, "VSync", "Takes effect after restarting. OFF gives the most precise input.", &s.vsync},
+            {Row::Bool, "VSync", "Waits for the screen's refresh. OFF: the frame limit below decides (most precise input).", &s.vsync},
             {Row::Choice, "Frame limit", "Higher limits make notes smoother. Input is polled at ~1000 Hz regardless.",
              nullptr, nullptr, 0, 0, 0, &s.fpsCap, {60, 120, 144, 165, 240, 360, 500, 0}},
             {Row::Bool, "Show FPS", "", &s.showFps},
             {Row::Bool, "Low detail", "Fewer particles and effects for slower machines.", &s.lowDetail},
             {Row::Bool, "Flashing lights", "Screen flashes on some beats.", &s.flashing},
-            {Row::Bool, "Camera zoom on beat", "", &s.camZoom},
+            {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
+            {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on weak devices.", &s.shaders},
             {Row::Header, "AUDIO", ""},
             {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
             {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
@@ -94,7 +95,7 @@ public:
             std::vector<Row> kept;
             for (Row& r : rows_) {
                 if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0;
-                if (controls || r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "VSync") continue;
+                if (controls || r.label == "Fullscreen" || r.label == "Touch controls") continue;
                 kept.push_back(std::move(r));
             }
             rows_ = std::move(kept);
@@ -128,6 +129,7 @@ public:
                 if (dir || in.accept()) {
                     if (r.label == "Fullscreen") a.toggleFullscreen();
                     else *r.b = !*r.b;
+                    if (r.label == "VSync") platform::setVsync(a.settings.vsync);
                     changed = true;
                 }
                 break;

@@ -38,6 +38,7 @@ struct StubGame : ScriptGame {
         if (p == "health") { out = health; return true; }
         if (p == "songScore") { out = score; return true; }
         if (p == "class:ClientPrefs.downScroll") { out = false; return true; }
+        if (p == "notes.length" || p == "unspawnNotes.length" || p == "eventNotes.length") { out = 0.0; return true; }
         return false;
     }
     bool setGameProp(std::string_view p, const scene::Value& v) override {
@@ -326,14 +327,16 @@ void testLua() {
         PCHECK(game.prints[5] == "false");
     }
 
-    // Sandbox: no io / os.execute / require, and runaway loops are stopped.
+    // Sandbox: no io / os.execute / dofile, require only finds the song's own
+    // Lua modules, and runaway loops are stopped.
     game.prints.clear();
     PCHECK(host.loadString("sandbox.lua", R"LUA(
         function onCreate()
-            debugPrint(tostring(io), tostring(os.execute), tostring(require), tostring(dofile))
+            debugPrint(tostring(io), tostring(os.execute), tostring(loadfile), tostring(dofile))
+            debugPrint(tostring(pcall(require, "io")), tostring(pcall(require, "../../etc/passwd")))
         end
         function onUpdate() while true do end end)LUA"));
-    PCHECK(!game.prints.empty() && game.prints[0] == "nilnilnilnil");
+    PCHECK(game.prints.size() >= 2 && game.prints[0] == "nilnilnilnil" && game.prints[1] == "falsefalse");
     const size_t before = host.errors.size();
     host.call("onUpdate", {scene::Value(0.016)});
     PCHECK(host.errors.size() == before + 1 && host.errors.back().find("too long") != std::string::npos);
@@ -416,6 +419,14 @@ int runPsychCorpus(const char* dir) {
             sc.gfMarker = std::make_shared<scene::Sprite>();
             sc.gfMarker->kind = scene::Kind::Marker;
             sc.order = {sc.gfMarker, sc.gf, sc.dad, sc.bf};
+            // The HUD objects the game exposes (icons, bars, texts).
+            for (const char* hudName : {"iconP1", "iconP2", "healthBar", "healthBarBG", "scoreTxt", "timeBar", "timeBarBG",
+                                        "timeTxt", "botplayTxt", "comboGroup", "grpNoteSplashes"}) {
+                auto s = std::make_shared<scene::Sprite>();
+                s->tag = hudName;
+                s->cam = scene::Cam::Hud;
+                sc.hud[hudName] = s;
+            }
             StubGame game;
             ScriptHost host(sc, game);
             host.callBudget = 0.5;
@@ -432,6 +443,16 @@ int runPsychCorpus(const char* dir) {
             host.setGlobal("downscroll", false);
             host.setGlobal("middlescroll", false);
             host.setGlobal("mustHitSection", true);
+            // Globals the game sets for every script.
+            host.setGlobal("curDecBeat", 0.0);
+            host.setGlobal("curDecStep", 0.0);
+            host.setGlobal("currentModDirectory", std::string());
+            host.setGlobal("hideHud", false);
+            host.setGlobal("gfSection", false);
+            host.setGlobal("altAnim", false);
+            host.setGlobal("curSection", 0.0);
+            host.setGlobal("shadersEnabled", true);
+            for (const char* n : {"boyfriendName", "dadName", "gfName"}) host.setGlobal(n, std::string(n).substr(0, std::string(n).size() - 4));
             for (int i = 0; i < 4; ++i) {
                 host.setGlobal(("defaultPlayerStrumX" + std::to_string(i)).c_str(), 732.0 + 112 * i);
                 host.setGlobal(("defaultPlayerStrumY" + std::to_string(i)).c_str(), 50.0);
@@ -442,6 +463,8 @@ int runPsychCorpus(const char* dir) {
             host.call("onCreatePost");
             for (int f = 0; f < 120; ++f) {
                 game.pos = f * 16.0;
+                host.setGlobal("curDecBeat", f / 8.0);
+                host.setGlobal("curDecStep", f / 2.0);
                 host.call("onUpdate", {scene::Value(1.0 / 60)});
                 if (f % 8 == 0) {
                     host.setGlobal("curBeat", double(f / 8));

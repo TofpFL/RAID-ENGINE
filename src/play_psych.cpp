@@ -9,6 +9,7 @@
 
 #include "basegame.hpp"
 #include "common.hpp"
+#include "effects.hpp"
 #include "platform.hpp"
 #include "state_play.hpp"
 #include "rlgl.h"
@@ -18,9 +19,14 @@ namespace gh {
 using scene::Character;
 using scene::CharacterPtr;
 using scene::Value;
+using gfx::Align;
+using gfx::FontId;
+using gfx::fade;
 
 namespace {
 namespace fs = std::filesystem;
+const Color kGold{255, 214, 120, 255};
+const Color kIvory{246, 236, 214, 255};
 
 fs::path toPath(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
 std::string pathStr(const fs::path& p) {
@@ -306,7 +312,7 @@ void PlayState::setScriptGlobals() {
     set("healthBarAlpha", 1.0);
     set("noResetButton", true);
     set("lowQuality", s.lowDetail);
-    set("shadersEnabled", false);
+    set("shadersEnabled", s.shaders);
     set("currentModDirectory", entry_->subtitle);
     set("noteSkin", std::string());
     set("noteSkinPostfix", std::string());
@@ -705,6 +711,23 @@ void PlayState::psychBeat(int b) {
         sc.camGame.zoom += float(0.015 * sc.camZoomingMult);
         sc.camHud.zoom += float(0.03 * sc.camZoomingMult);
     }
+    const int gfSpeed = std::max(1, int(std::lround(sc.gfSpeed)));
+    if (camTwist_ && b >= 0 && b % gfSpeed == 0) {
+        // JS Engine "Camera Twist": both cameras tilt one way, then the other, easing back.
+        const float angle = float(twistIntensity_ * (twisted_ ? -1 : 1));
+        twisted_ = !twisted_;
+        const double bpm = chart_.bpmAt(std::max(0.0, songMs_));
+        for (const char* cam : {"camHUD", "camGame"}) {
+            sc.setProp(std::string(cam) + ".angle", double(angle));
+            scene::Tween tw;
+            tw.tag = std::string("__twist") + cam;
+            tw.target = cam;
+            tw.fields.push_back({"angle", 0, 0, false});
+            tw.dur = 45.0 / std::max(1.0, bpm) * gfSpeed / rate_;
+            tw.ease = "circOut";
+            sc.tween(std::move(tw));
+        }
+    }
     scripts_->call("onBeatHit", {Value(double(b))});  // the beat argument is a PulseForge extension
     if (scripts_->kadeMode) scripts_->call("beatHit", {Value(double(b))});
 }
@@ -766,6 +789,7 @@ void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
         }
         return;
     }
+    if (handleJsEngineEvent(e)) return;
     if (!psych_) return;
     scene::Scene& sc = *scene_;
     if (n == "Hey!") {
@@ -838,6 +862,261 @@ void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
         bopEvery_ = std::max(1, int(numOr(e.v1, 4)));
         sc.camZoomingMult = numOr(e.v2, 1.0);
     }
+}
+
+// ------------------------------------------------------ JS Engine events --
+
+bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
+    App& a = app();
+    const std::string& n = e.name;
+    const std::string v1 = trim(e.v1), v2 = trim(e.v2);
+    scene::Scene* sc = psych_ ? scene_.get() : nullptr;
+    auto zoomValue = [&]() {  // empty or "default": the stage's own zoom
+        const double base = sc ? sc->stage.zoom : 1.0;
+        return v1.empty() || toLower(v1) == "default" ? base : numOr(v1, base);
+    };
+    if (n == "Set Camera Zoom" || n == "Set Cam Zoom") {
+        if (sc) {
+            sc->defaultCamZoom = zoomValue();
+            sc->camZooming = true;  // the camera eases to it
+        }
+        return true;
+    }
+    if (n == "Tween Camera Zoom") {
+        if (!sc) return true;
+        const double z = zoomValue();
+        const size_t comma = v2.find(',');
+        const double dur = std::max(0.0, numOr(trim(v2.substr(0, comma)), 0)) / rate_;
+        const std::string ease = comma == std::string::npos ? "linear" : trim(v2.substr(comma + 1));
+        scene::Tween tw;
+        tw.tag = "__jsCamZoom";
+        tw.ease = ease.empty() ? "linear" : ease;
+        tw.dur = std::max(1e-4, dur);
+        if (sc->camZooming) {
+            tw.target = "";
+            tw.fields.push_back({"defaultCamZoom", 0, z, false});
+        } else {
+            sc->defaultCamZoom = z;
+            tw.target = "camGame";
+            tw.fields.push_back({"zoom", 0, z, false});
+        }
+        sc->tween(std::move(tw));
+        return true;
+    }
+    if (n == "Enable Camera Bop") {
+        if (sc) sc->camZooming = true;
+        return true;
+    }
+    if (n == "Disable Camera Bop") {
+        if (sc) {
+            sc->camZooming = false;
+            sc->camGame.zoom = float(sc->defaultCamZoom);
+            sc->camHud.zoom = 1;
+        }
+        return true;
+    }
+    if (n == "Camera Bopping") {
+        bopEvery_ = std::max(1, int(numOr(v1, 4)));
+        if (sc) sc->camZoomingMult = numOr(v2, 1);
+        return true;
+    }
+    if (n == "Camera Twist") {
+        twistIntensity_ = numOr(v1, 0);
+        camTwist_ = numOr(v2, 0) != 0;
+        if (!camTwist_ && sc) {
+            for (const char* cam : {"camHUD", "camGame"}) {
+                scene::Tween tw;
+                tw.tag = std::string("__twist") + cam;
+                tw.target = cam;
+                tw.fields = {{"angle", 0, 0, false}, {"x", 0, 0, false}, {"y", 0, 0, false}};
+                tw.dur = 1;
+                tw.ease = "sineOut";
+                sc->tween(std::move(tw));
+            }
+        }
+        return true;
+    }
+    if (n == "Change Note Multiplier") {
+        const int m = std::max(1, int(std::lround(numOr(v1, 1))));
+        if (v2.empty() || v2 == "1") session_.setNoteMultiplier(playerLeft_ ? 1 : 0, m);
+        if (v2.empty() || v2 == "2") session_.setNoteMultiplier(playerLeft_ ? 0 : 1, m);
+        return true;
+    }
+    if (n == "Fake Song Length") {
+        double target = numOr(v1, -1) * 1000.0;
+        if (v1.empty() || target < 0) target = chart_.lengthMs;
+        if (toLower(v2) == "true") {
+            fakeLenFrom_ = shownLengthMs();
+            fakeLenTo_ = target;
+            fakeLenT_ = 0;
+            fakeLenDur_ = 1.0;
+            fakeLenMs_ = fakeLenFrom_;
+        } else {
+            fakeLenDur_ = 0;
+            fakeLenMs_ = target;
+        }
+        return true;
+    }
+    if (n == "Change Song Name") {
+        songNameShown_ = v1.size() > 1 ? e.v1 : std::string();
+        return true;
+    }
+    if (n == "Rainbow Eyesore") {
+        const double speed = numOr(v2, 1) <= 0 ? 1.0 : numOr(v2, 1);
+        if (!sc || !a.settings.flashing || !a.settings.shaders || lastStep_ >= int(numOr(v1, 0))) return true;
+        rainbowEndStep_ = int(numOr(v1, 0));
+        if (!rainbow_) {
+            rainbow_ = fx::make(*sc, "__fx_pulse", true);
+            if (rainbow_) sc->camGame.filters.push_back(rainbow_);
+        }
+        if (rainbow_) {
+            rainbow_->floats["uWaveAmplitude"] = {1.0f};
+            rainbow_->floats["uFrequency"] = {2.0f};
+            rainbow_->floats["uSpeed"] = {float(speed * rate_)};
+            rainbow_->floats["uEnabled"] = {1.0f};
+        }
+        return true;
+    }
+    if (n == "Popup" || n == "Popup (No Pause)") {
+        notices_.push_back({e.v1, e.v2, a.now, 2});
+        if (n == "Popup" && !popupHold_) {
+            popupHold_ = true;
+            a.mixer.pause();
+        }
+        return true;
+    }
+    if (n == "Credits Popup") {
+        notices_.push_back({v1.size() > 1 ? e.v1 : (chart_.title.empty() ? entry_->title : chart_.title),
+                            v2.size() > 1 ? e.v2 : std::string(), a.now, 0});
+        return true;
+    }
+    if (n == "Windows Notification") {
+        notices_.push_back({v1.empty() ? std::string("God's Hand") : e.v1, e.v2, a.now, 1});
+        return true;
+    }
+    if (n == "Enable Bot Energy" || n == "Disable Bot Energy") {
+        botEnergyOn_ = n == "Enable Bot Energy" && !cfg_.botplay;
+        if (!botEnergyOn_) {
+            usingBotEnergy_ = false;
+            session_.setAutoLanes(0);
+        }
+        return true;
+    }
+    if (n == "Set Bot Energy Speeds") {
+        energyDrain_ = numOr(v1, 1);
+        energyRefill_ = numOr(v2, 1);
+        return true;
+    }
+    return false;
+}
+
+void PlayState::updateJsEngine(double dt) {
+    App& a = app();
+    if (fakeLenDur_ > 0) {  // expoOut, like JS Engine's length tween
+        fakeLenT_ = std::min(fakeLenDur_, fakeLenT_ + dt);
+        const double k = fakeLenT_ >= fakeLenDur_ ? 1.0 : 1.0 - std::pow(2.0, -10.0 * fakeLenT_ / fakeLenDur_);
+        fakeLenMs_ = fakeLenFrom_ + (fakeLenTo_ - fakeLenFrom_) * k;
+        if (fakeLenT_ >= fakeLenDur_) fakeLenDur_ = 0;
+    }
+    if (rainbow_) {  // fades out once its last step has passed
+        auto& amp = rainbow_->floats["uWaveAmplitude"];
+        if (amp.empty()) amp.push_back(0);
+        if (lastStep_ >= rainbowEndStep_ || phase_ == Phase::Dead) amp[0] -= float(dt / 2);
+        if (amp[0] <= 0) {
+            auto& f = scene_->camGame.filters;
+            f.erase(std::remove(f.begin(), f.end(), rainbow_), f.end());
+            rainbow_.reset();
+        }
+    }
+    // Notices disappear on their own; a popup window waits for OK.
+    notices_.erase(std::remove_if(notices_.begin(), notices_.end(),
+                                  [&](const Notice& n) {
+                                      return (n.kind == 0 && a.now - n.t0 > 4.6) || (n.kind == 1 && a.now - n.t0 > 4.5);
+                                  }),
+                   notices_.end());
+    // Bot energy: hold CTRL (or BOT on a touchscreen) and the bot plays the
+    // lanes you are holding while the bar drains; it refills otherwise.
+    energyAlpha_ = approach(energyAlpha_, botEnergyOn_ ? 1.0f : 0.0f, 6.0f, float(dt));
+    if (!botEnergyOn_ || cfg_.botplay) return;
+    const bool key = a.input.isDown(KEY_LEFT_CONTROL) || a.input.isDown(KEY_RIGHT_CONTROL);
+    usingBotEnergy_ = key && !noEnergy_;
+    unsigned mask = 0;
+    int held = 0;
+    for (int l = 0; l < chart_.keys && l < 9; ++l)
+        if (heldCount_[l] > 0) {
+            mask |= 1u << l;
+            ++held;
+        }
+    session_.setAutoLanes(usingBotEnergy_ ? mask : 0);
+    if (usingBotEnergy_) botEnergy_ -= dt / 5.0 * held * energyDrain_ * rate_;
+    else botEnergy_ += dt / 5.0 * energyRefill_ * rate_;
+    botEnergy_ = std::min(2.0, botEnergy_);
+    if (botEnergy_ <= 0 && !noEnergy_) {
+        botEnergy_ = 0;
+        noEnergy_ = true;
+        energyCooldown_ = 1;
+        session_.setAutoLanes(0);
+    }
+    if (noEnergy_) {
+        energyCooldown_ -= dt;
+        if (energyCooldown_ <= 0 && !key) noEnergy_ = false;
+    }
+}
+
+void PlayState::drawNotices() {
+    const double now = app().now;
+    for (const Notice& n : notices_) {
+        const double age = now - n.t0;
+        if (n.kind == 0) {  // credits: slides in from the left, waits, slides back
+            const float w = std::max(360.0f, gfx::measure(FontId::Title, n.title, 34).x + 60);
+            float k;
+            if (age < 0.5) k = easeOutBack(float(age / 0.5));
+            else if (age < 3.5) k = 1;
+            else {
+                const float t = float(std::min(1.0, (age - 3.5) / 1.0));
+                const float c1 = 1.70158f, c3 = c1 + 1;
+                k = 1 - (c3 * t * t * t - c1 * t * t);
+            }
+            const float x = -w + w * k;
+            DrawRectangleRec({x, 200, w, n.text.empty() ? 70.0f : 110.0f}, Color{10, 6, 18, 215});
+            DrawRectangleRec({x + w - 6, 200, 6, n.text.empty() ? 70.0f : 110.0f}, kGold);
+            gfx::text(FontId::Title, n.title, x + 24, 214, 34, WHITE, Align::Left, 2.0f);
+            if (!n.text.empty()) gfx::text(FontId::Ui, n.text, x + 24, 262, 26, fade(kIvory, 0.9f), Align::Left, 1.5f);
+        } else if (n.kind == 1) {  // notification: a toast at the top right
+            const float al = float(std::min({1.0, age * 4.0, (4.5 - age) * 3.0}));
+            const float w = std::max(gfx::measure(FontId::Ui, n.text, 22).x, gfx::measure(FontId::Ui, n.title, 26).x) + 40;
+            const float x = gameW_ - w - 20;
+            DrawRectangleRounded({x, 70, w, 76}, 0.2f, 8, fade(Color{20, 12, 36, 255}, 0.9f * al));
+            gfx::text(FontId::Ui, n.title, x + 20, 80, 26, fade(kGold, al), Align::Left, 1.5f);
+            gfx::text(FontId::Ui, n.text, x + 20, 112, 22, fade(WHITE, al), Align::Left, 1.5f);
+        }
+    }
+    for (const Notice& n : notices_) {
+        if (n.kind != 2) continue;  // popup window, centred, until OK
+        const float w = std::clamp(gfx::measure(FontId::Ui, n.text, 26).x + 80, 420.0f, gameW_ - 80);
+        const float x = (gameW_ - w) * 0.5f, y = 250;
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 90});
+        DrawRectangleRounded({x, y, w, 220}, 0.08f, 8, Color{24, 16, 40, 245});
+        DrawRectangleRoundedLinesEx({x, y, w, 220}, 0.08f, 8, 2, fade(kGold, 0.8f));
+        gfx::text(FontId::Title, n.title, x + w * 0.5f, y + 18, 32, kGold, Align::Center, 2.0f);
+        gfx::text(FontId::Ui, n.text, x + w * 0.5f, y + 80, 26, WHITE, Align::Center, 1.5f);
+        gfx::text(FontId::Ui, app().touchMode ? "Tap to close" : "ENTER to close", x + w * 0.5f, y + 168, 22,
+                  fade(kIvory, 0.7f), Align::Center);
+        break;
+    }
+}
+
+void PlayState::drawBotEnergy() {
+    if (energyAlpha_ <= 0.01f) return;
+    const float al = energyAlpha_;
+    const float x = gameW_ - 60, y0 = 160, h = 400;
+    const float fill = float(clampv(botEnergy_ / 2.0, 0.0, 1.0));
+    const Color c = botEnergy_ < 0.2 ? Color{198, 0, 0, 255} : botEnergy_ > 1.8 ? Color{0, 188, 18, 255} : Color{0, 148, 255, 255};
+    DrawRectangleRounded({x - 4, y0 - 4, 30, h + 8}, 0.5f, 8, fade(Color{8, 4, 14, 255}, 0.8f * al));
+    DrawRectangleRounded({x, y0 + h * (1 - fill), 22, h * fill}, 0.5f, 8, fade(c, al));
+    const std::string label = botEnergy_ < 2 ? TextFormat("%d%%", int(std::lround(botEnergy_ * 50))) : "Full";
+    gfx::text(FontId::Ui, label, x + 11, y0 + h + 12, 22, fade(usingBotEnergy_ ? kGold : WHITE, al), Align::Center, 1.5f);
+    gfx::text(FontId::Ui, "BOT", x + 11, y0 - 34, 20, fade(kIvory, 0.8f * al), Align::Center, 1.5f);
 }
 
 void PlayState::changeCharacter(int who, const std::string& name) {
@@ -1267,6 +1546,7 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
     if (path == "ratingFC") { out = ratingFcOverride_.empty() ? session_.clearLabel() : ratingFcOverride_; return true; }
     if (path == "songSpeed") return num(scrollSpeed());
     if (path == "playbackRate") return num(rate_);
+    if (path == "opponentChart" || path == "opponentMode") return flag(playerLeft_);
     if (path == "cpuControlled" || path == "botPlay") return flag(session_.botplay());
     if (path == "practiceMode") return flag(cfg_.practice);
     if (path == "inCutscene") return flag(inCutscene_);
@@ -1361,7 +1641,7 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
     if (c == "ClientPrefs.antialiasing" || c == "ClientPrefs.globalAntialiasing") return flag(true);
     if (c == "ClientPrefs.noteOffset") return num(s.offsetMs);
     if (c == "ClientPrefs.hideHud") return flag(false);
-    if (c == "ClientPrefs.shaders") return flag(false);
+    if (c == "ClientPrefs.shaders") return flag(s.shaders);
     if (c == "ClientPrefs.healthBarAlpha") return num(1);
     if (c == "ClientPrefs.timeBarType") { out = std::string("Time Left"); return true; }
     if (c == "Conductor.songPosition") return num(songMs_);
@@ -1673,6 +1953,70 @@ void PlayState::timeBarColors(uint32_t left, uint32_t right) {
 }
 
 std::string PlayState::saveDir() { return app().base + "saves/"; }
+
+bool PlayState::shadersEnabled() { return app().settings.shaders; }
+
+// Only the first gamepad is read (the one the game itself uses).
+static int padButton(std::string_view name) {
+    std::string n;
+    for (char c : name)
+        if (c != '_' && c != ' ') n += char(std::toupper((unsigned char)c));
+    if (n == "A") return GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
+    if (n == "B") return GAMEPAD_BUTTON_RIGHT_FACE_RIGHT;
+    if (n == "X") return GAMEPAD_BUTTON_RIGHT_FACE_LEFT;
+    if (n == "Y") return GAMEPAD_BUTTON_RIGHT_FACE_UP;
+    if (n == "LEFTSHOULDER" || n == "LB") return GAMEPAD_BUTTON_LEFT_TRIGGER_1;
+    if (n == "RIGHTSHOULDER" || n == "RB") return GAMEPAD_BUTTON_RIGHT_TRIGGER_1;
+    if (n == "LEFTTRIGGER" || n == "LT") return GAMEPAD_BUTTON_LEFT_TRIGGER_2;
+    if (n == "RIGHTTRIGGER" || n == "RT") return GAMEPAD_BUTTON_RIGHT_TRIGGER_2;
+    if (n == "BACK" || n == "SELECT") return GAMEPAD_BUTTON_MIDDLE_LEFT;
+    if (n == "START") return GAMEPAD_BUTTON_MIDDLE_RIGHT;
+    if (n == "GUIDE") return GAMEPAD_BUTTON_MIDDLE;
+    if (n == "LEFTSTICKCLICK") return GAMEPAD_BUTTON_LEFT_THUMB;
+    if (n == "RIGHTSTICKCLICK") return GAMEPAD_BUTTON_RIGHT_THUMB;
+    if (n == "DPADUP") return GAMEPAD_BUTTON_LEFT_FACE_UP;
+    if (n == "DPADDOWN") return GAMEPAD_BUTTON_LEFT_FACE_DOWN;
+    if (n == "DPADLEFT") return GAMEPAD_BUTTON_LEFT_FACE_LEFT;
+    if (n == "DPADRIGHT") return GAMEPAD_BUTTON_LEFT_FACE_RIGHT;
+    return -1;
+}
+
+bool PlayState::gamepadState(int pad, std::string_view button, int mode) {
+    const int b = padButton(button);
+    if (pad > 0 || b < 0) return false;
+    const int code = kPadBase + b;
+    Input& in = app().input;
+    if (mode == 0) return in.isDown(code);
+    if (mode == 1) return in.pressed(code);
+    for (const InputEvent& e : in.events())
+        if (e.code == code && !e.down) return true;
+    return false;
+}
+
+double PlayState::gamepadAxis(int pad, int axis) {
+    if (pad > 0 || !IsGamepadAvailable(0)) return 0;
+    static const int axes[4] = {GAMEPAD_AXIS_LEFT_X, GAMEPAD_AXIS_LEFT_Y, GAMEPAD_AXIS_RIGHT_X, GAMEPAD_AXIS_RIGHT_Y};
+    return GetGamepadAxisMovement(0, axes[axis & 3]);
+}
+
+std::string PlayState::modsDir() { return app().base + "mods/"; }
+
+// JS Engine loopTheSong: back to `ms`, the notes from there on can be played again.
+void PlayState::loopSong(double ms) {
+    App& a = app();
+    ms = clampv(ms, 0.0, std::max(0.0, chart_.lengthMs));
+    a.mixer.play(ms / 1000.0);
+    songMs_ = ms;
+    session_.rewindTo(ms);
+    eventIdx_ = size_t(std::lower_bound(chart_.events.begin(), chart_.events.end(), ms,
+                                        [](const psych::ChartEvent& e, double t) { return e.timeMs < t; }) -
+                       chart_.events.begin());
+    lastBeat_ = int(std::floor(chart_.beatAt(ms))) - 1;
+    lastStep_ = int(std::floor(chart_.beatAt(ms) * 4.0)) - 1;
+    if (!chart_.sections.empty()) lastSection_ = std::max(0, chart_.sectionAt(ms) - 1);
+    if (phase_ == Phase::Ending) phase_ = Phase::Playing;
+    finished_ = endRequested_ = false;
+}
 
 void PlayState::precacheCharacter(const std::string& name, int who) {
     if (!psych_ || name.empty()) return;

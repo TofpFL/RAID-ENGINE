@@ -582,6 +582,9 @@ bool Character::get(std::string_view f, Value& out) const {
     if (f == "cameraPosition[1]") { out = double(camY); return true; }
     if (f == "positionArray[0]") { out = double(posX); return true; }
     if (f == "positionArray[1]") { out = double(posY); return true; }
+    if (f == "healthColorArray[0]") { out = double((barColor >> 16) & 255); return true; }
+    if (f == "healthColorArray[1]") { out = double((barColor >> 8) & 255); return true; }
+    if (f == "healthColorArray[2]") { out = double(barColor & 255); return true; }
     if (builtin && (f == "animation.curAnim.name" || f == "animation.name")) { out = lastAnim; return true; }
     return Sprite::get(f, out);
 }
@@ -923,19 +926,21 @@ void Scene::update(double dt, double stepMs, bool playerHolding) {
     for (size_t i = 0; i < tweens.size();) {
         Tween& tw = tweens[i];
         if (tw.delay > 0) { tw.delay -= dt; ++i; continue; }
+        // An empty target tweens a top-level value such as defaultCamZoom.
+        auto pathOf = [&](const std::string& field) { return tw.target.empty() ? field : tw.target + "." + field; };
         if (!tw.isColor)
             for (Tween::Field& f : tw.fields)
                 if (!f.init) {
                     Value cur;
-                    f.from = getProp(tw.target + "." + f.name, cur) ? toNum(cur, f.to) : f.to;
+                    f.from = getProp(pathOf(f.name), cur) ? toNum(cur, f.to) : f.to;
                     f.init = true;
                 }
         tw.t += dt;
         const double k = psych::ease(tw.ease, tw.t / tw.dur);
         if (tw.isColor) {
-            setProp(tw.target + ".color", double(lerpRgb(tw.c0, tw.c1, k)));
+            setProp(pathOf("color"), double(lerpRgb(tw.c0, tw.c1, k)));
         } else {
-            for (const Tween::Field& f : tw.fields) setProp(tw.target + "." + f.name, f.from + (f.to - f.from) * k);
+            for (const Tween::Field& f : tw.fields) setProp(pathOf(f.name), f.from + (f.to - f.from) * k);
         }
         if (tw.t >= tw.dur) {
             Completion c;
@@ -983,6 +988,18 @@ void Scene::update(double dt, double stepMs, bool playerHolding) {
     camGame.update(dt, frameSeed * 7919u);
     camHud.update(dt, frameSeed * 104729u);
     camOther.update(dt, frameSeed * 1299709u);
+    // Built-in effects keep their own clock.
+    auto tick = [&](const ShaderPtr& sh) {
+        if (!sh || sh->timeRate == 0) return;
+        std::vector<float>& t = sh->floats["uTime"];
+        if (t.empty()) t.push_back(0);
+        t[0] += float(dt) * sh->timeRate;
+    };
+    for (Camera* c : {&camGame, &camHud, &camOther})
+        for (const ShaderPtr& sh : c->filters) tick(sh);
+    for (auto& kv : objects) tick(kv.second->shader);
+    for (Character* c : {bf.get(), dad.get(), gf.get()})
+        if (c) tick(c->shader);
     // Camera follow and zoom decay (Psych PlayState.update).
     const float tx = followX - kW * 0.5f, ty = followY - kH * 0.5f;
     const float rate = float(2.4 * cameraSpeed);

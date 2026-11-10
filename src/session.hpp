@@ -2,6 +2,7 @@
 // Pure logic, no rendering or audio, so it is deterministic and testable.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -61,6 +62,8 @@ public:
     void press(int lane, double songMs);
     void release(int lane, double songMs);
     void update(double songMs);
+    // Notes from `songMs` on can be played again (JS Engine loopTheSong); stats stay.
+    void rewindTo(double songMs);
 
     // Accessors used for rendering.
     int keys() const { return keys_; }
@@ -70,6 +73,10 @@ public:
     bool isHolding(int side, int lane) const { return activeHold_[side][lane] >= 0; }
     long long activeHold(int side, int lane) const { return activeHold_[side][lane]; }
     void setBotplay(bool b) { cfg_.botplay = b; }
+    // Lanes the bot plays for the player (JS Engine bot energy), one bit per lane.
+    void setAutoLanes(unsigned mask) { autoLanes_ = mask; }
+    // Each player/opponent hit counts this many notes (JS Engine "Change Note Multiplier").
+    void setNoteMultiplier(int side, int m) { mult_[side & 1] = std::max(1, m); }
     void setPractice(bool b) { cfg_.practice = b; }
     bool botplay() const { return cfg_.botplay; }
     bool keyHeld(int lane) const { return held_[lane]; }
@@ -107,6 +114,8 @@ private:
     bool held_[9]{};
     double lastMs_ = -1e18;
     double accSum_ = 0;
+    unsigned autoLanes_ = 0;
+    int mult_[2] = {1, 1};
 };
 
 }  // namespace gh

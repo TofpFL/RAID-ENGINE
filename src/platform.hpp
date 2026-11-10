@@ -38,6 +38,9 @@ std::string dataDir();
 void prepareDataDir(const std::string& base);
 // Android: keep the screen on and mute the game while it is in the background.
 void afterWindowInit();
+// Wait for the screen's refresh (on) or present frames as soon as they are
+// ready (off). Applied at once; Android asks EGL for it.
+void setVsync(bool on);
 bool inBackground();
 bool takeResumed();             // true once after the app comes back
 void rememberVolume(float v);   // master volume to restore after the background

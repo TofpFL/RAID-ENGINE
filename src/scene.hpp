@@ -74,6 +74,7 @@ struct ShaderInstance {
     std::map<std::string, std::vector<float>, std::less<>> floats;
     std::map<std::string, std::vector<int>, std::less<>> ints;  // ints and bools
     std::map<std::string, std::string, std::less<>> samplers;   // image keys
+    float timeRate = 0;  // built-in effects: "uTime" advances by elapsed * timeRate
 };
 using ShaderPtr = std::shared_ptr<ShaderInstance>;
 struct ShaderSource {
@@ -246,6 +247,7 @@ public:
     psych::StageDef stage;
     std::map<std::string, Value, std::less<>> vars;  // setVar/getVar
     std::map<std::string, ShaderSource, std::less<>> shaderSources;  // initLuaShader
+    std::map<std::string, ShaderPtr, std::less<>> cameraShaders;     // setCameraShader, by index name
     double now = 0;
     unsigned frameSeed = 1;
 

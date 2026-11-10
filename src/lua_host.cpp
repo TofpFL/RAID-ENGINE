@@ -9,6 +9,7 @@
 #include <random>
 
 #include "common.hpp"
+#include "effects.hpp"
 #include "json.hpp"
 #include "lauxlib.h"
 #include "lua.h"
@@ -46,6 +47,7 @@ math.pow = math.pow or function(a, b) return a ^ b end
 math.mod = math.mod or math.fmod
 math.ldexp = math.ldexp or function(m, e) return m * 2.0 ^ e end
 table.getn = table.getn or function(t) return #t end
+package = package or {path = "./?.lua", cpath = "", loaded = {}, preload = {}}
 local function int(x) return math.tointeger(x) or math.floor(x) end
 bit = bit or {
   band = function(a, b) return int(a) & int(b) end,
@@ -181,9 +183,39 @@ bool setAny(lua_State* L, const std::string& path, const Value& v) {
     return SC(L).setProp(path, v);
 }
 
+// Arrays come back as Lua tables, as in Psych: dad.healthColorArray,
+// boyfriend.cameraPosition, opponentCameraOffset...
+bool pushArrayProp(lua_State* L, const std::string& path) {
+    std::vector<double> v;
+    const std::string l = toLower(path);
+    const scene::Scene& sc = SC(L);
+    if (l == "boyfriendcameraoffset") v = {sc.stage.camBf[0], sc.stage.camBf[1]};
+    else if (l == "opponentcameraoffset") v = {sc.stage.camDad[0], sc.stage.camDad[1]};
+    else if (l == "girlfriendcameraoffset") v = {sc.stage.camGf[0], sc.stage.camGf[1]};
+    else {
+        const size_t dot = path.rfind('.');
+        if (dot == std::string::npos) return false;
+        const Character* c = sc.character(path.substr(0, dot));
+        if (!c) return false;
+        const std::string f = path.substr(dot + 1);
+        if (f == "healthColorArray") v = {double((c->barColor >> 16) & 255), double((c->barColor >> 8) & 255), double(c->barColor & 255)};
+        else if (f == "cameraPosition") v = {c->camX, c->camY};
+        else if (f == "positionArray") v = {c->posX, c->posY};
+        else return false;
+    }
+    lua_createtable(L, int(v.size()), 0);
+    for (size_t k = 0; k < v.size(); ++k) {
+        push(L, Value(v[k]));
+        lua_rawseti(L, -2, lua_Integer(k + 1));
+    }
+    return true;
+}
+
 int l_getProperty(lua_State* L) {
+    const std::string path = str(L, 1);
     Value v;
-    if (getAny(L, str(L, 1), v)) return ret(L, v);
+    if (getAny(L, path, v)) return ret(L, v);
+    if (pushArrayProp(L, path)) return 1;
     lua_pushnil(L);
     return 1;
 }
@@ -1152,6 +1184,8 @@ int l_stubTrue(lua_State* L) { return retBool(L, true); }
 
 // ------------------------------------------------------------------ shaders --
 
+scene::Camera* effectCamera(scene::Scene& sc, const std::string& name);
+
 bool loadShaderSource(lua_State* L, const std::string& name) {
     scene::Scene& sc = SC(L);
     if (name.empty()) return false;
@@ -1172,8 +1206,49 @@ bool loadShaderSource(lua_State* L, const std::string& name) {
 int l_initLuaShader(lua_State* L) { return retBool(L, loadShaderSource(L, str(L, 1))); }
 
 scene::ShaderInstance* shaderOf(lua_State* L, int i) {
-    Sprite* s = obj(L, str(L, i));
-    return s && s->shader ? s->shader.get() : nullptr;
+    const std::string name = str(L, i);
+    Sprite* s = obj(L, name);
+    if (s && s->shader) return s->shader.get();
+    auto it = SC(L).cameraShaders.find(name);  // JS Engine setCameraShader index
+    return it != SC(L).cameraShaders.end() ? it->second.get() : nullptr;
+}
+
+// JS Engine: a mod shader (shaders/<name>.frag) on a camera, addressed by
+// `index` (the shader's name by default) in setShaderFloat and friends.
+int l_setCameraShader(lua_State* L) {
+    const std::string name = str(L, 2);
+    std::string index = str(L, 3);
+    if (index.empty()) index = name;
+    if (!G(L).shadersEnabled() || !loadShaderSource(L, name)) return retBool(L, false);
+    scene::Camera* cam = effectCamera(SC(L), str(L, 1));
+    if (!cam) cam = &SC(L).camGame;
+    auto inst = std::make_shared<scene::ShaderInstance>();
+    inst->name = name;
+    if (auto it = SC(L).cameraShaders.find(index); it != SC(L).cameraShaders.end()) {
+        for (scene::Camera* c : {&SC(L).camGame, &SC(L).camHud, &SC(L).camOther})
+            c->filters.erase(std::remove(c->filters.begin(), c->filters.end(), it->second), c->filters.end());
+    }
+    cam->filters.push_back(inst);
+    SC(L).cameraShaders[index] = inst;
+    return retBool(L, true);
+}
+
+int l_removeCameraShader(lua_State* L) {
+    const std::string key = str(L, 2);
+    scene::Camera* cam = effectCamera(SC(L), str(L, 1));
+    if (!cam) cam = &SC(L).camGame;
+    auto& sh = SC(L).cameraShaders;
+    bool removed = false;
+    for (auto it = sh.begin(); it != sh.end();) {
+        if (it->first == key || it->second->name == key) {
+            cam->filters.erase(std::remove(cam->filters.begin(), cam->filters.end(), it->second), cam->filters.end());
+            it = sh.erase(it);
+            removed = true;
+        } else {
+            ++it;
+        }
+    }
+    return retBool(L, removed);
 }
 
 int l_setSpriteShader(lua_State* L) {
@@ -1272,6 +1347,254 @@ int l_getShaderInt(lua_State* L) { return intUniform(L, false, false); }
 int l_getShaderIntArray(lua_State* L) { return intUniform(L, false, true); }
 int l_getShaderBool(lua_State* L) { return intUniform(L, true, false); }
 int l_getShaderBoolArray(lua_State* L) { return intUniform(L, true, true); }
+
+// ------------------------------------------------- JS Engine screen effects --
+
+scene::Camera* effectCamera(scene::Scene& sc, const std::string& name) {
+    const std::string l = toLower(trim(name));
+    if (l.empty() || l == "camgame" || l == "game") return &sc.camGame;
+    if (l == "camhud" || l == "hud") return &sc.camHud;
+    if (l == "camother" || l == "other") return &sc.camOther;
+    return nullptr;
+}
+
+// Adds a built-in effect to a camera (camhud/hud, camother/other,
+// camgame/game) or puts it on a sprite (a Lua tag or a PlayState object such
+// as dad); anything else goes on the game camera.
+scene::ShaderPtr addEffect(lua_State* L, const std::string& name, bool timed) {
+    if (!G(L).shadersEnabled()) return nullptr;
+    scene::ShaderPtr e = fx::make(SC(L), name, timed);
+    if (!e) return nullptr;
+    const std::string target = lua_type(L, 1) == LUA_TSTRING ? str(L, 1) : std::string();
+    if (scene::Camera* c = effectCamera(SC(L), target)) c->filters.push_back(e);
+    else if (Sprite* s = obj(L, target)) s->shader = e;
+    else SC(L).camGame.filters.push_back(e);
+    return e;
+}
+
+void setF(const scene::ShaderPtr& e, const char* name, double v) {
+    if (e) e->floats[name] = {float(v)};
+}
+
+int l_addChromaticAbberationEffect(lua_State* L) {
+    const double off = num(L, 2, 0.005);
+    const scene::ShaderPtr e = addEffect(L, "__fx_chromatic", false);
+    setF(e, "rOffset", off);
+    setF(e, "gOffset", 0);
+    setF(e, "bOffset", -off);
+    return 0;
+}
+int l_addScanlineEffect(lua_State* L) {
+    setF(addEffect(L, "__fx_scanline", false), "lockAlpha", boolean(L, 2, false));
+    return 0;
+}
+int l_addGrainEffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_grain", true);
+    setF(e, "grainSize", num(L, 2, 1.6));
+    setF(e, "lumAmount", num(L, 3, 1));
+    setF(e, "lockAlpha", boolean(L, 4, false));
+    return 0;
+}
+int l_addTiltshiftEffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_tiltshift", false);
+    setF(e, "bluramount", num(L, 2, 1));
+    setF(e, "center", num(L, 3, 0.5));
+    return 0;
+}
+int l_addVCREffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_vcr", true);
+    setF(e, "glitchModifier", num(L, 2, 0));
+    setF(e, "distortionOn", boolean(L, 3, true));
+    setF(e, "perspectiveOn", boolean(L, 4, true));
+    setF(e, "vignetteMoving", boolean(L, 5, true));
+    return 0;
+}
+int l_addWiggleEffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_wiggle", true);
+    setF(e, "effectType", fx::wiggleType(str(L, 2, "dreamy")));
+    setF(e, "uSpeed", num(L, 3, 0.1));
+    setF(e, "uFrequency", num(L, 4, 0.1));
+    setF(e, "uWaveAmplitude", num(L, 5, 0.1));
+    setF(e, "verticalStrength", num(L, 6, 1));
+    setF(e, "horizontalStrength", num(L, 7, 1));
+    return 0;
+}
+int waveEffect(lua_State* L, const char* name, int speedArg, int freqArg, int ampArg) {
+    const scene::ShaderPtr e = addEffect(L, name, true);
+    setF(e, "uSpeed", num(L, speedArg, 0.1));
+    setF(e, "uFrequency", num(L, freqArg, 0.1));
+    setF(e, "uWaveAmplitude", num(L, ampArg, 0.1));
+    setF(e, "uEnabled", 0);  // the pulse effect stays off, as in JS Engine
+    return 0;
+}
+int l_addGlitchEffect(lua_State* L) { return waveEffect(L, "__fx_glitch", 2, 3, 4); }
+int l_addGlitchShader(lua_State* L) { return waveEffect(L, "__fx_glitch", 4, 3, 2); }
+int l_addPulseEffect(lua_State* L) { return waveEffect(L, "__fx_pulse", 2, 3, 4); }
+int l_addDistortionEffect(lua_State* L) { return waveEffect(L, "__fx_distort", 2, 3, 4); }
+int l_addInvertEffect(lua_State* L) { addEffect(L, "__fx_invert", false); return 0; }
+int l_addGreyscaleEffect(lua_State* L) { addEffect(L, "__fx_greyscale", false); return 0; }
+int l_add3DEffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_3d", false);
+    setF(e, "xrot", num(L, 2));
+    setF(e, "yrot", num(L, 3));
+    setF(e, "zrot", num(L, 4));
+    setF(e, "dept", num(L, 5));
+    return 0;
+}
+int l_addBloomEffect(lua_State* L) {
+    const scene::ShaderPtr e = addEffect(L, "__fx_bloom", false);
+    setF(e, "intensity", num(L, 2, 0.35));
+    setF(e, "blurSize", num(L, 3, 1.0) / 512.0);
+    return 0;
+}
+int l_addBlockedGlitchEffect(lua_State* L) {
+    if (!boolean(L, 5, true)) return 0;  // JS Engine only adds it with the colour transform on
+    const scene::ShaderPtr e = addEffect(L, "__fx_blocked", true);
+    if (!e) return 0;
+    const float res = float(num(L, 2, 1280));
+    e->floats["screenSize"] = {res, res};
+    setF(e, "uTime", num(L, 3, 1));
+    setF(e, "glitchColor", 1);
+    return 0;
+}
+int l_clearEffects(lua_State* L) {
+    scene::Camera* c = effectCamera(SC(L), lua_type(L, 1) == LUA_TSTRING ? str(L, 1) : std::string());
+    (c ? c : &SC(L).camGame)->filters.clear();
+    return 0;
+}
+
+// ------------------------------------------------------------ files, modules --
+
+// A path inside the game's mods folder, or "" (absolute paths, "..").
+std::string modsPath(lua_State* L, std::string rel) {
+    const std::string root = G(L).modsDir();
+    if (root.empty()) return "";
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    if (rel.rfind("mods/", 0) == 0) rel = rel.substr(5);
+    if (rel.empty() || rel[0] == '/' || (rel.size() > 1 && rel[1] == ':')) return "";
+    for (size_t p = 0; p < rel.size();) {
+        size_t e = rel.find('/', p);
+        if (e == std::string::npos) e = rel.size();
+        if (rel.compare(p, e - p, "..") == 0) return "";
+        p = e + 1;
+    }
+    return root + rel;
+}
+
+int l_saveFile(lua_State* L) {
+    const std::string path = modsPath(L, str(L, 1));
+    if (path.empty()) {
+        warn(L, "saveFile: only files inside the mods folder can be written");
+        return retBool(L, false);
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(std::u8string(path.begin(), path.end())).parent_path(), ec);
+    const std::string content = str(L, 2);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return retBool(L, false);
+    std::fwrite(content.data(), 1, content.size(), f);
+    std::fclose(f);
+    return retBool(L, true);
+}
+
+int l_deleteFile(lua_State* L) {
+    const std::string path = modsPath(L, str(L, 1));
+    if (path.empty()) return retBool(L, false);
+    std::error_code ec;
+    return retBool(L, std::filesystem::remove(std::filesystem::path(std::u8string(path.begin(), path.end())), ec));
+}
+
+// require("mods.MyMod.scripts.Helper"), require("helper"): Lua modules from
+// the song's content (dots become folders), loaded once per script.
+int l_require(lua_State* L) {
+    const std::string name = luaL_checkstring(L, 1);
+    if (lua_getfield(L, LUA_REGISTRYINDEX, "gh_loaded") != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "gh_loaded");
+    }
+    const int cache = lua_gettop(L);
+    if (lua_getfield(L, cache, name.c_str()) != LUA_TNIL) return 1;
+    lua_pop(L, 1);
+    std::string rel = endsWithI(name, ".lua") ? name.substr(0, name.size() - 4) : name;
+    std::replace(rel.begin(), rel.end(), '.', '/');
+    std::vector<std::string> tries = {rel + ".lua", rel + "/init.lua"};
+    if (rel.rfind("mods/", 0) == 0) {
+        tries.push_back(rel.substr(5) + ".lua");
+        const size_t slash = rel.find('/', 5);  // mods/<Mod>/x -> x inside the mod
+        if (slash != std::string::npos) tries.push_back(rel.substr(slash + 1) + ".lua");
+    }
+    const std::string& self = S(L).path;
+    const size_t dir = self.find_last_of("/\\");
+    std::string file;
+    for (const std::string& t : tries) {
+        file = SC(L).files.find(t);
+        if (file.empty() && dir != std::string::npos && t.find("..") == std::string::npos) {
+            const std::string local = self.substr(0, dir + 1) + t;
+            if (std::filesystem::exists(std::filesystem::path(std::u8string(local.begin(), local.end())))) file = local;
+        }
+        if (!file.empty()) break;
+    }
+    std::string code;
+    if (file.empty() || !scene::readFile(file, code)) return luaL_error(L, "module '%s' not found", name.c_str());
+    const std::string chunk = "@" + name;
+    if (luaL_loadbufferx(L, code.data(), code.size(), chunk.c_str(), "t") != LUA_OK) return lua_error(L);
+    lua_pushstring(L, name.c_str());
+    lua_call(L, 1, 1);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 1);
+    }
+    lua_pushvalue(L, -1);
+    lua_setfield(L, cache, name.c_str());
+    return 1;
+}
+
+int l_doTweenScale(lua_State* L) {
+    const std::string tag = str(L, 1), target = str(L, 2);
+    if (!tweenTargetExists(L, target, "scale.x")) { warn(L, "doTweenScale: object not found: " + target); return 0; }
+    scene::Tween tw;
+    tw.tag = tag;
+    tw.target = target;
+    tw.fields.push_back({"scale.x", 0, num(L, 3, 1), false});
+    tw.fields.push_back({"scale.y", 0, num(L, 3, 1), false});
+    tw.dur = num(L, 4, 1);
+    tw.ease = str(L, 5, "linear");
+    tw.script = S(L).index;
+    SC(L).tween(std::move(tw));
+    return 0;
+}
+
+int l_loopTheSong(lua_State* L) { G(L).loopSong(num(L, 1, 0)); return 0; }
+
+int l_gamepadPressed(lua_State* L) { return retBool(L, G(L).gamepadState(int(num(L, 1)), str(L, 2), 0)); }
+int l_gamepadJustPressed(lua_State* L) { return retBool(L, G(L).gamepadState(int(num(L, 1)), str(L, 2), 1)); }
+int l_gamepadReleased(lua_State* L) { return retBool(L, G(L).gamepadState(int(num(L, 1)), str(L, 2), 2)); }
+int l_anyGamepadPressed(lua_State* L) { return retBool(L, G(L).gamepadState(-1, str(L, 1), 0)); }
+int l_anyGamepadJustPressed(lua_State* L) { return retBool(L, G(L).gamepadState(-1, str(L, 1), 1)); }
+int l_anyGamepadReleased(lua_State* L) { return retBool(L, G(L).gamepadState(-1, str(L, 1), 2)); }
+int l_gamepadAnalogX(lua_State* L) { return retNum(L, G(L).gamepadAxis(int(num(L, 1)), boolean(L, 2, true) ? 0 : 2)); }
+int l_gamepadAnalogY(lua_State* L) { return retNum(L, G(L).gamepadAxis(int(num(L, 1)), boolean(L, 2, true) ? 1 : 3)); }
+
+int l_addCombo(lua_State* L) { return setGameNum(L, "combo", gameNum(L, "combo") + num(L, 1)); }
+int l_getPlaybackSpeed(lua_State* L) { return retNum(L, gameNum(L, "playbackRate")); }
+int l_getMaxHealth(lua_State* L) { return retNum(L, 2); }
+int l_playsAsBF(lua_State* L) {
+    Value v;
+    return retBool(L, !(G(L).getGameProp("opponentChart", v) && scene::toBool(v)));
+}
+int l_directoryFileList(lua_State* L) {
+    lua_newtable(L);
+    lua_Integer k = 1;
+    for (const std::string& f : SC(L).files.list(str(L, 1), "")) {
+        const size_t slash = f.find_last_of("/\\");
+        lua_pushstring(L, (slash == std::string::npos ? f : f.substr(slash + 1)).c_str());
+        lua_rawseti(L, -2, k++);
+    }
+    return 1;
+}
+int l_stubZero(lua_State* L) { return retNum(L, 0); }
 
 // -------------------------------------------------------- remaining API ----
 
@@ -1708,7 +2031,26 @@ const Fn kFunctions[] = {
     {"setShaderIntArray", l_setShaderIntArray}, {"setShaderBool", l_setShaderBool}, {"setShaderBoolArray", l_setShaderIntArray},
     {"setShaderSampler2D", l_setShaderSampler2D}, {"getShaderFloat", l_getShaderFloat}, {"getShaderInt", l_getShaderInt},
     {"getShaderBool", l_getShaderBool}, {"getShaderFloatArray", l_getShaderFloatArray}, {"getShaderIntArray", l_getShaderIntArray},
-    {"getShaderBoolArray", l_getShaderBoolArray}, {"createRuntimeShader", l_initLuaShader}, {"addGlitchEffect", l_stubNil},
+    {"getShaderBoolArray", l_getShaderBoolArray}, {"createRuntimeShader", l_initLuaShader},
+    // JS Engine screen effects
+    {"addChromaticAbberationEffect", l_addChromaticAbberationEffect}, {"addChromaticAberrationEffect", l_addChromaticAbberationEffect},
+    {"addScanlineEffect", l_addScanlineEffect}, {"addGrainEffect", l_addGrainEffect}, {"addTiltshiftEffect", l_addTiltshiftEffect},
+    {"addVCREffect", l_addVCREffect}, {"addWiggleEffect", l_addWiggleEffect}, {"addGlitchEffect", l_addGlitchEffect},
+    {"addGlitchShader", l_addGlitchShader}, {"addPulseEffect", l_addPulseEffect}, {"addDistortionEffect", l_addDistortionEffect},
+    {"addInvertEffect", l_addInvertEffect}, {"addGreyscaleEffect", l_addGreyscaleEffect}, {"addGrayscaleEffect", l_addGreyscaleEffect},
+    {"add3DEffect", l_add3DEffect}, {"addBloomEffect", l_addBloomEffect}, {"addBlockedGlitchEffect", l_addBlockedGlitchEffect},
+    {"clearEffects", l_clearEffects}, {"clearShadersFromCamera", l_clearEffects},
+    {"saveFile", l_saveFile}, {"deleteFile", l_deleteFile}, {"require", l_require}, {"doTweenScale", l_doTweenScale},
+    {"loopTheSong", l_loopTheSong}, {"trace", l_debugPrint},
+    {"setCameraShader", l_setCameraShader}, {"removeCameraShader", l_removeCameraShader},
+    {"gamepadPressed", l_gamepadPressed}, {"gamepadJustPressed", l_gamepadJustPressed}, {"gamepadReleased", l_gamepadReleased},
+    {"anyGamepadPressed", l_anyGamepadPressed}, {"anyGamepadJustPressed", l_anyGamepadJustPressed},
+    {"anyGamepadReleased", l_anyGamepadReleased}, {"gamepadAnalogX", l_gamepadAnalogX}, {"gamepadAnalogY", l_gamepadAnalogY},
+    {"addCombo", l_addCombo}, {"addNPS", l_stubNil}, {"getPlaybackSpeed", l_getPlaybackSpeed},
+    {"setPlaybackSpeed", l_stubNil}, {"addPlaybackSpeed", l_stubNil}, {"getMaxHealth", l_getMaxHealth},
+    {"changeMaxHealth", l_stubNil}, {"playsAsBF", l_playsAsBF}, {"directoryFileList", l_directoryFileList},
+    {"updateHitboxFromGroup", l_stubNil}, {"getPixelColor", l_stubZero}, {"changeCursor", l_stubNil},
+    {"createCamera", l_stubNil}, {"addCamera", l_stubNil}, {"removeCamera", l_stubNil},
     {"runHaxeCode", l_runHaxeCode}, {"runHaxeFunction", l_runHaxeFunction}, {"addHaxeLibrary", l_stubTrue},
     {"changePresence", l_stubNil}, {"changeDiscordPresence", l_stubNil}, {"changeDiscordClientID", l_stubNil},
     {"openCustomSubstate", l_openCustomSubstate}, {"closeCustomSubstate", l_closeCustomSubstate}, {"insertToCustomSubstate", l_insertToCustomSubstate},
@@ -1992,7 +2334,7 @@ bool ScriptHost::loadString(const std::string& path, const std::string& code, bo
     luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
     luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1);
     lua_settop(L, 0);
-    for (const char* banned : {"dofile", "loadfile", "require"}) {
+    for (const char* banned : {"dofile", "loadfile"}) {  // require is ours (song content only)
         lua_pushnil(L);
         lua_setglobal(L, banned);
     }

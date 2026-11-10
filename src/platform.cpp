@@ -16,6 +16,7 @@
 #include <android/log.h>
 #include <android/native_activity.h>
 #include <android/window.h>
+#include <EGL/egl.h>
 #include <android_native_app_glue.h>
 #include <jni.h>
 #include <time.h>
@@ -291,6 +292,11 @@ void prepareDataDir(const std::string& base) {
     copyAssetDir(app->activity->assetManager, "songs", base + "songs/");
 }
 
+void setVsync(bool on) {
+    const EGLDisplay d = eglGetCurrentDisplay();
+    if (d != EGL_NO_DISPLAY) eglSwapInterval(d, on ? 1 : 0);
+}
+
 void afterWindowInit() {
     g_background = false;
     g_resumed = false;
@@ -399,6 +405,10 @@ void log(const std::string&) {}
 std::string dataDir() { return ""; }
 void prepareDataDir(const std::string&) {}
 void afterWindowInit() {}
+void setVsync(bool on) {
+    if (on) SetWindowState(FLAG_VSYNC_HINT);
+    else ClearWindowState(FLAG_VSYNC_HINT);
+}
 bool inBackground() { return false; }
 bool takeResumed() { return false; }
 void rememberVolume(float) {}

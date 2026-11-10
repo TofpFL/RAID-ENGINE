@@ -56,6 +56,13 @@ public:
     virtual bool loadSong(const std::string& name, int difficulty) { return false; }
     virtual void healthBarColors(uint32_t left, uint32_t right) {}
     virtual void timeBarColors(uint32_t left, uint32_t right) {}
+    virtual bool shadersEnabled() { return true; }  // the "Shaders" option
+    virtual std::string modsDir() { return ""; }    // saveFile/deleteFile stay inside it ("" = not allowed)
+    virtual void loopSong(double ms) {}             // JS Engine loopTheSong
+    // Gamepads (Psych 0.7): button names such as A, B, START, DPAD_UP,
+    // LEFT_SHOULDER; mode as keyState; pad -1 = any.
+    virtual bool gamepadState(int pad, std::string_view button, int mode) { return false; }
+    virtual double gamepadAxis(int pad, int axis) { return 0; }  // 0 left x, 1 left y, 2 right x, 3 right y
 };
 
 class ScriptHost {

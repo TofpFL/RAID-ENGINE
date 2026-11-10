@@ -148,6 +148,7 @@ int App::run(int argc, char** argv) {
     InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
                "God's Hand of Principality and Demise");
     platform::afterWindowInit();
+    platform::setVsync(settings.vsync);  // explicit both ways: some drivers default to on
     SetExitKey(KEY_NULL);
     if (!platform::kAndroid) {
         SetWindowMinSize(640, 360);
@@ -238,6 +239,7 @@ void App::frame() {
     }
     if (platform::takeResumed()) {
         platform::log("back from the background");
+        platform::setVsync(settings.vsync);  // a new surface starts with the system's default
         state_->onResume();
     }
     if (touchMode) touch.setLayout(input, state_->touchLayout(), now);

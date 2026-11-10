@@ -113,6 +113,15 @@ void PlayState::update(double dt) {
         }
         if (scripts_) scripts_->call("onCustomSubstateUpdatePost", {scene::Value(name), scene::Value(dt)});
     }
+    if (popupHold_) {  // "Popup" event: the song waits for OK
+        if (a.input.accept() || a.input.back()) {
+            popupHold_ = false;
+            notices_.erase(std::remove_if(notices_.begin(), notices_.end(), [](const Notice& n) { return n.kind == 2; }),
+                           notices_.end());
+            a.mixer.resume();
+        }
+        return;
+    }
     if (phase_ == Phase::Waiting) {
         // A script stopped the countdown (cutscene, dialogue): keep scripts
         // running, start anyway if nothing resumes it.
@@ -178,6 +187,7 @@ void PlayState::update(double dt) {
         psychUpdate(dt);
         if (phase_ != Phase::Playing) return;
     }
+    updateJsEngine(dt);
     beatPulse_ = std::max(0.0f, beatPulse_ - float(dt) * 4.0f);
     minePulse_ = std::max(0.0f, minePulse_ - float(dt) * 3.0f);
     for (auto& side : confirm_)
@@ -213,6 +223,10 @@ void PlayState::draw() {
     if (psych_) {
         gfx::setViewWidth(gameW_);
         psychDraw();
+        gfx::beginCanvas();
+        drawNotices();
+        drawBotEnergy();
+        gfx::endCanvas();
         if (gameW_ < gfx::W) {
             gfx::drawLetterbox();  // the part of the picture past FlxG.width is not shown
             gfx::setViewWidth(gfx::W);
@@ -235,6 +249,10 @@ void PlayState::draw() {
         drawLanes();
         fx_.draw(true);
         drawHud();
+        gfx::endCanvas();
+        gfx::beginCanvas();
+        drawNotices();
+        drawBotEnergy();
         gfx::endCanvas();
     }
 
@@ -477,7 +495,12 @@ TouchLayout PlayState::touchLayout() const {
         t.keys = {{"SKIP", KEY_ENTER}};
         return t;
     }
+    if (popupHold_) {  // a "Popup" window: tap anywhere to close it
+        t.tapCode = KEY_ENTER;
+        return t;
+    }
     t.keys = {{"PAUSE", KEY_ESCAPE}};
+    if (botEnergyOn_ && !cfg_.botplay) t.keys.push_back({"BOT", KEY_LEFT_CONTROL});
     if (!replaying_ && !cfg_.botplay) t.lanes = chart_.keys;
     return t;
 }
@@ -999,14 +1022,15 @@ void PlayState::drawHud() {
     // song progress
     if (hudShown("timeBar")) {
         const float ty = s.downscroll ? gfx::H - 26.0f : 12.0f;
-        const float prog = float(clampv(songMs_ / std::max(1.0, chart_.lengthMs), 0.0, 1.0));
+        const float prog = float(clampv(songMs_ / std::max(1.0, shownLengthMs()), 0.0, 1.0));
         // setTimeBarColors() overrides the theme colours.
         DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200});
         DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
                              timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f));
-        const double remain = std::max(0.0, (chart_.lengthMs - songMs_) / 1000.0 / rate_);
+        const double remain = std::max(0.0, (shownLengthMs() - songMs_) / 1000.0 / rate_);
+        const std::string name = songNameShown_.empty() ? chart_.title : songNameShown_;
         if (hudShown("timeTxt"))
-            gfx::text(FontId::Ui, chart_.title + "  -  " + req_.diff + "  -  " + fmtTime(remain), gfx::W / 2,
+            gfx::text(FontId::Ui, name + "  -  " + req_.diff + "  -  " + fmtTime(remain), gfx::W / 2,
                       s.downscroll ? ty - 26 : ty + 14, 20, fade(WHITE, 0.85f), Align::Center, 1.5f);
     }
 
