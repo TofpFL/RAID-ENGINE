@@ -41,6 +41,12 @@ void afterWindowInit();
 // Wait for the screen's refresh (on) or present frames as soon as they are
 // ready (off). Applied at once; Android asks EGL for it.
 void setVsync(bool on);
+// The player picks a folder. Desktop: the system's dialog (blocking); its
+// path comes back ("" if cancelled). Android: the system folder picker
+// opens and the files the Psych Engine interface needs are copied into
+// <data folder>/psych-ui/ in the background (follow importStatus); "" comes back.
+std::string pickFolder(const std::string& title);
+std::string pickFolderNative(const std::string& title);  // folder_picker.cpp
 bool inBackground();
 bool takeResumed();             // true once after the app comes back
 void rememberVolume(float v);   // master volume to restore after the background

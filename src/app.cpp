@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "psych_ui.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -76,6 +77,38 @@ void App::applyVolumes() {
 }
 
 void App::saveSettings() { settings.save(base + "settings.cfg"); }
+
+void App::applyPsychUi() {
+    PsychUi& ui = psychUi();
+    ui.unload();
+    psychReport.clear();
+    if (settings.psychUi && !settings.psychFolder.empty()) {
+        if (ui.load(settings.psychFolder, psychReport) > 0) ui.setActive(true);
+        else psychReport = "nothing of the Psych Engine interface found there";
+    }
+    ui.applySounds();
+    // Menu music: Psych's freakyMenu while that interface is on, ours otherwise.
+    const bool wantPsych = ui.active() && !ui.menuMusic().empty();
+    if (wantPsych == psychMenuMusic_ && (menuPcm_ || menuJob_.valid())) return;
+    stopMenuMusic();
+    if (menuJob_.valid()) menuJob_.wait();
+    menuJob_ = {};
+    menuPcm_.reset();
+    psychMenuMusic_ = false;
+    if (wantPsych) {
+        auto pcm = std::make_shared<Pcm>();
+        std::string err;
+        if (loadAudioFile(ui.menuMusic(), *pcm, err) && pcm->frames() > 0) {
+            menuPcm_ = pcm;
+            menuLoop_ = double(pcm->frames()) / Mixer::kRate;
+            menuBpm_ = 102;  // freakyMenu
+            psychMenuMusic_ = true;
+            return;
+        }
+    }
+    menuBpm_ = menuTheme().bpm;
+    menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
+}
 
 void App::toggleFullscreen() {
     if (platform::kAndroid) return;
@@ -176,6 +209,7 @@ int App::run(int argc, char** argv) {
 
     menuBpm_ = menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
+    if (settings.psychUi) applyPsychUi();
 
     startTime = now = nowSec();
     if (autoRun.enabled && !autoRun.song.empty()) {
@@ -223,6 +257,7 @@ int App::run(int argc, char** argv) {
     next_.reset();
     waitForBackgroundJobs();
     mixer.shutdown();
+    psychUi().unload();
     sfxShutdown();
     gfx::shutdown();
     CloseAudioDevice();

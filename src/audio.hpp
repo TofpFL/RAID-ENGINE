@@ -91,5 +91,9 @@ void sfxInit();
 void sfxShutdown();
 void sfxPlay(Sfx s, float volume = 1.0f, float pitch = 1.0f);
 void sfxSetVolume(float v);
+// Plays the sound in `path` (any audio file the game reads) for `id` from
+// now on; an empty path goes back to the game's own sound.
+bool sfxOverride(Sfx id, const std::string& path);
+void sfxClearOverrides();
 
 }  // namespace gh

@@ -255,6 +255,21 @@ bool pickModZips() {
     return ok;
 }
 
+std::string pickFolder(const std::string&) {
+    Jni j;
+    if (!j.env) return {};
+    jclass cls = activityClass(j.env);
+    if (!cls) return {};
+    if (jmethodID m = j.env->GetMethodID(cls, "pickPsychFolder", "()V")) {
+        j.env->CallVoidMethod(GetAndroidApp()->activity->clazz, m);
+        std::string err;
+        j.failed(err, "folder picker");
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+    return {};
+}
+
 Import importStatus(int* count) {
     const int s = staticInt("importState", 0);
     if (count) *count = staticInt("importCount", 0);
@@ -418,6 +433,7 @@ bool download(const std::string&, const std::string&, std::string& err) {
     return false;
 }
 bool pickModZips() { return false; }
+std::string pickFolder(const std::string& title) { return pickFolderNative(title); }
 Import importStatus(int* count) {
     if (count) *count = 0;
     return Import::Idle;

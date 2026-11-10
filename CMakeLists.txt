@@ -204,6 +204,8 @@ if(GH_BUILD_GAME)
     src/state_modpacks.cpp
     src/process.cpp
     src/platform.cpp
+    src/folder_picker.cpp
+    src/psych_ui.cpp
     src/touch_ui.cpp
   )
   if(ANDROID)
@@ -228,6 +230,9 @@ if(GH_BUILD_GAME)
   endif()
   if(APPLE)
     target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+  endif()
+  if(WIN32)
+    target_link_libraries(godshand PRIVATE shell32 ole32)  # the folder dialog
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/

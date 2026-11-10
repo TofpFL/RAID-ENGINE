@@ -1,6 +1,7 @@
 // The duel: game flow, input, judgement events, classic visuals and the HUD.
 // Psych-mode scene and scripting live in play_psych.cpp.
 #include "state_play.hpp"
+#include "psych_ui.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -35,6 +36,25 @@ int singDir(int keys, int lane) {
 }
 
 Color rgbColor(uint32_t rgb) { return Color{(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8), (unsigned char)rgb, 255}; }
+
+// Psych Engine's rating names and full-combo labels (its interface style).
+std::string psychRatingName(double acc, int judged) {
+    if (judged == 0) return "?";
+    static const std::pair<double, const char*> names[] = {{0.2, "You Suck!"}, {0.4, "Shit"}, {0.5, "Bad"}, {0.6, "Bruh"},
+                                                           {0.69, "Meh"}, {0.7, "Nice"}, {0.8, "Good"}, {0.9, "Great"},
+                                                           {1.0, "Sick!"}};
+    if (acc >= 1.0) return "Perfect!!";
+    for (const auto& [limit, name] : names)
+        if (acc < limit) return name;
+    return "Sick!";
+}
+
+std::string psychFcLabel(const Session& s) {
+    if (s.misses > 0) return s.misses < 10 ? "SDCB" : "Clear";
+    if (s.counts[kMortal] + s.counts[kSinful] > 0) return "FC";
+    if (s.counts[kGrace] > 0) return "GFC";
+    return "SFC";
+}
 }  // namespace
 
 PlayState::PlayState(PlayRequest r) : req_(std::move(r)) {}
@@ -849,6 +869,7 @@ void PlayState::drawMine(Vector2 c, float size, float alpha, float rot) {
 void PlayState::drawLanes() {
     App& a = app();
     const Settings& s = a.settings;
+    const PsychUi& ui = psychUi();
     const int K = chart_.keys;
     const float ns = noteSize();
     const double pxPerMs = 0.45 * scrollSpeed() / rate_;
@@ -874,7 +895,13 @@ void PlayState::drawLanes() {
                 float conf = confirm_[side][lane];
                 if (side == 0 && !s.opponentStrums) conf = 0;
                 const bool pressed = side == 1 && heldCount_[lane] > 0 && !cfg_.botplay;
-                if (conf > 0.01f) {
+                const int sstate = conf > 0.01f ? 2 : pressed ? 1 : 0;
+                if (sstate) ui.beginDir(dir);  // idle receptors stay grey
+                const bool drawn = ui.strum(dir, c, size, sstate, alphaStrum, st.angle, a.now);
+                if (sstate) ui.endDir();
+                if (drawn) {
+                    // the Psych Engine interface drew it
+                } else if (conf > 0.01f) {
                     gfx::glow(c, size * 0.95f * conf, fade(col, 0.6f * alphaStrum));
                     gfx::drawNote(dir, c, size, alphaStrum, 1.0f + 0.06f * conf, st.angle);
                 } else if (pressed) {
@@ -886,6 +913,7 @@ void PlayState::drawLanes() {
             const float dirSign = st.downScroll ? -1.0f : 1.0f;
             const std::vector<LaneNote>& v = session_.lane(side, lane);
             if (!v.empty()) {
+                ui.beginDir(dir);  // this lane's colours (Psych colour-template skins)
                 const double tStart = songMs_ - reach * 0.5 - session_.maxSustain(side, lane);
                 const double tEnd = songMs_ + reach;
                 auto lo = std::lower_bound(v.begin(), v.end(), tStart, [](const LaneNote& n, double t) { return n.t < t; });
@@ -911,7 +939,8 @@ void PlayState::drawLanes() {
                     const float y1 = c.y + dirSign * float((endT - songMs_) * pxPerMs * mult);
                     if ((dirSign > 0 && y1 < c.y - offY) || (dirSign < 0 && y1 > c.y + offY)) continue;
                     const float al = (n.state == kMissed || n.state == kDropped ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
-                    gfx::drawSustain(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
+                    if (!ui.hold(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al))
+                        gfx::drawSustain(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
                 }
                 // Notes less than a pixel apart look the same drawn once, so a
                 // lane never draws more notes than it has pixels (spam charts
@@ -936,8 +965,9 @@ void PlayState::drawLanes() {
                     if (al <= 0.002f) continue;
                     const Vector2 p{c.x + (nv ? nv->offsetX : 0.0f), y + (nv ? nv->offsetY : 0.0f)};
                     if (n.kind == kMine) drawMine(p, size, al, st.angle);
-                    else gfx::drawNote(dir, p, size, al, 1.0f, st.angle);
+                    else if (!ui.note(dir, p, size, al, st.angle)) gfx::drawNote(dir, p, size, al, 1.0f, st.angle);
                 }
+                ui.endDir();
             }
             if (rotated) {
                 rlDrawRenderBatchActive();
@@ -966,7 +996,10 @@ void PlayState::drawHud() {
     const float leftFrac = playerLeft_ ? hp : 1.0f - hp;
     const float split = bx + bw * leftFrac;
     float barAlpha = 1;
-    if (hudShown("healthBar", &barAlpha)) {
+    const PsychUi& ui = psychUi();
+    if (hudShown("healthBar", &barAlpha) && ui.healthBar({bx, by, bw, bh}, leftColor_, rightColor_, leftFrac, barAlpha)) {
+        // the Psych Engine interface drew it
+    } else if (hudShown("healthBar", &barAlpha)) {
         DrawRectangleRounded({bx - 5, by - 5, bw + 10, bh + 10}, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha));
         DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
         DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
@@ -999,11 +1032,27 @@ void PlayState::drawHud() {
                            (ratingNameOverride_.empty() ? session_.rank() : ratingNameOverride_) + ")";
         const std::string cl = ratingFcOverride_.empty() ? session_.clearLabel() : ratingFcOverride_;
         if (!cl.empty()) line += "   |   " + cl;
+        if (ui.active()) {  // Psych Engine's own score line
+            line = "Score: " + std::to_string(session_.score) + " | Misses: " + std::to_string(session_.misses) + " | Rating: " +
+                   (ratingNameOverride_.empty() ? psychRatingName(session_.accuracy(), session_.judged() + session_.misses)
+                                                : ratingNameOverride_);
+            if (session_.judged() + session_.misses > 0)
+                line += TextFormat(" (%.2f%%) - %s", session_.accuracy() * 100.0,
+                                   (ratingFcOverride_.empty() ? psychFcLabel(session_) : ratingFcOverride_).c_str());
+        }
         if (psych_) {
             auto it = scene_->hud.find("scoreTxt");
             if (it != scene_->hud.end() && !it->second->text.text.empty()) line = it->second->text.text;
         }
-        gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
+        if (const Font* f = ui.active() ? ui.font() : nullptr) {
+            const Vector2 sz = MeasureTextEx(*f, line.c_str(), 20, 0);
+            const Vector2 at{gfx::W / 2 - sz.x * 0.5f, by + 36};
+            for (const Vector2 o : {Vector2{-1.25f, 0}, Vector2{1.25f, 0}, Vector2{0, -1.25f}, Vector2{0, 1.25f}})
+                DrawTextEx(*f, line.c_str(), {at.x + o.x, at.y + o.y}, 20, 0, BLACK);
+            DrawTextEx(*f, line.c_str(), at, 20, 0, WHITE);
+        } else {
+            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
+        }
     }
     if ((cfg_.botplay || replaying_) && hudShown("botplayTxt"))
         gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
@@ -1044,9 +1093,16 @@ void PlayState::drawHud() {
             const float pop = 1.0f + 0.25f * std::exp(-age * 20.0f);
             const float al = age < 0.4f ? 1.0f : 1.0f - (age - 0.4f) / 0.3f;
             const float y = py - age * 26.0f;
-            gfx::text(FontId::Title, p.text, px, y, 46 * pop, fade(p.c, al), Align::Center, 2.5f);
-            if (p.combo >= 3 && p.text != "MISS")
-                gfx::text(FontId::Ui, "x" + std::to_string(p.combo), px, y + 52, 34 * pop, fade(WHITE, al), Align::Center, 2.0f);
+            int ri = -1;
+            for (int k = 0; k < kRatingCount; ++k)
+                if (p.text == ratingInfo(Rating(k)).name) ri = k;
+            if (ri >= 0 && ui.rating(ri, {px, y + 10}, 0.7f * pop, al)) {  // Psych: the rating picture and combo digits
+                if (p.combo >= 10) ui.combo(p.combo, {px, y + 90}, 0.5f, al);
+            } else {
+                gfx::text(FontId::Title, p.text, px, y, 46 * pop, fade(p.c, al), Align::Center, 2.5f);
+                if (p.combo >= 3 && p.text != "MISS")
+                    gfx::text(FontId::Ui, "x" + std::to_string(p.combo), px, y + 52, 34 * pop, fade(WHITE, al), Align::Center, 2.0f);
+            }
             if (!p.timing.empty()) gfx::text(FontId::Ui, p.timing, px, y - 26, 22, fade(kIvory, al * 0.9f), Align::Center, 1.5f);
         }
     }
@@ -1059,8 +1115,12 @@ void PlayState::drawHud() {
         static const char* psychWords[4] = {"3", "2", "1", "GO!"};
         if (b >= -4 && b <= -1) {
             const float sc = 1.0f + 0.35f * std::pow(1.0f - frac, 3.0f);
-            gfx::glowText(FontId::Title, psych_ ? psychWords[b + 4] : words[b + 4], gfx::W / 2, 300 - 40 * sc, 96 * sc,
-                          fade(kGold, 1.0f - frac), Color{255, 170, 60, 255});
+            if (ui.active()) {  // Psych: nothing on "three", then ready, set, go
+                if (b > -4) ui.countdown(b + 3, {gfx::W / 2, gfx::H / 2}, 1.0f - frac);
+            } else {
+                gfx::glowText(FontId::Title, psych_ ? psychWords[b + 4] : words[b + 4], gfx::W / 2, 300 - 40 * sc, 96 * sc,
+                              fade(kGold, 1.0f - frac), Color{255, 170, 60, 255});
+            }
         }
     }
 }

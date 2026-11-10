@@ -103,6 +103,10 @@ public:
     void applyVolumes();
     void saveSettings();
     void toggleFullscreen();
+    // Loads (or drops) the "Psych Engine" interface from settings: textures,
+    // sounds and menu music. `psychReport` says what was found.
+    void applyPsychUi();
+    std::string psychReport;
 
 private:
     void frame();
@@ -113,6 +117,7 @@ private:
     double menuBpm_ = 100, menuLoop_ = 0;
     PcmPtr menuPcm_;
     std::future<PcmPtr> menuJob_;
+    bool psychMenuMusic_ = false;  // menuPcm_ is Psych's freakyMenu
     size_t shotIndex_ = 0;
     int winW_ = 1280, winH_ = 720;
     int shownW_ = 0, shownH_ = 0;  // window size last frame (logged on Android when it changes)

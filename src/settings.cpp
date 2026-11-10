@@ -39,6 +39,8 @@ bool Settings::load(const std::string& path) {
         else if (k == "lowDetail") lowDetail = b;
         else if (k == "vsync") vsync = b;
         else if (k == "shaders") shaders = b;
+        else if (k == "psychUi") psychUi = b;
+        else if (k == "psychFolder") psychFolder = v;
         else if (k == "fullscreen") fullscreen = b;
         else if (k == "showTimings") showTimings = b;
         else if (k == "opponentStrums") opponentStrums = b;
@@ -65,7 +67,7 @@ bool Settings::save(const std::string& path) const {
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
-      << "\nhitsoundVol=" << hitsoundVol << "\n";
+      << "\nhitsoundVol=" << hitsoundVol << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
     return bool(f);
 }
 
