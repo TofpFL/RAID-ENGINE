@@ -2,6 +2,7 @@
 // Pure logic, no rendering or audio, so it is deterministic and testable.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -32,7 +33,8 @@ struct LaneNote {
     uint8_t flags = 0;
     uint8_t state = kPending;
     uint16_t type = 0;
-    uint32_t id = 0;  // index of the note in the chart (script note id)
+    uint16_t stack = 1;  // stacked notes of the file it stands for
+    uint32_t id = 0;     // index of the note in the chart (script note id)
 };
 
 struct GameEvent {
@@ -60,6 +62,8 @@ public:
     void press(int lane, double songMs);
     void release(int lane, double songMs);
     void update(double songMs);
+    // Notes from `songMs` on can be played again (JS Engine loopTheSong); stats stay.
+    void rewindTo(double songMs);
 
     // Accessors used for rendering.
     int keys() const { return keys_; }
@@ -69,16 +73,21 @@ public:
     bool isHolding(int side, int lane) const { return activeHold_[side][lane] >= 0; }
     long long activeHold(int side, int lane) const { return activeHold_[side][lane]; }
     void setBotplay(bool b) { cfg_.botplay = b; }
+    // Lanes the bot plays for the player (JS Engine bot energy), one bit per lane.
+    void setAutoLanes(unsigned mask) { autoLanes_ = mask; }
+    // Each player/opponent hit counts this many notes (JS Engine "Change Note Multiplier").
+    void setNoteMultiplier(int side, int m) { mult_[side & 1] = std::max(1, m); }
     void setPractice(bool b) { cfg_.practice = b; }
     bool botplay() const { return cfg_.botplay; }
     bool keyHeld(int lane) const { return held_[lane]; }
 
     std::vector<GameEvent> events;  // consumed (cleared) by the caller
 
-    // Stats
+    // Stats. Every note of the file counts, stacked ones included.
     long long score = 0;
     int combo = 0, maxCombo = 0, misses = 0;
     std::array<int, kRatingCount> counts{};
+    long long opponentHits = 0;
     double health = 1.0;  // 0..2
     void setHealth(double v) { health = 0; addHealth(v); }
     bool dead = false;
@@ -105,6 +114,8 @@ private:
     bool held_[9]{};
     double lastMs_ = -1e18;
     double accSum_ = 0;
+    unsigned autoLanes_ = 0;
+    int mult_[2] = {1, 1};
 };
 
 }  // namespace gh

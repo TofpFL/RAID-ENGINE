@@ -3,6 +3,7 @@
 // converts into song time.
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "settings.hpp"
@@ -38,6 +39,8 @@ public:
     bool mousePressed(int button) const { return button >= 0 && button < 3 && (mouse_[button] & 1); }
     bool mouseReleased(int button) const { return button >= 0 && button < 3 && (mouse_[button] & 2); }
     float wheel() const { return wheel_; }
+    // Text typed since the last frame (Unicode code points), for text fields.
+    const std::u32string& typed() const { return chars_; }
 
     bool up() const { return nav_[0]; }
     bool down() const { return nav_[1]; }
@@ -53,6 +56,7 @@ private:
     bool nav_[4] = {};
     unsigned char mousePend_[3] = {}, mouse_[3] = {};
     float wheelPend_ = 0, wheel_ = 0;
+    std::u32string charsPend_, chars_;
     double held_[4] = {};
     double repeatAcc_[4] = {};
 };

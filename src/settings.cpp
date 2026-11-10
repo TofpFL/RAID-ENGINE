@@ -38,6 +38,9 @@ bool Settings::load(const std::string& path) {
         else if (k == "showFps") showFps = b;
         else if (k == "lowDetail") lowDetail = b;
         else if (k == "vsync") vsync = b;
+        else if (k == "shaders") shaders = b;
+        else if (k == "psychUi") psychUi = b;
+        else if (k == "psychFolder") psychFolder = v;
         else if (k == "fullscreen") fullscreen = b;
         else if (k == "showTimings") showTimings = b;
         else if (k == "opponentStrums") opponentStrums = b;
@@ -60,11 +63,11 @@ bool Settings::save(const std::string& path) const {
         for (int j = 0; j < 2; ++j) f << "key" << i << j << "=" << keys4[i][j] << "\n";
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
-      << "\nshowFps=" << showFps << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync
+      << "\nshowFps=" << showFps << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
-      << "\nhitsoundVol=" << hitsoundVol << "\n";
+      << "\nhitsoundVol=" << hitsoundVol << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
     return bool(f);
 }
 

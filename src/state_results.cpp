@@ -104,6 +104,10 @@ public:
         gfx::text(FontId::Ui, std::to_string(r_.maxCombo), x + 640, 288, 30, WHITE, Align::Right, 1.5f);
         gfx::text(FontId::Ui, "TIMING", x + 380, 326, 30, kIvory, Align::Left, 1.5f);
         gfx::text(FontId::Ui, TextFormat("%+.1f / %.1f ms", mean_, sd_), x + 640, 326, 30, WHITE, Align::Right, 1.5f);
+        long long hit = 0;
+        for (int c : r_.counts) hit += c;
+        gfx::text(FontId::Ui, "NOTES", x + 380, 364, 30, kIvory, Align::Left, 1.5f);
+        gfx::text(FontId::Ui, fmtThousands(hit) + " / " + fmtThousands(r_.totalNotes), x + 640, 364, 30, WHITE, Align::Right, 1.5f);
         // timing graph
         const Rectangle g{x, 420, 680, 190};
         DrawRectangleRounded({g.x - 8, g.y - 8, g.width + 16, g.height + 16}, 0.06f, 8, Color{8, 4, 14, 200});

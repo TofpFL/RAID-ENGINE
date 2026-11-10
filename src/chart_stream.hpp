@@ -1,6 +1,7 @@
 // Chart files of any size (see chart_stream.cpp).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -13,9 +14,11 @@ namespace gh {
 struct StreamedNote {
     double time = 0;
     float length = 0;
-    uint8_t data = 0;   // raw noteData (lane + side half)
-    bool alt = false;   // legacy `true` in slot 3
+    uint8_t data = 0;   // raw noteData (0..63, lane + side half); bit 7: legacy `true` in slot 3
+    uint8_t stack = 1;  // notes of the file merged here (same value within 1 ms)
     uint16_t type = 0;  // 1-based index into StreamedNotes::types (0 = none)
+    int noteData() const { return data & 63; }
+    bool alt() const { return (data & 128) != 0; }
 };
 
 struct StreamedNotes {
@@ -23,6 +26,7 @@ struct StreamedNotes {
     std::vector<uint32_t> rangeStart;  // per sectionNotes array, plus a final end marker
     std::vector<std::string> types;
     int maxData = -1;
+    std::array<uint64_t, 64> dataCount{};  // notes of the file per noteData value
     uint64_t rawCount = 0;  // notes in the file before stacked notes were merged
     uint16_t typeIndex(const std::string& name);
 };

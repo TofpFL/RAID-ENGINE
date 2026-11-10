@@ -16,6 +16,7 @@
 #include <android/log.h>
 #include <android/native_activity.h>
 #include <android/window.h>
+#include <EGL/egl.h>
 #include <android_native_app_glue.h>
 #include <jni.h>
 #include <time.h>
@@ -254,6 +255,21 @@ bool pickModZips() {
     return ok;
 }
 
+std::string pickFolder(const std::string&) {
+    Jni j;
+    if (!j.env) return {};
+    jclass cls = activityClass(j.env);
+    if (!cls) return {};
+    if (jmethodID m = j.env->GetMethodID(cls, "pickPsychFolder", "()V")) {
+        j.env->CallVoidMethod(GetAndroidApp()->activity->clazz, m);
+        std::string err;
+        j.failed(err, "folder picker");
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+    return {};
+}
+
 Import importStatus(int* count) {
     const int s = staticInt("importState", 0);
     if (count) *count = staticInt("importCount", 0);
@@ -289,6 +305,11 @@ void prepareDataDir(const std::string& base) {
     if (!app || !app->activity || !app->activity->assetManager) return;
     copyAssetDir(app->activity->assetManager, "assets/fonts", base + "assets/fonts/");
     copyAssetDir(app->activity->assetManager, "songs", base + "songs/");
+}
+
+void setVsync(bool on) {
+    const EGLDisplay d = eglGetCurrentDisplay();
+    if (d != EGL_NO_DISPLAY) eglSwapInterval(d, on ? 1 : 0);
 }
 
 void afterWindowInit() {
@@ -399,6 +420,10 @@ void log(const std::string&) {}
 std::string dataDir() { return ""; }
 void prepareDataDir(const std::string&) {}
 void afterWindowInit() {}
+void setVsync(bool on) {
+    if (on) SetWindowState(FLAG_VSYNC_HINT);
+    else ClearWindowState(FLAG_VSYNC_HINT);
+}
 bool inBackground() { return false; }
 bool takeResumed() { return false; }
 void rememberVolume(float) {}
@@ -408,6 +433,7 @@ bool download(const std::string&, const std::string&, std::string& err) {
     return false;
 }
 bool pickModZips() { return false; }
+std::string pickFolder(const std::string& title) { return pickFolderNative(title); }
 Import importStatus(int* count) {
     if (count) *count = 0;
     return Import::Idle;

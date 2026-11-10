@@ -11,6 +11,10 @@
 #include "platform.hpp"
 #include "raylib.h"
 
+#ifndef GH_VERSION
+#define GH_VERSION "dev"  // set by CMake from project(VERSION)
+#endif
+
 namespace gh {
 
 using gfx::Align;
@@ -151,7 +155,7 @@ public:
                                      : 0.55f + 0.45f * std::sin(float(now) * 3.5f);
         gfx::text(FontId::Ui, a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN", gfx::W / 2, 470, 40, fade(WHITE, blink),
                   Align::Center, 2.0f);
-        gfx::text(FontId::Ui, "A rhythm duel  -  v1.0.0", gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
+        gfx::text(FontId::Ui, "A rhythm duel  -  v" GH_VERSION, gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
         if (!a.mixer.audioOk())
             gfx::text(FontId::Ui, "No audio device found - the game will run silently", gfx::W / 2, 520, 22,
                       Color{255, 160, 140, 255}, Align::Center, 1.5f);

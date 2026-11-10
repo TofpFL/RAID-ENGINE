@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "psych_ui.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -77,6 +78,38 @@ void App::applyVolumes() {
 
 void App::saveSettings() { settings.save(base + "settings.cfg"); }
 
+void App::applyPsychUi() {
+    PsychUi& ui = psychUi();
+    ui.unload();
+    psychReport.clear();
+    if (settings.psychUi && !settings.psychFolder.empty()) {
+        if (ui.load(settings.psychFolder, psychReport) > 0) ui.setActive(true);
+        else psychReport = "nothing of the Psych Engine interface found there";
+    }
+    ui.applySounds();
+    // Menu music: Psych's freakyMenu while that interface is on, ours otherwise.
+    const bool wantPsych = ui.active() && !ui.menuMusic().empty();
+    if (wantPsych == psychMenuMusic_ && (menuPcm_ || menuJob_.valid())) return;
+    stopMenuMusic();
+    if (menuJob_.valid()) menuJob_.wait();
+    menuJob_ = {};
+    menuPcm_.reset();
+    psychMenuMusic_ = false;
+    if (wantPsych) {
+        auto pcm = std::make_shared<Pcm>();
+        std::string err;
+        if (loadAudioFile(ui.menuMusic(), *pcm, err) && pcm->frames() > 0) {
+            menuPcm_ = pcm;
+            menuLoop_ = double(pcm->frames()) / Mixer::kRate;
+            menuBpm_ = 102;  // freakyMenu
+            psychMenuMusic_ = true;
+            return;
+        }
+    }
+    menuBpm_ = menuTheme().bpm;
+    menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
+}
+
 void App::toggleFullscreen() {
     if (platform::kAndroid) return;
     ToggleBorderlessWindowed();
@@ -148,6 +181,7 @@ int App::run(int argc, char** argv) {
     InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
                "God's Hand of Principality and Demise");
     platform::afterWindowInit();
+    platform::setVsync(settings.vsync);  // explicit both ways: some drivers default to on
     SetExitKey(KEY_NULL);
     if (!platform::kAndroid) {
         SetWindowMinSize(640, 360);
@@ -175,6 +209,7 @@ int App::run(int argc, char** argv) {
 
     menuBpm_ = menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
+    if (settings.psychUi) applyPsychUi();
 
     startTime = now = nowSec();
     if (autoRun.enabled && !autoRun.song.empty()) {
@@ -222,6 +257,7 @@ int App::run(int argc, char** argv) {
     next_.reset();
     waitForBackgroundJobs();
     mixer.shutdown();
+    psychUi().unload();
     sfxShutdown();
     gfx::shutdown();
     CloseAudioDevice();
@@ -238,6 +274,7 @@ void App::frame() {
     }
     if (platform::takeResumed()) {
         platform::log("back from the background");
+        platform::setVsync(settings.vsync);  // a new surface starts with the system's default
         state_->onResume();
     }
     if (touchMode) touch.setLayout(input, state_->touchLayout(), now);

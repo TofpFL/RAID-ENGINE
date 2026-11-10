@@ -20,6 +20,9 @@ struct Settings {
     bool showFps = false;
     bool lowDetail = false;
     bool vsync = false;
+    bool shaders = true;       // mod shaders and screen effects
+    bool psychUi = false;      // "Psych Engine" interface (needs psychFolder)
+    std::string psychFolder;   // a Psych Engine / JS Engine copy to take that interface from
     bool fullscreen = false;
     bool showTimings = true;
     bool opponentStrums = true;

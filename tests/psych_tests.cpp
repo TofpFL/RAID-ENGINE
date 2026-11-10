@@ -38,6 +38,7 @@ struct StubGame : ScriptGame {
         if (p == "health") { out = health; return true; }
         if (p == "songScore") { out = score; return true; }
         if (p == "class:ClientPrefs.downScroll") { out = false; return true; }
+        if (p == "notes.length" || p == "unspawnNotes.length" || p == "eventNotes.length") { out = 0.0; return true; }
         return false;
     }
     bool setGameProp(std::string_view p, const scene::Value& v) override {
@@ -52,6 +53,22 @@ struct StubGame : ScriptGame {
     void startCountdown() override { ++countdownStarts; }
     std::string saveRoot;
     std::string saveDir() override { return saveRoot; }
+    scene::Scene* scene = nullptr;  // for extra characters (HScript new Character)
+    bool makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) override {
+        if (!scene) return false;
+        auto c = std::make_shared<scene::Character>();
+        c->kind = scene::Kind::Character;
+        c->name = name;
+        c->tag = tag;
+        c->builtin = true;
+        c->isPlayer = isPlayer;
+        c->x = x;
+        c->y = y;
+        c->width = c->frameW = 400;
+        c->height = c->frameH = 400;
+        scene->objects[tag] = c;
+        return true;
+    }
 };
 
 const char* kAtlas = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
@@ -326,14 +343,16 @@ void testLua() {
         PCHECK(game.prints[5] == "false");
     }
 
-    // Sandbox: no io / os.execute / require, and runaway loops are stopped.
+    // Sandbox: no io / os.execute / dofile, require only finds the song's own
+    // Lua modules, and runaway loops are stopped.
     game.prints.clear();
     PCHECK(host.loadString("sandbox.lua", R"LUA(
         function onCreate()
-            debugPrint(tostring(io), tostring(os.execute), tostring(require), tostring(dofile))
+            debugPrint(tostring(io), tostring(os.execute), tostring(loadfile), tostring(dofile))
+            debugPrint(tostring(pcall(require, "io")), tostring(pcall(require, "../../etc/passwd")))
         end
         function onUpdate() while true do end end)LUA"));
-    PCHECK(!game.prints.empty() && game.prints[0] == "nilnilnilnil");
+    PCHECK(game.prints.size() >= 2 && game.prints[0] == "nilnilnilnil" && game.prints[1] == "falsefalse");
     const size_t before = host.errors.size();
     host.call("onUpdate", {scene::Value(0.016)});
     PCHECK(host.errors.size() == before + 1 && host.errors.back().find("too long") != std::string::npos);
@@ -416,7 +435,16 @@ int runPsychCorpus(const char* dir) {
             sc.gfMarker = std::make_shared<scene::Sprite>();
             sc.gfMarker->kind = scene::Kind::Marker;
             sc.order = {sc.gfMarker, sc.gf, sc.dad, sc.bf};
+            // The HUD objects the game exposes (icons, bars, texts).
+            for (const char* hudName : {"iconP1", "iconP2", "healthBar", "healthBarBG", "scoreTxt", "timeBar", "timeBarBG",
+                                        "timeTxt", "botplayTxt", "comboGroup", "grpNoteSplashes"}) {
+                auto s = std::make_shared<scene::Sprite>();
+                s->tag = hudName;
+                s->cam = scene::Cam::Hud;
+                sc.hud[hudName] = s;
+            }
             StubGame game;
+            game.scene = &sc;
             ScriptHost host(sc, game);
             host.callBudget = 0.5;
             ++scripts;
@@ -432,6 +460,18 @@ int runPsychCorpus(const char* dir) {
             host.setGlobal("downscroll", false);
             host.setGlobal("middlescroll", false);
             host.setGlobal("mustHitSection", true);
+            // Globals the game sets for every script.
+            host.setGlobal("curDecBeat", 0.0);
+            host.setGlobal("curDecStep", 0.0);
+            host.setGlobal("currentModDirectory", std::string());
+            host.setGlobal("hideHud", false);
+            host.setGlobal("gfSection", false);
+            host.setGlobal("altAnim", false);
+            host.setGlobal("curSection", 0.0);
+            host.setGlobal("shadersEnabled", true);
+            host.setGlobal("playbackRate", 1.0);
+            host.setGlobal("version", std::string("0.7.3"));
+            for (const char* n : {"boyfriendName", "dadName", "gfName"}) host.setGlobal(n, std::string(n).substr(0, std::string(n).size() - 4));
             for (int i = 0; i < 4; ++i) {
                 host.setGlobal(("defaultPlayerStrumX" + std::to_string(i)).c_str(), 732.0 + 112 * i);
                 host.setGlobal(("defaultPlayerStrumY" + std::to_string(i)).c_str(), 50.0);
@@ -442,6 +482,8 @@ int runPsychCorpus(const char* dir) {
             host.call("onCreatePost");
             for (int f = 0; f < 120; ++f) {
                 game.pos = f * 16.0;
+                host.setGlobal("curDecBeat", f / 8.0);
+                host.setGlobal("curDecStep", f / 2.0);
                 host.call("onUpdate", {scene::Value(1.0 / 60)});
                 if (f % 8 == 0) {
                     host.setGlobal("curBeat", double(f / 8));
@@ -603,12 +645,15 @@ void testChartStreaming() {
         const Note& a = dom.notes[i];
         const Note& b = streamed.notes[i];
         same = std::fabs(a.time - b.time) < 1e-6 && std::fabs(a.length - b.length) < 1e-3 && a.lane == b.lane &&
-               a.side == b.side && a.kind == b.kind && a.flags == b.flags;
+               a.side == b.side && a.kind == b.kind && a.flags == b.flags && a.stack == b.stack;
     }
     PCHECK(same);
     PCHECK(streamed.title == "Blocked" && streamed.stage == "farm" && streamed.opponent == "bambi");
     PCHECK(streamed.events.size() == dom.events.size() && streamed.events.size() == 40 && streamed.events[0].name == "Hey!");
     PCHECK(streamed.rawNoteCount == streamed.notes.size() + size_t(stacked));
+    // Every note of the file is still counted.
+    PCHECK(streamed.playerNotes + streamed.opponentNotes == streamed.rawNoteCount);
+    PCHECK(dom.playerNotes + dom.opponentNotes == streamed.rawNoteCount);
     const ChartPeek pk = peekChart(path);
     PCHECK(pk.song == "Blocked" && pk.player2 == "bambi" && pk.stage == "farm" && pk.isChart);
     std::filesystem::remove(path);
@@ -740,6 +785,49 @@ void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }')
     PCHECK(pnear(scene::toNum(sc.vars["lastHit"]), 12));
     PCHECK(host.call("onStartCountdown") == ScriptHost::kStop);
     PCHECK(host.errors.empty());
+
+    // JS Engine mods: camera lists and live filter lists, extra characters,
+    // video players, openfl paths, parentLua (Psych 0.7), CoolUtil.
+    game.scene = &sc;
+    game.prints.clear();
+    sc.camGame.filters.clear();
+    PCHECK(host.loadString("jsengine.lua", R"LUA(
+        function onCreatePost()
+            debugPrint(runHaxeCode([[
+                for (cam in FlxG.cameras.list) cam.setFilters([]);
+                FlxG.cameras.cameraAdded.add(function(c) {});
+                var s = new FlxRuntimeShader('#pragma header
+void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }');
+                game.camGame._filters.push(new ShaderFilter(s));
+                var n = 0;
+                for (f in game.camGame._filters) if (f.shader == s) n++;
+                var ghost = new Character(100, 200, 'pico', false);
+                game.add(ghost);
+                ghost.alpha = 0.5;
+                var video = new MP4Handler();
+                video.finishCallback = function() { setVar('videoDone', true); };
+                video.playVideo(Paths.video('intro'));
+                openfl.Lib.application.window.title = 'Spam';
+                var nums = CoolUtil.numberArray(3, 0);
+                return FlxG.cameras.list.length + ' ' + n + ' ' + ghost.x + ' ' + nums.length + ' ' +
+                       (parentLua.scriptName != null) + ' ' + openfl.Lib.application.window.title;
+            ]]))
+            addChromaticAbberationEffect('camHUD', 0.01)
+            addWiggleEffect('game', 'flag', 1, 2, 0.05)
+            addVCREffect('dad')
+            clearEffects('v2')
+        end)LUA"));
+    host.call("onCreatePost");
+    for (const std::string& e : host.errors) std::printf("  %s\n", e.c_str());
+    PCHECK(host.errors.empty());
+    PCHECK(!game.prints.empty() && game.prints[0] == "3 1 100 3 true Spam");
+    PCHECK(sc.objects.count("__hxchar1") || std::any_of(sc.objects.begin(), sc.objects.end(), [](const auto& kv) {
+               return kv.second->kind == scene::Kind::Character && pnear(kv.second->x, 100);
+           }));
+    PCHECK(sc.camHud.filters.size() == 1 && sc.camHud.filters[0]->name == "__fx_chromatic");
+    PCHECK(sc.camGame.filters.empty());  // clearEffects with an unknown name clears the game camera
+    host.dispatchCompletions();
+    PCHECK(scene::toBool(sc.vars["videoDone"]));  // no video player in tests: the callback still runs
 }
 
 void testLuaExtras() {

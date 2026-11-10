@@ -69,6 +69,16 @@ int Chart::focusAt(double ms) const {
     return focus[lo].side;
 }
 
+int Chart::sectionAt(double ms) const {
+    if (sections.empty() || ms < sections[0].timeMs) return -1;
+    size_t lo = 0, hi = sections.size();
+    while (hi - lo > 1) {
+        const size_t mid = (lo + hi) / 2;
+        if (sections[mid].timeMs <= ms) lo = mid; else hi = mid;
+    }
+    return int(lo);
+}
+
 void Chart::finalize(double baseBpm) {
     if (!(baseBpm > 0)) baseBpm = 120;
     if (tempo.empty()) tempo.push_back({0, baseBpm, 0});
@@ -90,16 +100,20 @@ void Chart::finalize(double baseBpm) {
         return a.lane < b.lane;
     });
 
-    // Remove stacked notes (same side+lane within 1 ms), keeping the longest sustain.
+    // Stacked notes (same side+lane within 1 ms) become one note that counts
+    // as all of them: one press hits the whole stack, and the score, combo and
+    // note counts include every note of the file.
     std::vector<long long> lastKept(size_t(2 * keys), -1);
     std::vector<Note> clean;
     clean.reserve(notes.size());
     for (const Note& n : notes) {
         long long& lk = lastKept[size_t(n.side * keys + n.lane)];
-        if (lk >= 0 && std::fabs(clean[size_t(lk)].time - n.time) < 1.0) {
+        if (lk >= 0 && std::fabs(clean[size_t(lk)].time - n.time) < 1.0 &&
+            uint32_t(clean[size_t(lk)].stack) + n.stack <= kMaxStack) {
             Note& k = clean[size_t(lk)];
             k.length = std::max(k.length, n.length);
             if (n.kind == kNormal) k.kind = kNormal;
+            k.stack = uint16_t(k.stack + n.stack);
             continue;
         }
         lk = (long long)clean.size();
@@ -111,7 +125,7 @@ void Chart::finalize(double baseBpm) {
     playerNotes = opponentNotes = 0;
     for (const Note& n : notes) {
         lengthMs = std::max(lengthMs, n.time + std::max(0.0, n.length));
-        (n.side ? playerNotes : opponentNotes)++;
+        (n.side ? playerNotes : opponentNotes) += n.stack;
     }
 
     std::stable_sort(focus.begin(), focus.end(), [](const FocusPoint& a, const FocusPoint& b) { return a.timeMs < b.timeMs; });
@@ -160,6 +174,64 @@ static void applyNoteType(std::string_view type, Note& n, Chart& c) {
     if (t == "hey!" || t == "hey") n.flags |= kFlagHey;
 }
 
+// How badly a key count fits the noteData values a chart uses (0 = fits).
+// Values past both sides cost the most; a side that has notes but leaves
+// some of its lanes empty costs that many lanes times its share of notes
+// (with too few keys, one side's lanes spill into the other's first lanes;
+// with too many, the last lanes of a side stay empty).
+static double keyMisfit(const std::array<uint64_t, 64>& dataCount, uint64_t total, int keys) {
+    if (total == 0) return 0;
+    uint64_t past = 0;
+    for (size_t d = size_t(2 * keys); d < dataCount.size(); ++d) past += dataCount[d];
+    double cost = 50.0 * double(past) / double(total);
+    for (int side = 0; side < 2; ++side) {
+        uint64_t n = 0;
+        int empty = 0;
+        for (int l = 0; l < keys; ++l) {
+            const uint64_t c = dataCount[size_t(side * keys + l)];
+            n += c;
+            empty += c == 0;
+        }
+        cost += double(empty) * double(n) / double(total);
+    }
+    return cost;
+}
+
+// Key count of a legacy/Psych chart. Only an explicit count makes it an
+// extra-key chart: Psych and JS Engine play every other chart with 4 keys
+// (lane = noteData % 4), whatever values its notes use.
+static int keysFromMetadata(const json::Document& doc, const json::Value& s, const std::array<uint64_t, 64>& dataCount) {
+    int keys = int(json::Document::num(doc.get(s, "keyCount"), 0));  // Leather Engine
+    if (keys >= 1 && keys <= 9) return keys;
+    // "mania" numbers key counts differently from fork to fork: Dave & Bambi /
+    // Kade forks (in "options": 0=4K 1=6K 2=7K 3=9K), Psych Extra Keys
+    // (keys = mania + 1) and Shaggy-style multi-key (4, 6, 9, 5, 7, 8, 1, 2, 3).
+    static const int dnb[] = {4, 6, 7, 9};
+    static const int shaggy[] = {4, 6, 9, 5, 7, 8, 1, 2, 3};
+    const json::Value* opts = doc.get(s, "options");
+    const double om = opts ? json::Document::num(doc.get(*opts, "mania"), -1) : -1;
+    const double sm = json::Document::num(doc.get(s, "mania"), -1);
+    if (om >= 0 && om <= 3) return dnb[int(om)];
+    if (sm >= 0 && sm <= 8) {
+        // The reading the notes fit best (Extra Keys first on a tie).
+        uint64_t total = 0;
+        for (uint64_t c : dataCount) total += c;
+        const int m = int(sm);
+        int best = 0;
+        double bestCost = 0;
+        for (int k : {m + 1, m <= 3 ? dnb[m] : 0, shaggy[m]}) {
+            if (k < 1 || k > 9) continue;
+            const double cost = keyMisfit(dataCount, total, k);
+            if (best == 0 || cost < bestCost - 1e-9) {
+                best = k;
+                bestCost = cost;
+            }
+        }
+        return best;
+    }
+    return 4;
+}
+
 static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, const StreamedNotes* sn = nullptr) {
     using json::Type;
     const json::Value& root = doc.root();
@@ -179,8 +251,9 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
     const json::Value* sections = doc.get(s, "notes");
     if (!sections || sections->type != Type::Array) { err = "chart has no 'notes' section array"; return false; }
 
-    // Pass 1: lane count. Extra-key charts use lanes >= 8.
-    int maxLane = sn ? sn->maxData : -1;
+    // Pass 1: how often each noteData value is used.
+    std::array<uint64_t, 64> dataCount{};
+    if (sn) dataCount = sn->dataCount;
     for (size_t i = 0; i < doc.size(*sections); ++i) {
         const json::Value* sv = doc.get(doc.at(*sections, i), "sectionNotes");
         if (!sv || sv->type != Type::Array) continue;
@@ -188,32 +261,19 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
             const json::Value& n = doc.at(*sv, j);
             if (n.type != Type::Array || doc.size(n) < 2) continue;
             double d = json::Document::num(&doc.at(n, 1), -1);
-            if (d >= 0 && d < 64) maxLane = std::max(maxLane, int(d));
+            if (d >= 0 && d < 64) ++dataCount[size_t(d)];
         }
     }
-    const int fromLanes = maxLane < 8 ? 4 : (maxLane + 2) / 2;
-    int keys = int(json::Document::num(doc.get(s, "keyCount"), 0));
-    if (keys < 1 || keys > 9) {
-        // "mania": Dave & Bambi / Kade multi-key forks (in "options"): 0=4K 1=6K 2=7K 3=9K.
-        // Psych Extra Keys puts it on the song with keys = mania + 1.
-        static const int dnb[] = {4, 6, 7, 9};
-        keys = 0;
-        const json::Value* opts = doc.get(s, "options");
-        const double om = opts ? json::Document::num(doc.get(*opts, "mania"), -1) : -1;
-        const double sm = json::Document::num(doc.get(s, "mania"), -1);
-        if (om >= 0 && om <= 3) keys = dnb[int(om)];
-        else if (sm >= 0 && sm <= 8) {
-            const int ek = int(sm) + 1;
-            keys = (maxLane < 2 * ek) ? ek : (sm <= 3 ? dnb[int(sm)] : ek);
-        }
-        keys = std::max(keys, fromLanes);
-    }
-    keys = clampv(keys, 1, 9);
-    out.keys = keys;
+    out.keys = keysFromMetadata(doc, s, dataCount);
+    const int keys = out.keys;
 
     double secStart = 0, curBpm = bpm;
     out.tempo.push_back({0, bpm, 0});
-    out.notes.reserve(sn ? sn->notes.size() : size_t(std::max(0, maxLane)) * 16);
+    {
+        uint64_t total = 0;
+        for (uint64_t c : dataCount) total += c;
+        out.notes.reserve(sn ? sn->notes.size() : size_t(total));
+    }
     std::vector<uint16_t> streamTypes;  // StreamedNotes type index -> chart type index
     if (sn) {
         streamTypes.push_back(0);
@@ -223,13 +283,17 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
             streamTypes.push_back(probe.type);
         }
     }
+    // Values past the two sides fold back like Psych/JS Engine: lane = data % keys,
+    // and anything from `keys` on belongs to the other side.
     auto addNote = [&](double t, int di, double l, bool must, double stepMs, bool altSec, bool gfSec,
-                       const std::string_view typeName, bool hasTypeName, bool altBool, uint16_t streamType) {
-        if (!std::isfinite(t) || di < 0 || di >= 2 * keys) return;
+                       const std::string_view typeName, bool hasTypeName, bool altBool, uint16_t streamType,
+                       uint16_t stack = 1) {
+        if (!std::isfinite(t) || di < 0 || di >= 64) return;
         Note n;
         n.time = t;
         n.length = (std::isfinite(l) && l >= stepMs * 0.999) ? l : 0.0;
         n.lane = uint8_t(di % keys);
+        n.stack = std::max<uint16_t>(1, stack);
         if (v1) n.side = di < keys ? 1 : 0;
         else n.side = ((di < keys) ? must : !must) ? 1 : 0;
         if (hasTypeName) applyNoteType(typeName, n, out);
@@ -262,6 +326,7 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
         if (out.focus.empty() || out.focus.back().side != fside) out.focus.push_back({secStart, fside});
         const bool altSec = json::Document::boolean(doc.get(sec, "altAnim"), false);
         const bool gfSec = json::Document::boolean(doc.get(sec, "gfSection"), false);
+        out.sections.push_back({secStart, must, gfSec, altSec, beats, curBpm});
         const double stepMs = 15000.0 / curBpm;
 
         const json::Value* sv = doc.get(sec, "sectionNotes");
@@ -274,7 +339,8 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
                     if (k >= 0 && size_t(k) + 1 < sn->rangeStart.size()) {
                         for (uint32_t q = sn->rangeStart[size_t(k)]; q < sn->rangeStart[size_t(k) + 1]; ++q) {
                             const StreamedNote& r = sn->notes[q];
-                            addNote(r.time, r.data, r.length, must, stepMs, altSec, gfSec, {}, false, r.alt, r.type);
+                            addNote(r.time, r.noteData(), r.length, must, stepMs, altSec, gfSec, {}, false, r.alt(), r.type,
+                                    r.stack);
                         }
                     }
                     continue;

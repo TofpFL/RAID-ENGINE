@@ -1,6 +1,7 @@
 // The duel: game flow, input, judgement events, classic visuals and the HUD.
 // Psych-mode scene and scripting live in play_psych.cpp.
 #include "state_play.hpp"
+#include "psych_ui.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -35,6 +36,25 @@ int singDir(int keys, int lane) {
 }
 
 Color rgbColor(uint32_t rgb) { return Color{(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8), (unsigned char)rgb, 255}; }
+
+// Psych Engine's rating names and full-combo labels (its interface style).
+std::string psychRatingName(double acc, int judged) {
+    if (judged == 0) return "?";
+    static const std::pair<double, const char*> names[] = {{0.2, "You Suck!"}, {0.4, "Shit"}, {0.5, "Bad"}, {0.6, "Bruh"},
+                                                           {0.69, "Meh"}, {0.7, "Nice"}, {0.8, "Good"}, {0.9, "Great"},
+                                                           {1.0, "Sick!"}};
+    if (acc >= 1.0) return "Perfect!!";
+    for (const auto& [limit, name] : names)
+        if (acc < limit) return name;
+    return "Sick!";
+}
+
+std::string psychFcLabel(const Session& s) {
+    if (s.misses > 0) return s.misses < 10 ? "SDCB" : "Clear";
+    if (s.counts[kMortal] + s.counts[kSinful] > 0) return "FC";
+    if (s.counts[kGrace] > 0) return "GFC";
+    return "SFC";
+}
 }  // namespace
 
 PlayState::PlayState(PlayRequest r) : req_(std::move(r)) {}
@@ -113,6 +133,15 @@ void PlayState::update(double dt) {
         }
         if (scripts_) scripts_->call("onCustomSubstateUpdatePost", {scene::Value(name), scene::Value(dt)});
     }
+    if (popupHold_) {  // "Popup" event: the song waits for OK
+        if (a.input.accept() || a.input.back()) {
+            popupHold_ = false;
+            notices_.erase(std::remove_if(notices_.begin(), notices_.end(), [](const Notice& n) { return n.kind == 2; }),
+                           notices_.end());
+            a.mixer.resume();
+        }
+        return;
+    }
     if (phase_ == Phase::Waiting) {
         // A script stopped the countdown (cutscene, dialogue): keep scripts
         // running, start anyway if nothing resumes it.
@@ -150,6 +179,10 @@ void PlayState::update(double dt) {
         for (int s = std::max(lastStep_ + 1, step - 8); s <= step; ++s) onStep(s);
         lastStep_ = step;
     }
+    if (!chart_.sections.empty()) {  // the chart's own sections (any length)
+        const int sec = chart_.sectionAt(songMs_);
+        if (sec > lastSection_) onSection(sec);
+    }
     for (int side = 0; side < 2; ++side)
         for (int l = 0; l < chart_.keys; ++l)
             if (session_.isHolding(side, l)) {
@@ -160,7 +193,8 @@ void PlayState::update(double dt) {
     const int focus = chart_.focusAt(songMs_);
     if (focus != lastFocus_) {
         lastFocus_ = focus;
-        if (psych_) psychFocus(focus);
+        // Charts with sections move the camera at each section (onSection).
+        if (psych_ && chart_.sections.empty() && !scene_->camForced) psychFocus(focus);
     }
     if (!psych_) {
         const bool focusLeft = (focus == 1) == playerLeft_;
@@ -173,6 +207,7 @@ void PlayState::update(double dt) {
         psychUpdate(dt);
         if (phase_ != Phase::Playing) return;
     }
+    updateJsEngine(dt);
     beatPulse_ = std::max(0.0f, beatPulse_ - float(dt) * 4.0f);
     minePulse_ = std::max(0.0f, minePulse_ - float(dt) * 3.0f);
     for (auto& side : confirm_)
@@ -206,7 +241,16 @@ void PlayState::draw() {
         return;
     }
     if (psych_) {
+        gfx::setViewWidth(gameW_);
         psychDraw();
+        gfx::beginCanvas();
+        drawNotices();
+        drawBotEnergy();
+        gfx::endCanvas();
+        if (gameW_ < gfx::W) {
+            gfx::drawLetterbox();  // the part of the picture past FlxG.width is not shown
+            gfx::setViewWidth(gfx::W);
+        }
     } else {
         gfx::beginCanvas(0.94f * camZoom_, camFocus_);
         stage_.drawBack(now);
@@ -225,6 +269,10 @@ void PlayState::draw() {
         drawLanes();
         fx_.draw(true);
         drawHud();
+        gfx::endCanvas();
+        gfx::beginCanvas();
+        drawNotices();
+        drawBotEnergy();
         gfx::endCanvas();
     }
 
@@ -309,10 +357,10 @@ void PlayState::layoutStrums() {
             if (psych_ && K == 4) {
                 // Psych Engine's own strum positions, so scripts line up.
                 const float baseX = s.middlescroll ? -278.0f : 42.0f;
-                float x = baseX + 50 + 112.0f * float(lane) + (side == 1 ? gfx::W * 0.5f : 0.0f);
+                float x = baseX + 50 + 112.0f * float(lane) + (side == 1 ? gameW_ * 0.5f : 0.0f);
                 if (s.middlescroll && side == 0) {
                     x += 310;
-                    if (lane > 1) x += gfx::W * 0.5f + 25;
+                    if (lane > 1) x += gameW_ * 0.5f + 25;
                 }
                 st.x = x;
                 st.y = s.downscroll ? gfx::H - 150.0f : 50.0f;
@@ -335,7 +383,7 @@ void PlayState::layoutStrums() {
             }
             if (psych_ && playerLeft_ && K == 4 && !s.middlescroll) {
                 // Playing as the opponent: the player's lanes are on the left.
-                st.x = 42.0f + 50 + 112.0f * float(lane) + (side == 0 ? gfx::W * 0.5f : 0.0f);
+                st.x = 42.0f + 50 + 112.0f * float(lane) + (side == 0 ? gameW_ * 0.5f : 0.0f);
             }
             st.defX = st.x;
             st.defY = st.y;
@@ -374,7 +422,7 @@ void PlayState::restart() {
     leadMs_ = 60000.0 / chart_.bpmAt(0) * 5.0;
     lastBeat_ = int(std::floor(chart_.beatAt(-leadMs_))) - 1;
     lastStep_ = lastBeat_ * 4 + 3;
-    lastSection_ = -100000;
+    lastSection_ = chart_.sections.empty() ? -100000 : 0;  // Psych: sectionHit from section 1 on
     lastFocus_ = -1;
     eventIdx_ = 0;
     for (int t = 0; t < Mixer::kTrackCount; ++t) a.mixer.setTrackVolume(t, 1.0f);
@@ -467,7 +515,12 @@ TouchLayout PlayState::touchLayout() const {
         t.keys = {{"SKIP", KEY_ENTER}};
         return t;
     }
+    if (popupHold_) {  // a "Popup" window: tap anywhere to close it
+        t.tapCode = KEY_ENTER;
+        return t;
+    }
     t.keys = {{"PAUSE", KEY_ESCAPE}};
+    if (botEnergyOn_ && !cfg_.botplay) t.keys.push_back({"BOT", KEY_LEFT_CONTROL});
     if (!replaying_ && !cfg_.botplay) t.lanes = chart_.keys;
     return t;
 }
@@ -479,14 +532,11 @@ void PlayState::onResume() {
 
 // Touch controls option (desktop): each player lane is a full-height column around its strum.
 void PlayState::handleTouch() {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-    const float sc = std::min(sw / gfx::W, sh / gfx::H);
-    const float ox = (sw - gfx::W * sc) * 0.5f;
     bool want[9] = {};
     const int K = chart_.keys;
     const float half = std::min(112.0f, 500.0f / float(K)) * 0.5f + 4.0f;
     for (const TouchPoint& tp : touchPoints()) {  // fingers, or the mouse while clicked
-        const float x = (tp.pos.x - ox) / sc;
+        const float x = gfx::toCanvas(tp.pos).x;
         int best = -1;
         float bestD = 1e9f;
         for (int l = 0; l < K; ++l) {
@@ -635,15 +685,22 @@ void PlayState::onStep(int s) {
     scripts_->setGlobal("curDecStep", chart_.beatAt(songMs_) * 4.0);
     scripts_->call("onStepHit", {scene::Value(double(s))});
     if (scripts_->kadeMode) scripts_->call("stepHit", {scene::Value(double(s))});
-    if (s >= 0 && s % 16 == 0) onSection(s / 16);
+    if (chart_.sections.empty() && s >= 0 && s % 16 == 0) onSection(s / 16);
 }
 
 void PlayState::onSection(int s) {
     if (s == lastSection_) return;
     lastSection_ = s;
+    const SectionInfo* info =
+        s >= 0 && s < int(chart_.sections.size()) ? &chart_.sections[size_t(s)] : nullptr;
+    // Psych sectionHit: the camera goes to the section's singer unless a
+    // script or "Camera Follow Pos" holds it.
+    if (psych_ && info && !scene_->camForced) moveCameraSection(s);
     if (!scripts_) return;
     scripts_->setGlobal("curSection", double(s));
-    scripts_->setGlobal("mustHitSection", chart_.focusAt(songMs_ + 1) == 1);
+    scripts_->setGlobal("mustHitSection", info ? info->mustHit : chart_.focusAt(songMs_ + 1) == 1);
+    scripts_->setGlobal("gfSection", info && info->gf);
+    scripts_->setGlobal("altAnim", info && info->alt);
     scripts_->call("onSectionHit");
 }
 
@@ -746,6 +803,7 @@ void PlayState::finish() {
     r.misses = session_.misses;
     r.maxCombo = session_.maxCombo;
     r.counts = session_.counts;
+    r.totalNotes = (long long)session_.totalPlayerNotes;
     r.rank = session_.rank();
     r.clear = session_.clearLabel();
     r.errors = session_.hitErrors;
@@ -811,6 +869,7 @@ void PlayState::drawMine(Vector2 c, float size, float alpha, float rot) {
 void PlayState::drawLanes() {
     App& a = app();
     const Settings& s = a.settings;
+    const PsychUi& ui = psychUi();
     const int K = chart_.keys;
     const float ns = noteSize();
     const double pxPerMs = 0.45 * scrollSpeed() / rate_;
@@ -836,7 +895,13 @@ void PlayState::drawLanes() {
                 float conf = confirm_[side][lane];
                 if (side == 0 && !s.opponentStrums) conf = 0;
                 const bool pressed = side == 1 && heldCount_[lane] > 0 && !cfg_.botplay;
-                if (conf > 0.01f) {
+                const int sstate = conf > 0.01f ? 2 : pressed ? 1 : 0;
+                if (sstate) ui.beginDir(dir);  // idle receptors stay grey
+                const bool drawn = ui.strum(dir, c, size, sstate, alphaStrum, st.angle, a.now);
+                if (sstate) ui.endDir();
+                if (drawn) {
+                    // the Psych Engine interface drew it
+                } else if (conf > 0.01f) {
                     gfx::glow(c, size * 0.95f * conf, fade(col, 0.6f * alphaStrum));
                     gfx::drawNote(dir, c, size, alphaStrum, 1.0f + 0.06f * conf, st.angle);
                 } else if (pressed) {
@@ -848,6 +913,7 @@ void PlayState::drawLanes() {
             const float dirSign = st.downScroll ? -1.0f : 1.0f;
             const std::vector<LaneNote>& v = session_.lane(side, lane);
             if (!v.empty()) {
+                ui.beginDir(dir);  // this lane's colours (Psych colour-template skins)
                 const double tStart = songMs_ - reach * 0.5 - session_.maxSustain(side, lane);
                 const double tEnd = songMs_ + reach;
                 auto lo = std::lower_bound(v.begin(), v.end(), tStart, [](const LaneNote& n, double t) { return n.t < t; });
@@ -873,11 +939,13 @@ void PlayState::drawLanes() {
                     const float y1 = c.y + dirSign * float((endT - songMs_) * pxPerMs * mult);
                     if ((dirSign > 0 && y1 < c.y - offY) || (dirSign < 0 && y1 > c.y + offY)) continue;
                     const float al = (n.state == kMissed || n.state == kDropped ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
-                    gfx::drawSustain(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
+                    if (!ui.hold(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al))
+                        gfx::drawSustain(dir, c.x + (nv ? nv->offsetX : 0.0f), y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
                 }
-                // Level of detail: notes closer than ~15% of a note overlap into
-                // a solid wall anyway, so only one of them is drawn.
-                const float minGap = std::max(2.0f, ns * 0.15f);
+                // Notes less than a pixel apart look the same drawn once, so a
+                // lane never draws more notes than it has pixels (spam charts
+                // stay smooth). Every note is still played and counted.
+                const float minGap = 1.0f;
                 float lastY = 1e9f;
                 for (auto it = hi; it != lo;) {
                     --it;
@@ -897,8 +965,9 @@ void PlayState::drawLanes() {
                     if (al <= 0.002f) continue;
                     const Vector2 p{c.x + (nv ? nv->offsetX : 0.0f), y + (nv ? nv->offsetY : 0.0f)};
                     if (n.kind == kMine) drawMine(p, size, al, st.angle);
-                    else gfx::drawNote(dir, p, size, al, 1.0f, st.angle);
+                    else if (!ui.note(dir, p, size, al, st.angle)) gfx::drawNote(dir, p, size, al, 1.0f, st.angle);
                 }
+                ui.endDir();
             }
             if (rotated) {
                 rlDrawRenderBatchActive();
@@ -927,7 +996,10 @@ void PlayState::drawHud() {
     const float leftFrac = playerLeft_ ? hp : 1.0f - hp;
     const float split = bx + bw * leftFrac;
     float barAlpha = 1;
-    if (hudShown("healthBar", &barAlpha)) {
+    const PsychUi& ui = psychUi();
+    if (hudShown("healthBar", &barAlpha) && ui.healthBar({bx, by, bw, bh}, leftColor_, rightColor_, leftFrac, barAlpha)) {
+        // the Psych Engine interface drew it
+    } else if (hudShown("healthBar", &barAlpha)) {
         DrawRectangleRounded({bx - 5, by - 5, bw + 10, bh + 10}, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha));
         DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
         DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
@@ -960,11 +1032,27 @@ void PlayState::drawHud() {
                            (ratingNameOverride_.empty() ? session_.rank() : ratingNameOverride_) + ")";
         const std::string cl = ratingFcOverride_.empty() ? session_.clearLabel() : ratingFcOverride_;
         if (!cl.empty()) line += "   |   " + cl;
+        if (ui.active()) {  // Psych Engine's own score line
+            line = "Score: " + std::to_string(session_.score) + " | Misses: " + std::to_string(session_.misses) + " | Rating: " +
+                   (ratingNameOverride_.empty() ? psychRatingName(session_.accuracy(), session_.judged() + session_.misses)
+                                                : ratingNameOverride_);
+            if (session_.judged() + session_.misses > 0)
+                line += TextFormat(" (%.2f%%) - %s", session_.accuracy() * 100.0,
+                                   (ratingFcOverride_.empty() ? psychFcLabel(session_) : ratingFcOverride_).c_str());
+        }
         if (psych_) {
             auto it = scene_->hud.find("scoreTxt");
             if (it != scene_->hud.end() && !it->second->text.text.empty()) line = it->second->text.text;
         }
-        gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
+        if (const Font* f = ui.active() ? ui.font() : nullptr) {
+            const Vector2 sz = MeasureTextEx(*f, line.c_str(), 20, 0);
+            const Vector2 at{gfx::W / 2 - sz.x * 0.5f, by + 36};
+            for (const Vector2 o : {Vector2{-1.25f, 0}, Vector2{1.25f, 0}, Vector2{0, -1.25f}, Vector2{0, 1.25f}})
+                DrawTextEx(*f, line.c_str(), {at.x + o.x, at.y + o.y}, 20, 0, BLACK);
+            DrawTextEx(*f, line.c_str(), at, 20, 0, WHITE);
+        } else {
+            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
+        }
     }
     if ((cfg_.botplay || replaying_) && hudShown("botplayTxt"))
         gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
@@ -983,14 +1071,15 @@ void PlayState::drawHud() {
     // song progress
     if (hudShown("timeBar")) {
         const float ty = s.downscroll ? gfx::H - 26.0f : 12.0f;
-        const float prog = float(clampv(songMs_ / std::max(1.0, chart_.lengthMs), 0.0, 1.0));
+        const float prog = float(clampv(songMs_ / std::max(1.0, shownLengthMs()), 0.0, 1.0));
         // setTimeBarColors() overrides the theme colours.
         DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200});
         DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
                              timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f));
-        const double remain = std::max(0.0, (chart_.lengthMs - songMs_) / 1000.0 / rate_);
+        const double remain = std::max(0.0, (shownLengthMs() - songMs_) / 1000.0 / rate_);
+        const std::string name = songNameShown_.empty() ? chart_.title : songNameShown_;
         if (hudShown("timeTxt"))
-            gfx::text(FontId::Ui, chart_.title + "  -  " + req_.diff + "  -  " + fmtTime(remain), gfx::W / 2,
+            gfx::text(FontId::Ui, name + "  -  " + req_.diff + "  -  " + fmtTime(remain), gfx::W / 2,
                       s.downscroll ? ty - 26 : ty + 14, 20, fade(WHITE, 0.85f), Align::Center, 1.5f);
     }
 
@@ -1004,9 +1093,16 @@ void PlayState::drawHud() {
             const float pop = 1.0f + 0.25f * std::exp(-age * 20.0f);
             const float al = age < 0.4f ? 1.0f : 1.0f - (age - 0.4f) / 0.3f;
             const float y = py - age * 26.0f;
-            gfx::text(FontId::Title, p.text, px, y, 46 * pop, fade(p.c, al), Align::Center, 2.5f);
-            if (p.combo >= 3 && p.text != "MISS")
-                gfx::text(FontId::Ui, "x" + std::to_string(p.combo), px, y + 52, 34 * pop, fade(WHITE, al), Align::Center, 2.0f);
+            int ri = -1;
+            for (int k = 0; k < kRatingCount; ++k)
+                if (p.text == ratingInfo(Rating(k)).name) ri = k;
+            if (ri >= 0 && ui.rating(ri, {px, y + 10}, 0.7f * pop, al)) {  // Psych: the rating picture and combo digits
+                if (p.combo >= 10) ui.combo(p.combo, {px, y + 90}, 0.5f, al);
+            } else {
+                gfx::text(FontId::Title, p.text, px, y, 46 * pop, fade(p.c, al), Align::Center, 2.5f);
+                if (p.combo >= 3 && p.text != "MISS")
+                    gfx::text(FontId::Ui, "x" + std::to_string(p.combo), px, y + 52, 34 * pop, fade(WHITE, al), Align::Center, 2.0f);
+            }
             if (!p.timing.empty()) gfx::text(FontId::Ui, p.timing, px, y - 26, 22, fade(kIvory, al * 0.9f), Align::Center, 1.5f);
         }
     }
@@ -1019,8 +1115,12 @@ void PlayState::drawHud() {
         static const char* psychWords[4] = {"3", "2", "1", "GO!"};
         if (b >= -4 && b <= -1) {
             const float sc = 1.0f + 0.35f * std::pow(1.0f - frac, 3.0f);
-            gfx::glowText(FontId::Title, psych_ ? psychWords[b + 4] : words[b + 4], gfx::W / 2, 300 - 40 * sc, 96 * sc,
-                          fade(kGold, 1.0f - frac), Color{255, 170, 60, 255});
+            if (ui.active()) {  // Psych: nothing on "three", then ready, set, go
+                if (b > -4) ui.countdown(b + 3, {gfx::W / 2, gfx::H / 2}, 1.0f - frac);
+            } else {
+                gfx::glowText(FontId::Title, psych_ ? psychWords[b + 4] : words[b + 4], gfx::W / 2, 300 - 40 * sc, 96 * sc,
+                              fade(kGold, 1.0f - frac), Color{255, 170, 60, 255});
+            }
         }
     }
 }

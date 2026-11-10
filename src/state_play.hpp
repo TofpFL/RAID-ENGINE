@@ -104,6 +104,8 @@ private:
     void drawLanes();
     void drawHud();
     void drawHudLayer();  // lanes, effects and HUD with the HUD camera
+    void drawHudCentered();
+    void setGameWidth(float w);  // FlxG.width
     void drawPause();
     void drawDead();
     void drawLoading();
@@ -124,6 +126,8 @@ private:
     void psychMiss(const GameEvent& ev, bool ghost);
     void psychBeat(int b);
     void psychFocus(int side);
+    void focusWho(int who);            // camera on 0 bf, 1 dad, 2 gf (Psych moveCamera)
+    void moveCameraSection(int sec);   // Psych moveCameraSection
     void psychHoldRefresh();
     void handleBuiltinEvent(const psych::ChartEvent& e);
     scene::Character* charForSide(int side);
@@ -131,6 +135,19 @@ private:
     void loadIcons();
     void updateSounds(double dt);
     void releaseAudio();
+    bool shadersEnabled() override;
+    std::string modsDir() override;
+    void loopSong(double ms) override;
+    bool gamepadState(int pad, std::string_view button, int mode) override;
+    double gamepadAxis(int pad, int axis) override;
+    bool makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) override;
+    bool playVideoOnTop(const std::string& tag, const std::string& name, bool loop) override;
+    // JS Engine events: camera twist, fake length, popups, credits, bot energy...
+    bool handleJsEngineEvent(const psych::ChartEvent& e);
+    void updateJsEngine(double dt);
+    void drawNotices();
+    void drawBotEnergy();
+    double shownLengthMs() const { return fakeLenMs_ >= 0 ? fakeLenMs_ : chart_.lengthMs; }
     struct NoteRef { uint8_t side, lane; uint32_t idx; };
     LaneNote* noteRef(std::string_view group, int index, int* sideOut = nullptr, int* laneOut = nullptr);
 
@@ -178,6 +195,8 @@ private:
     Color leftColor_{}, rightColor_{};
     bool playerLeft_ = false;
     double songMs_ = -1e9, leadMs_ = 0, rate_ = 1.0, speedMult_ = 1.0;
+    float gameW_ = gfx::W;  // Flixel's FlxG.width (scripts may narrow the picture)
+    std::map<std::string, scene::Value, std::less<>> classVars_;  // openfl/lime window values and friends
     int lastBeat_ = -100000, lastStep_ = -100000, lastSection_ = -100000, lastFocus_ = -1;
     float camZoom_ = 1, hudZoom_ = 1, beatPulse_ = 0, minePulse_ = 0, healthShown_ = 1;
     Vector2 camFocus_{640, 370};
@@ -202,7 +221,7 @@ private:
     struct VideoSlot {
         std::unique_ptr<VideoPlayer> player;
         std::string name, tag;
-        bool loop = false, skippable = true, waiting = false;
+        bool loop = false, skippable = true, waiting = false, fit = false;  // fit: stretched over the screen
     };
     std::unique_ptr<VideoSlot> cutscene_;
     std::map<std::string, VideoSlot> videoSprites_;
@@ -228,6 +247,23 @@ private:
     double mustHitSectionFlag_ = 1;
     bool camZoomOnBeat_ = true, cameraZoomsSet_ = false, inCutscene_ = false;
     int bopEvery_ = 4;
+    // JS Engine events
+    bool camTwist_ = false, twisted_ = false;
+    double twistIntensity_ = 0;
+    double fakeLenMs_ = -1, fakeLenFrom_ = 0, fakeLenTo_ = 0, fakeLenT_ = 0, fakeLenDur_ = 0;
+    std::string songNameShown_;  // "Change Song Name" ("" = the chart's title)
+    int rainbowEndStep_ = -1;
+    scene::ShaderPtr rainbow_;
+    struct Notice {
+        std::string title, text;
+        double t0 = 0;
+        int kind = 0;  // 0 credits popup, 1 notification, 2 popup window
+    };
+    std::vector<Notice> notices_;
+    bool popupHold_ = false;  // "Popup": the song waits until it is closed
+    bool botEnergyOn_ = false, noEnergy_ = false, usingBotEnergy_ = false;
+    double botEnergy_ = 1, energyDrain_ = 1, energyRefill_ = 1, energyCooldown_ = 0;
+    float energyAlpha_ = 0;
     bool prevKeys_[9] = {};
     bool keyNow_[9] = {};
     bool prevMouse_[3] = {}, mouseNow_[3] = {};

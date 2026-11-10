@@ -59,13 +59,18 @@ public:
             {Row::Action, "Reset controls", "Restore D F J K and the arrow keys."},
             {Row::Header, "GRAPHICS", ""},
             {Row::Bool, "Fullscreen", "Borderless fullscreen (F11 works anywhere).", &s.fullscreen},
-            {Row::Bool, "VSync", "Takes effect after restarting. OFF gives the most precise input.", &s.vsync},
+            {Row::Bool, "VSync", "Waits for the screen's refresh. OFF: the frame limit below decides (most precise input).", &s.vsync},
             {Row::Choice, "Frame limit", "Higher limits make notes smoother. Input is polled at ~1000 Hz regardless.",
              nullptr, nullptr, 0, 0, 0, &s.fpsCap, {60, 120, 144, 165, 240, 360, 500, 0}},
             {Row::Bool, "Show FPS", "", &s.showFps},
             {Row::Bool, "Low detail", "Fewer particles and effects for slower machines.", &s.lowDetail},
             {Row::Bool, "Flashing lights", "Screen flashes on some beats.", &s.flashing},
-            {Row::Bool, "Camera zoom on beat", "", &s.camZoom},
+            {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
+            {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on weak devices.", &s.shaders},
+            {Row::Header, "INTERFACE", ""},
+            {Row::Bool, "Psych Engine interface", "Notes, ratings, countdown and sounds from your own Psych / JS Engine copy.",
+             &s.psychUi},
+            {Row::Action, "Psych Engine folder...", ""},
             {Row::Header, "AUDIO", ""},
             {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
             {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
@@ -77,6 +82,7 @@ public:
             else if (r.label == "Audio offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
             else if (r.kind == Row::Number) r.fmt = pct;
             if (r.label == "Calibrate offset...") r.action = [] { app().change(makeCalibration()); };
+            if (r.label == "Psych Engine folder...") r.action = [this] { chooseFolder(); };
             if (r.label == "Reset controls")
                 r.action = [&s] {
                     const Settings d;
@@ -94,7 +100,7 @@ public:
             std::vector<Row> kept;
             for (Row& r : rows_) {
                 if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0;
-                if (controls || r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "VSync") continue;
+                if (controls || r.label == "Fullscreen" || r.label == "Touch controls") continue;
                 kept.push_back(std::move(r));
             }
             rows_ = std::move(kept);
@@ -106,6 +112,23 @@ public:
         App& a = app();
         Input& in = a.input;
         anim_ = approach(anim_, float(sel_), 12.0f, float(dt));
+        // A folder dropped on the window, or the Android picker finishing.
+        if (IsFileDropped()) {
+            FilePathList dropped = LoadDroppedFiles();
+            if (dropped.count > 0 && DirectoryExists(dropped.paths[0])) setFolder(dropped.paths[0]);
+            UnloadDroppedFiles(dropped);
+        }
+        if (pickingFolder_) {
+            int n = 0;
+            const platform::Import st = platform::importStatus(&n);
+            if (st == platform::Import::Done || st == platform::Import::Nothing) {
+                pickingFolder_ = false;
+                platform::resetImport();
+                if (st == platform::Import::Done) setFolder(platform::dataDir() + "psych-ui/");
+                else if (a.settings.psychFolder.empty()) a.settings.psychUi = false;
+            }
+        }
+        refreshFolderHelp();
         Row& r = rows_[size_t(sel_)];
         if (waiting_) {
             const int code = in.firstPressed();
@@ -128,6 +151,11 @@ public:
                 if (dir || in.accept()) {
                     if (r.label == "Fullscreen") a.toggleFullscreen();
                     else *r.b = !*r.b;
+                    if (r.label == "VSync") platform::setVsync(a.settings.vsync);
+                    if (r.label == "Psych Engine interface") {
+                        if (a.settings.psychUi && a.settings.psychFolder.empty()) chooseFolder();
+                        else a.applyPsychUi();
+                    }
                     changed = true;
                 }
                 break;
@@ -222,6 +250,39 @@ public:
     }
 
 private:
+    void chooseFolder() {
+        App& a = app();
+        if (platform::kAndroid) {
+            pickingFolder_ = true;
+            platform::pickFolder("Choose your Psych Engine or JS Engine folder");
+            return;
+        }
+        const std::string path = platform::pickFolder("Choose your Psych Engine or JS Engine folder");
+        if (!path.empty()) setFolder(path);
+        else if (a.settings.psychFolder.empty()) {
+            a.settings.psychUi = false;
+            a.psychReport = "No folder chosen (you can also drop the folder on this window)";
+        }
+    }
+    void setFolder(const std::string& path) {
+        App& a = app();
+        a.settings.psychFolder = path;
+        a.settings.psychUi = true;
+        a.applyPsychUi();
+        a.saveSettings();
+        sfxPlay(Sfx::Confirm);
+    }
+    void refreshFolderHelp() {
+        const App& a = app();
+        for (Row& r : rows_)
+            if (r.label == "Psych Engine folder...") {
+                if (pickingFolder_) r.help = "Copying the interface files...";
+                else if (a.settings.psychFolder.empty()) r.help = "Not chosen yet. Pick the folder, or drop it on this window.";
+                else r.help = platform::displayPath(a.settings.psychFolder) + (a.psychReport.empty() ? "" : "  (" + a.psychReport + ")");
+            }
+    }
+    bool pickingFolder_ = false;
+
     void move(int d) {
         const int n = int(rows_.size());
         do { sel_ = (sel_ + d + n) % n; } while (rows_[size_t(sel_)].kind == Row::Header);

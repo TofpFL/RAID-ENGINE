@@ -298,6 +298,10 @@ struct SfxSlot {
     Sound alias[kAliases]{};
     int next = 0;
     bool ok = false;
+    // A sound from a file played instead (the Psych Engine interface).
+    Sound over{};
+    Sound overAlias[kAliases]{};
+    bool hasOver = false;
 };
 SfxSlot g_sfx[int(Sfx::kCount)];
 float g_sfxVol = 0.7f;
@@ -399,7 +403,37 @@ void sfxInit() {
     }
 }
 
+bool sfxOverride(Sfx id, const std::string& path) {
+    if (!IsAudioDeviceReady()) return false;
+    SfxSlot& s = g_sfx[int(id)];
+    if (s.hasOver) {
+        for (auto& a : s.overAlias) UnloadSoundAlias(a);
+        UnloadSound(s.over);
+        s.hasOver = false;
+    }
+    if (path.empty()) return true;
+    Pcm pcm;
+    std::string err;
+    if (!loadAudioFile(path, pcm, err) || pcm.data.empty()) return false;
+    Wave w{};
+    w.frameCount = unsigned(pcm.frames());
+    w.sampleRate = Mixer::kRate;
+    w.sampleSize = 16;
+    w.channels = unsigned(pcm.channels);
+    w.data = const_cast<int16_t*>(pcm.data.data());
+    s.over = LoadSoundFromWave(w);
+    if (!IsSoundValid(s.over)) return false;
+    for (auto& a : s.overAlias) a = LoadSoundAlias(s.over);
+    s.hasOver = true;
+    return true;
+}
+
+void sfxClearOverrides() {
+    for (int i = 0; i < int(Sfx::kCount); ++i) sfxOverride(Sfx(i), "");
+}
+
 void sfxShutdown() {
+    sfxClearOverrides();
     for (SfxSlot& s : g_sfx) {
         if (!s.ok) continue;
         for (auto& a : s.alias) UnloadSoundAlias(a);
@@ -412,8 +446,8 @@ void sfxSetVolume(float v) { g_sfxVol = v; }
 
 void sfxPlay(Sfx id, float volume, float pitch) {
     SfxSlot& s = g_sfx[int(id)];
-    if (!s.ok) return;
-    Sound& snd = s.alias[s.next];
+    if (!s.ok && !s.hasOver) return;
+    Sound& snd = s.hasOver ? s.overAlias[s.next] : s.alias[s.next];
     s.next = (s.next + 1) % kAliases;
     SetSoundVolume(snd, std::clamp(volume * g_sfxVol, 0.0f, 1.0f));
     SetSoundPitch(snd, pitch);

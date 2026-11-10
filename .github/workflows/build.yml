@@ -157,8 +157,9 @@ jobs:
     name: Publish downloads
     needs: [tests, build, android, android-test, source]
     # Publish whatever platforms built, so one unavailable runner does not hold
-    # back the other downloads.
-    if: always() && (github.event_name == 'push' || inputs.release != '') && needs.tests.result == 'success'
+    # back the other downloads. A run cancelled by a newer push publishes
+    # nothing: the newer run does.
+    if: ${{ !cancelled() && (github.event_name == 'push' || inputs.release != '') && needs.tests.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

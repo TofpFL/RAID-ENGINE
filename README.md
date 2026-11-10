@@ -24,21 +24,24 @@ spam charts of any size, has a chart editor, charts any song by itself, records 
 
 ### Mods
 - **Psych Engine a sério**: personagens (`characters/*.json` + atlas Sparrow), ícones, cores da barra de vida, cenários (`stages/*.json`, incluindo objetos do editor 0.7.3), eventos, tipos de nota e **scripts Lua 5.4** com a API do Psych (≈250 funções: sprites, textos, tweens, timers, câmaras, propriedades, grupos de notas e strums, sons com tempo e *pitch*, dados guardados, *substates*, definições do mod, `Function_Stop`) e modcharts do Kade Engine.
-- **HScript**: `runHaxeCode`, `runHaxeFunction`, `createCallback` e ficheiros `.hx` (em `scripts/`, `stages/`, `data/<música>/`...) com `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`...
+- **HScript**: `runHaxeCode`, `runHaxeFunction`, `createCallback` e ficheiros `.hx` (em `scripts/`, `stages/`, `data/<música>/`...) com `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`, `new Character(...)` (personagens extra), `MP4Handler`/`VideoHandler`, `FlxG.cameras`, nomes completos `openfl.*`/`flixel.*`/`lime.*`...
+- **Compatível com o JS Engine**: os eventos dele (Set/Tween Camera Zoom, Camera Bopping, Camera Twist, Change Note Multiplier, Fake Song Length, Change Song Name, Credits Popup, Popup, Rainbow Eyesore, Bot Energy...), os efeitos de ecrã (`addChromaticAbberationEffect`, `addVCREffect`, `addWiggleEffect`, `addBloomEffect`, `add3DEffect`... com shaders nossos) e funções como `require`, `saveFile`, `loopTheSong`, `playsAsBF`. A câmara segue o Psych (`camFollowPos` é a posição real, foco por secção com `gfSection`, `isCameraOnForcedPos`); scripts que mudam `FlxG.width` (ex.: *Window Changer*) estreitam a imagem para 4:3.
 - **Shaders**: os `.frag` do Psych/Flixel (`#pragma header`, `flixel_texture2D`) são traduzidos para OpenGL 3.3 e funcionam em sprites (`setSpriteShader`) e em câmaras inteiras (`setFilters` em HScript).
 - **Vídeos**: `startVideo` (cutscenes, ENTER salta) e `makeVideoSprite`. Ficheiros `.mpg` tocam diretamente; `.mp4`/`.webm` são convertidos uma vez com o **ffmpeg** (se estiver instalado ou ao lado do jogo) para `cache/videos/`.
 - **Builds completas do Kade / jogo base** (pasta `assets/` com `shared/`, `week1`...): as personagens e cenários das semanas 1–6 são reconstruídos a partir das imagens do mod.
-- **Qualquer formato de pasta**: mods do Psych, pastas dentro de pastas, charts soltos (agrupados por música, com o áudio procurado em todos os mods), V-Slice, 1 a 9 teclas (`mania` do Dave & Bambi / Kade).
-- **Charts de spam gigantes**: um chart de 1,5 GB (25 milhões de notas) abre em ~5 s; as notas empilhadas no mesmo milissegundo juntam-se como no Psych.
-- Os scripts correm isolados (sem `io`, `os`, `require`) e param se entrarem em ciclo infinito.
+- **Qualquer formato de pasta**: mods do Psych, pastas dentro de pastas, charts soltos (agrupados por música, com o áudio procurado em todos os mods), V-Slice, 1 a 9 teclas (`keyCount`, ou `mania` do Dave & Bambi / Kade, Psych Extra Keys e Shaggy: as notas decidem qual numeração o chart usa; sem nada disto o chart tem 4 teclas, como no Psych).
+- **Charts de spam gigantes**: um chart de 1,5 GB (25 milhões de notas) abre em ~5 s. As notas empilhadas no mesmo milissegundo ficam juntas em memória mas **contam todas** (acertos, combo, pontuação, total no fim), e as notas desenham-se até 1 pixel de distância. Charts sem número de teclas são de 4 teclas, como no Psych/JS Engine.
+- Os scripts correm isolados (sem `io` nem `os`; `require` só lê módulos do próprio mod, `saveFile` só escreve dentro de `mods/`) e param se entrarem em ciclo infinito.
 
 ### Os teus mods
 Os mods do PulseForge estão publicados como **pacotes** no release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) (14 pacotes, 1,25 GB). No jogo: **Freeplay → `M`** descarrega um pacote ou todos (usa o `curl` do sistema) e instala-os. Também podes descarregar os `.zip` à mão e pô-los em `mods/`.
 
 ### Também
-- **Editor de charts** (Freeplay → `7`): grelha ao estilo do Psych, notas e *holds* com o rato, *snap* de 1/4 a 1/192, secções (lado da câmara, BPM), velocidade, tipos de nota, copiar/colar secções, desfazer/refazer, reprodução com *hitsounds*. Guarda em JSON do Psych (o original fica como `.bak`); `ENTER` guarda e joga.
+- **Editor de charts** (Freeplay → `7`), ao estilo do Psych/JS Engine: separadores **Song** (nome, personagens, cenário, BPM, velocidade, teclas), **Section** (lado da câmara, *GF section*, *alt animation*, duração em batidas, BPM; copiar, colar, limpar, trocar lados, espelhar, copiar de uma secção anterior), **Note** (tipo, tempo, *hold*, notas empilhadas; ferramentas de spam: empilhar e preencher a secção em escada, aleatório, zigue-zague...), **Events** (pista de eventos à esquerda, vários eventos no mesmo tempo, lista com os do Psych, do JS Engine e os `custom_events` do mod, com a explicação dos valores) e **Charting** (velocidade de reprodução, volumes, *hitsounds*, metrónomo). Seleção com SHIFT+arrastar, desfazer/refazer. Guarda em JSON do Psych (o original fica como `.bak`); `ENTER` guarda e joga.
 - **AutoChart**: uma pasta só com o áudio (ou um `.mp3`/`.ogg` solto em `songs/`) ganha charts Easy/Normal/Hard gerados a partir da música; abre-os no editor para os afinar.
 - **Replays** (`R` nos resultados), **mods por `.zip`** (põe em `mods/`, `R` no Freeplay), **controlos táteis** (Opções).
+- **Interface do Psych Engine** (Opções → INTERFACE): escolhe a pasta do teu Psych Engine ou JS Engine (janela de pastas do sistema, ou arrasta a pasta para a janela; no Android abre o seletor de pastas) e o jogo passa a usar as setas, ratings, contagem, barra de vida, letra e sons dessa pasta. O jogo não traz nenhum desses ficheiros.
+- **Opções novas**: VSync (aplica logo, também no Android), Shaders (desligar ajuda em telemóveis fracos); "Camera zoom on beat" só desliga os *bops* — os eventos de zoom funcionam sempre.
 
 ### Android
 - Instala o `GodsHand-android.apk` (Android 7 ou mais recente; o telemóvel pede para permitir instalar desta origem).
@@ -63,6 +66,7 @@ Modo **História**, **Freeplay** com pré-visualização, **Opções**, **calibr
 | Setas (4 teclas) | `D F J K` ou `← ↓ ↑ →` (configurável), comando: D-pad / botões |
 | Pausa | `Enter` / `Esc` |
 | Freeplay | `Tab` modificadores · `7` editor de charts · `M` pacotes de mods · `R` procurar músicas e mods novos |
+| Bot Energy (evento do JS Engine) | segura `Ctrl` (botão BOT no ecrã tátil) |
 | Rever replay | `R` no ecrã de resultados |
 | Ecrã inteiro | `F11` |
 
@@ -90,15 +94,16 @@ O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, 
 
 **Mods**
 - Psych Engine mods run in a Flixel-style scene: Sparrow/Packer atlases with trimming, Psych and V-Slice characters, stages (including 0.7.3 stage objects), cameras with zoom/shake/flash/fade, FlxEase tweens, timers, and Lua 5.4 with the Psych API (≈250 functions and every common callback, persistent save data, custom substates, mod settings, seekable sounds) plus Kade modchart helpers.
-- HScript: `runHaxeCode`, `runHaxeFunction`, `createCallback` and `.hx` script files, bridged to `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`, `FlxRuntimeShader` and more.
+- HScript: `runHaxeCode`, `runHaxeFunction`, `createCallback` and `.hx` script files, bridged to `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`, `FlxRuntimeShader`, `new Character(...)`, `MP4Handler`/`VideoHandler`, `FlxG.cameras`, fully qualified `openfl.*`/`flixel.*`/`lime.*` names and more.
+- JS Engine compatibility: its events (Set/Tween Camera Zoom, Camera Bopping, Camera Twist, Change Note Multiplier, Fake Song Length, Change Song Name, Credits Popup, Popup, Rainbow Eyesore, Bot Energy...), its screen effects (`addChromaticAbberationEffect`, `addVCREffect`, `addWiggleEffect`, `addBloomEffect`, `add3DEffect`... as our own shaders) and functions such as `require`, `saveFile`, `loopTheSong`, `playsAsBF`. The camera follows Psych (`camFollowPos` is the real position, per-section focus with `gfSection`, `isCameraOnForcedPos`); scripts that change `FlxG.width` (e.g. *Window Changer*) narrow the picture to 4:3. Of 1048 Lua scripts from JS Engine mods, 984 run without an error in the headless corpus check.
 - Shaders: OpenFL/Flixel fragment shaders are translated to GLSL 330 and run on sprites and whole cameras.
 - Videos: `startVideo` cutscenes and `makeVideoSprite` with pl_mpeg; `.mp4`/`.webm` are converted once with ffmpeg when available.
 - Full Kade/base-game builds: the week 1–6 characters, stages and stage behaviour are rebuilt from the mod's own images.
-- Any folder layout: nested mod folders, loose charts grouped by song with audio found across mods, 1–9 keys (`mania`), V-Slice.
-- Huge spam charts are streamed: 1.5 GB / 25 million notes load in about 5 s with bounded memory.
+- Any folder layout: nested mod folders, loose charts grouped by song with audio found across mods, 1–9 keys (`keyCount`, or `mania` from Dave & Bambi / Kade, Psych Extra Keys and Shaggy: the notes decide which numbering a chart uses; without either a chart has 4 keys, as in Psych), V-Slice.
+- Huge spam charts are streamed: 1.5 GB / 25 million notes load in about 5 s with bounded memory. Notes stacked in one millisecond stay merged in memory but every one of them counts (hits, combo, score, totals), notes are drawn down to one pixel apart, and charts without a key count are 4-key charts, as in Psych and JS Engine.
 - Scripts are sandboxed and stopped if they loop forever.
 
-**Also** – chart editor (Freeplay `7`), in-game mod pack downloader (Freeplay `M`), AutoChart for songs without charts, deterministic replays, `.zip` mod installs, touch controls.
+**Also** – chart editor (Freeplay `7`) with Song / Section / Note / Events / Charting tabs, an event lane, box selection and spam tools; in-game mod pack downloader (Freeplay `M`), AutoChart for songs without charts, deterministic replays, `.zip` mod installs, touch controls. Options → INTERFACE switches to the Psych Engine look and sounds, read from the player's own Psych Engine / JS Engine folder (none of those files ship with the game). VSync applies at once (Android too); a Shaders switch helps weak devices.
 
 **Android** – `GodsHand-android.apk` (Android 7+, arm64/armv7/x86_64). On-screen arrows, OK and BACK in the menus; during a song the whole screen is split into the lanes, with a PAUSE button (the system back button pauses too). Freeplay has MOD PACKS (download) and IMPORT ZIP (system file picker). Game files live in `Android/data/com.godshand.game/files/`. The app pauses and goes silent in the background. Shaders run as GLSL ES 1.0; `.mp4`/`.webm` videos need ffmpeg, which Android does not have (`.mpg` plays). Built with `android/build_apk.sh` (NDK + CMake, a small Java activity for fullscreen and the file picker); signed with `android/godshand.keystore` (password `godshand`) so every build installs over the previous one, or with your own key through the `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASS` repository secrets.
 
@@ -125,4 +130,4 @@ mods/       Psych Engine / FNF mods, folders or .zip (created next to the execut
 replays/    recorded runs     saves/  script save data     cache/  converted videos
 ```
 
-**Credits** – Created for deatuamae67-crypto, merging God's Hand with ideas and features from PulseForge (same author). Built with [raylib](https://www.raylib.com) (zlib), [Lua](https://www.lua.org) (MIT), [miniz](https://github.com/richgel999/miniz) (MIT) and [pl_mpeg](https://github.com/phoboslab/pl_mpeg) (MIT). Fonts: Cinzel Decorative (Natanael Gama) and Rajdhani (Indian Type Foundry), both SIL OFL. All built-in characters, music and art are original. Code under the MIT license; mod packs are the user's own content.
+**Credits** – Created for deatuamae67-crypto, merging God's Hand with ideas and features from PulseForge (same author). Event, effect and script behaviour follow [JS Engine](https://github.com/JordanSantiagoYT/FNF-JS-Engine) (Apache-2.0) and Psych Engine; the code and shaders here are our own. Built with [raylib](https://www.raylib.com) (zlib), [Lua](https://www.lua.org) (MIT), [miniz](https://github.com/richgel999/miniz) (MIT) and [pl_mpeg](https://github.com/phoboslab/pl_mpeg) (MIT). Fonts: Cinzel Decorative (Natanael Gama) and Rajdhani (Indian Type Foundry), both SIL OFL. All built-in characters, music and art are original. Code under the MIT license; mod packs are the user's own content.

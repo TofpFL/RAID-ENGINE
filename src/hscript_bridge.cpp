@@ -138,6 +138,14 @@ Value shaderHost(scene::ShaderPtr s) {
     return Value::hostOf(h);
 }
 
+// Psych's runtimeShaders: name -> [fragment, vertex] of every initLuaShader'd shader.
+Value runtimeShaderMap(Interp& ip) {
+    Value m = Value::mapOf();
+    for (const auto& [name, src] : ip.sc.shaderSources)
+        if (name.rfind("__", 0) != 0) (*m.map)[name] = Value::array({Value(src.frag), Value(src.vert)});
+    return m;
+}
+
 std::vector<float> floatsOf(const Value& v) {
     std::vector<float> out;
     if (v.t == T::Array)
@@ -258,7 +266,15 @@ Value globalLookup(Interp& ip, const std::string& name, bool& found) {
             if (ip.host && arg(a, 1).t == T::Func) ip.host->registerHxCallback(arg(a, 0).str(), &ip, arg(a, 1));
             return Value();
         });
-    if (name == "parentLua" || name == "customSubstate" || name == "customSubstateName") return Value();
+    if (name == "parentLua") {  // Psych 0.7: the Lua script running this code
+        if (ip.luaPath.empty()) return Value();
+        return Value::object({{"scriptName", Value(ip.luaPath)}, {"runtimeShaders", runtimeShaderMap(ip)}});
+    }
+    if (name == "customSubstate" || name == "customSubstateName") return Value();
+    // Fully qualified names: openfl.Lib.application.window, flixel.FlxG...
+    if (name == "openfl" || name == "flixel" || name == "lime" || name == "haxe" || name == "sys" || name == "states" ||
+        name == "backend" || name == "objects" || name == "psychlua" || name == "funkin")
+        return hv("package", name);
     if (name == "buildTarget") return Value(std::string("desktop"));
     if (name == "Math" || name == "Std" || name == "StringTools" || name == "Reflect" || name == "FlxG" ||
         name == "FlxTween" || name == "FlxEase" || name == "FlxColor" || name == "Paths" || name == "PlayState" ||
@@ -275,8 +291,46 @@ Value globalLookup(Interp& ip, const std::string& name, bool& found) {
 
 Value hostGet(Interp& ip, const Host& h, const std::string& f) {
     const std::string& k = h.kind;
+    if (k == "package") {  // a.b.C: lower-case parts are packages, the first capitalised one the class
+        if (!f.empty() && std::isupper((unsigned char)f[0])) return hv("class", f);
+        return hv("package", h.path + "." + f);
+    }
+    if (k == "classpath") {  // openfl.Lib.application.window..., lime Application.current.window...
+        Value v;
+        if (hasSceneProp(ip, "class:" + h.path + "." + f, v)) return v;
+        return hv("classpath", h.path + "." + f);
+    }
+    if (k == "video") {
+        if (f == "onEndReached" || f == "onVideoEnd" || f == "onEnd" || f == "finished") return hv("videosignal", h.path);
+        if (f == "bitmap") return hv("video", h.path);
+        if (f == "alpha" || f == "visible" || f == "x" || f == "y") return sceneProp(ip, h.path + "." + f);
+        return Value();
+    }
+    if (k == "signal" || k == "videosignal") return Value();
+    if (k == "filterlist") {
+        scene::Camera* c = ip.sc.camera(h.path);
+        if (f == "length") return Value(double(c ? c->filters.size() : 0));
+        return Value();
+    }
+    if (k == "cameras") {
+        if (f == "list" || f == "defaults")
+            return Value::array({hv("camera", "camGame"), hv("camera", "camHUD"), hv("camera", "camOther")});
+        if (f == "cameraAdded" || f == "cameraRemoved" || f == "cameraResized") return hv("signal", f);
+        return Value();
+    }
     if (k == "game") {
         if (f == "camGame" || f == "camHUD" || f == "camOther") return hv("camera", f);
+        if (f == "luaArray") {
+            std::vector<Value> list;
+            if (ip.host)
+                for (const std::string& path : ip.host->scriptPaths())
+                    list.push_back(Value::object({{"scriptName", Value(path)}, {"runtimeShaders", runtimeShaderMap(ip)}}));
+            return Value::array(list);
+        }
+        if (f == "runtimeShaders") return runtimeShaderMap(ip);
+        if (f == "singAnimations")
+            return Value::array({Value(std::string("singLEFT")), Value(std::string("singDOWN")), Value(std::string("singUP")),
+                                 Value(std::string("singRIGHT"))});
         if (f == "variables") return hv("vars");
         if (f == "modchartSprites" || f == "modchartTexts") return hv("luaobjects");
         if (f == "strumLineNotes" || f == "playerStrums" || f == "opponentStrums") return hv("group", f);
@@ -314,13 +368,7 @@ Value hostGet(Interp& ip, const Host& h, const std::string& f) {
     if (k == "curanim") return sceneProp(ip, h.path + ".animation.curAnim." + f);
     if (k == "camera") {
         if (f == "scroll") return hv("point", h.path + ".scroll");
-        if (f == "filters") {
-            scene::Camera* c = ip.sc.camera(h.path);
-            std::vector<Value> list;
-            if (c)
-                for (const scene::ShaderPtr& s : c->filters) list.push_back(shaderHost(s));
-            return Value::array(list);
-        }
+        if (f == "filters" || f == "_filters") return hv("filterlist", h.path);  // live: push/remove change the camera
         return sceneProp(ip, h.path + "." + f);
     }
     if (k == "group") {
@@ -349,6 +397,7 @@ Value hostGet(Interp& ip, const Host& h, const std::string& f) {
         return Value();
     }
     if (k == "shader") {
+        if (f == "shader") return Value::hostOf(std::make_shared<Host>(h));  // ShaderFilter.shader
         if (f == "data") {
             auto d = mk("shaderdata", h.path);
             d->shader = h.shader;
@@ -383,6 +432,8 @@ Value hostGet(Interp& ip, const Host& h, const std::string& f) {
             if (f == "camera") return hv("camera", "camGame");
             if (f == "sound" || f == "random" || f == "keys" || f == "mouse" || f == "save" || f == "cameras") return hv(f);
             if (f == "timeScale") return Value(1.0);
+            if (f == "stage") return hv("signal", "stage");
+            if (f == "game") return hv("classpath", "FlxG.game");
             return sceneProp(ip, "class:FlxG." + f);
         }
         if (c == "FlxEase") return Value(f);
@@ -409,6 +460,8 @@ Value hostGet(Interp& ip, const Host& h, const std::string& f) {
             return sceneProp(ip, "class:PlayState." + f);
         }
         if (c == "ClientPrefs" && f == "data") return hv("class", "ClientPrefs");
+        if ((c == "Lib" && (f == "application" || f == "current")) || (c == "Application" && f == "current"))
+            return hv("classpath", c + "." + f);
         if (c == "Conductor" || c == "ClientPrefs") return sceneProp(ip, "class:" + c + "." + f);
         return Value();
     }
@@ -532,6 +585,15 @@ void hostSet(Interp& ip, const Host& h, const std::string& f, const Value& v) {
         return;
     }
     if (k == "music") { setSceneProp(ip, "class:FlxG.sound.music." + f, v); return; }
+    if (k == "classpath") { setSceneProp(ip, "class:" + h.path + "." + f, v); return; }
+    if (k == "video") {
+        if (f == "finishCallback" || f == "onEnd" || f == "onComplete") {
+            if (v.t == T::Func) ip.shared->callbacks[h.path] = {v, Value::hostOf(std::make_shared<Host>(h)), &ip};
+            return;
+        }
+        if (f == "alpha" || f == "visible" || f == "x" || f == "y") setSceneProp(ip, h.path + "." + f, v);
+        return;
+    }
     if (k == "class") {
         if (h.path == "ClientPrefs" || h.path == "PlayState" || h.path == "Conductor") setSceneProp(ip, "class:" + h.path + "." + f, v);
         return;
@@ -545,6 +607,11 @@ Value hostIndex(Interp& ip, const Host& h, const Value& index) {
     if (h.kind == "vars") {
         if (auto it = ip.shared->vars.find(index.str()); it != ip.shared->vars.end()) return it->second;
         return Value();
+    }
+    if (h.kind == "filterlist") {
+        scene::Camera* c = ip.sc.camera(h.path);
+        if (!c || i < 0 || i >= int(c->filters.size())) return Value();
+        return shaderHost(c->filters[size_t(i)]);
     }
     return Value();
 }
@@ -642,6 +709,16 @@ Value hostCall(Interp& ip, const Host& h, const std::string& m, std::vector<Valu
             if (a.size() > 1) s->text.borderColor = colorOf(arg(a, 1));
             s->text.borderSize = a.size() > 2 ? float(arg(a, 2).num()) : 1.0f;
             return hv(h.kind, h.path);
+        }
+        if (m == "setColorTransform") {
+            // Multipliers (0..1) and offsets (0..255): a tint is the closest thing here.
+            auto ch = [&](size_t mi, size_t oi) {
+                const double mult = a.size() > mi ? arg(a, mi).num() : 1.0, off = a.size() > oi ? arg(a, oi).num() : 0.0;
+                return uint32_t(clampv(mult * 255.0 + off, 0.0, 255.0));
+            };
+            s->color = (ch(0, 4) << 16) | (ch(1, 5) << 8) | ch(2, 6);
+            if (a.size() > 3) s->alpha = float(clampv(arg(a, 3).num() + (a.size() > 7 ? arg(a, 7).num() / 255.0 : 0.0), 0.0, 1.0));
+            return Value();
         }
         if (m == "addOffset") {
             if (scene::Anim* an = s->anim(arg(a, 0).str())) {
@@ -872,6 +949,39 @@ Value hostCall(Interp& ip, const Host& h, const std::string& m, std::vector<Valu
             }
             return Value();
         }
+        if (c == "CoolUtil") {
+            const double x = arg(a, 0).num(), y = arg(a, 1).num();
+            if (m == "numberArray") {  // [min, max)
+                std::vector<Value> r;
+                const int hi = int(x), lo = a.size() > 1 ? int(y) : 0;
+                for (int i = lo; i < hi && r.size() < 100000; ++i) r.push_back(Value(double(i)));
+                return Value::array(r);
+            }
+            if (m == "boundTo") return Value(std::clamp(x, y, arg(a, 2).num()));
+            if (m == "floorDecimal") { const double p = std::pow(10.0, y); return Value(std::floor(x * p) / p); }
+            if (m == "quantize") return Value(y != 0 ? std::round(x * y) / y : x);
+            if (m == "capitalize") {
+                std::string t = toLower(arg(a, 0).str());
+                if (!t.empty()) t[0] = char(std::toupper((unsigned char)t[0]));
+                return Value(t);
+            }
+            if (m == "coolTextFile") {
+                std::vector<Value> r;
+                std::string text;
+                const std::string f = sc.files.find(arg(a, 0).str());
+                if (!f.empty() && scene::readFile(f, text)) {
+                    size_t p = 0;
+                    while (p <= text.size()) {
+                        size_t e = text.find('\n', p);
+                        if (e == std::string::npos) e = text.size();
+                        r.push_back(Value(trim(text.substr(p, e - p))));
+                        p = e + 1;
+                    }
+                }
+                return Value::array(r);
+            }
+            return Value();
+        }
         if (c == "FlxMath") {
             const double x = arg(a, 0).num(), y = arg(a, 1).num(), z = arg(a, 2).num();
             if (m == "lerp") return Value(x + (y - x) * z);
@@ -1061,6 +1171,70 @@ Value hostCall(Interp& ip, const Host& h, const std::string& m, std::vector<Valu
         return Value();
     }
     if (k == "cameras") return arg(a, 0);
+    if (k == "signal") return Value();  // camera signals, the stage: nothing to listen to
+    if (k == "filterlist") {
+        scene::Camera* c = sc.camera(h.path);
+        if (!c) return Value();
+        auto shaderOf = [](const Value& v) { return v.t == T::Host && v.host ? v.host->shader : nullptr; };
+        if (m == "push" || m == "unshift" || m == "insert") {
+            const Value v = m == "insert" ? arg(a, 1) : arg(a, 0);
+            if (scene::ShaderPtr sh = shaderOf(v)) {
+                if (m == "push") c->filters.push_back(sh);
+                else c->filters.insert(c->filters.begin() + (m == "insert" ? std::ptrdiff_t(clampv(int(arg(a, 0).num()), 0, int(c->filters.size()))) : 0), sh);
+            }
+            return Value(double(c->filters.size()));
+        }
+        if (m == "remove") {
+            const scene::ShaderPtr sh = shaderOf(arg(a, 0));
+            const auto it = std::find(c->filters.begin(), c->filters.end(), sh);
+            if (it == c->filters.end()) return Value(false);
+            c->filters.erase(it);
+            return Value(true);
+        }
+        if (m == "indexOf" || m == "contains") {
+            const auto it = std::find(c->filters.begin(), c->filters.end(), shaderOf(arg(a, 0)));
+            if (m == "contains") return Value(it != c->filters.end());
+            return Value(it == c->filters.end() ? -1.0 : double(it - c->filters.begin()));
+        }
+        if (m == "pop" && !c->filters.empty()) {
+            const scene::ShaderPtr sh = c->filters.back();
+            c->filters.pop_back();
+            return shaderHost(sh);
+        }
+        if (m == "splice" || m == "resize") {
+            c->filters.clear();
+            return Value();
+        }
+        return Value();
+    }
+    if (k == "videosignal") {
+        if (m == "add" && arg(a, 0).t == T::Func) ip.shared->callbacks[h.path] = {arg(a, 0), hv("video", h.path), &ip};
+        return Value();
+    }
+    if (k == "video") {
+        if (m == "playVideo" || m == "play" || m == "load" || m == "playMP4" || m == "startVideo") {
+            std::string name = a.empty() || arg(a, 0).isNull() ? h.extra.str() : arg(a, 0).str();
+            for (const char* pre : {"assets/videos/", "videos/"})
+                if (name.rfind(pre, 0) == 0) name = name.substr(std::string_view(pre).size());
+            if (const size_t dot = name.rfind('.'); dot != std::string::npos && name.size() - dot <= 5) name = name.substr(0, dot);
+            const bool loop = m == "load" ? arg(a, 1).truthy() : false;
+            if (name.empty() || !ip.game.playVideoOnTop(h.path, name, loop)) {
+                // No video: finish at once so the script moves on.
+                if (auto it = ip.shared->callbacks.find(h.path); it != ip.shared->callbacks.end()) {
+                    scene::Completion c;
+                    c.tag = h.path;
+                    ip.sc.completions.push_back(c);
+                }
+                return Value(false);
+            }
+            return Value(true);
+        }
+        if (m == "stop" || m == "dispose" || m == "destroy" || m == "kill") {
+            setSceneProp(ip, h.path + ".visible", Value(false));
+            return Value();
+        }
+        return Value();
+    }
     if (k == "music") {
         if (m == "pause") ip.game.soundCommand("__music", "pause", 0, 0, 0);
         else if (m == "resume" || m == "play") ip.game.soundCommand("__music", "resume", 0, 0, 0);
@@ -1100,6 +1274,22 @@ Value construct(Interp& ip, const std::string& cls, std::vector<Value>& a) {
         s->centerOrigin();
         sc.objects[s->tag] = s;
         return hv("sprite", s->tag);
+    }
+    if (cls == "Character" || cls == "Boyfriend") {  // new Character(x, y, name, isPlayer)
+        const std::string tag = newTag(ip, "__hxchar");
+        const std::string name = arg(a, 2).isNull() ? std::string("bf") : arg(a, 2).str();
+        const bool player = cls == "Boyfriend" || arg(a, 3).truthy();
+        if (!ip.game.makeExtraCharacter(tag, name, player, float(arg(a, 0).num()), float(arg(a, 1).num()))) {
+            ip.game.debugPrint("HScript: character " + name + " could not be made", 0xFFFFD040);
+            return Value();
+        }
+        return hv("sprite", tag);
+    }
+    if (cls == "MP4Handler" || cls == "VideoHandler" || cls == "FlxVideo" || cls == "VideoSprite" || cls == "FlxVideoSprite" ||
+        cls == "MP4Sprite" || cls == "VideoSpriteBase") {
+        auto h = mk("video", newTag(ip, "__hxvid"));
+        if (arg(a, 0).t == T::Str) h->extra = arg(a, 0);  // VideoSprite(fileName, ...)
+        return Value::hostOf(h);
     }
     if (cls == "FlxTimer") return hv("timer", newTag(ip, "__hxtimer"));
     if (cls == "ShaderFilter") return arg(a, 0);

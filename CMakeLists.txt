@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.0.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -89,6 +89,7 @@ add_library(gh_core STATIC
   src/chart_stream.cpp
   src/basegame.cpp
   src/shader_glsl.cpp
+  src/effects.cpp
   src/hscript.cpp
   src/hscript_bridge.cpp
   src/session.cpp
@@ -203,6 +204,8 @@ if(GH_BUILD_GAME)
     src/state_modpacks.cpp
     src/process.cpp
     src/platform.cpp
+    src/folder_picker.cpp
+    src/psych_ui.cpp
     src/touch_ui.cpp
   )
   if(ANDROID)
@@ -215,6 +218,7 @@ if(GH_BUILD_GAME)
     add_executable(godshand WIN32 ${GH_GAME_SOURCES})
   endif()
   target_link_libraries(godshand PRIVATE gh_core raylib)
+  target_compile_definitions(godshand PRIVATE GH_VERSION="${PROJECT_VERSION}")
   target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})
   if(MSVC)
     target_compile_options(godshand PRIVATE /W3 /utf-8)
@@ -227,6 +231,9 @@ if(GH_BUILD_GAME)
   endif()
   if(APPLE)
     target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+  endif()
+  if(WIN32)
+    target_link_libraries(godshand PRIVATE shell32 ole32)  # the folder dialog
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/
