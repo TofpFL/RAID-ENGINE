@@ -150,6 +150,10 @@ void PlayState::update(double dt) {
         for (int s = std::max(lastStep_ + 1, step - 8); s <= step; ++s) onStep(s);
         lastStep_ = step;
     }
+    if (!chart_.sections.empty()) {  // the chart's own sections (any length)
+        const int sec = chart_.sectionAt(songMs_);
+        if (sec > lastSection_) onSection(sec);
+    }
     for (int side = 0; side < 2; ++side)
         for (int l = 0; l < chart_.keys; ++l)
             if (session_.isHolding(side, l)) {
@@ -160,7 +164,8 @@ void PlayState::update(double dt) {
     const int focus = chart_.focusAt(songMs_);
     if (focus != lastFocus_) {
         lastFocus_ = focus;
-        if (psych_) psychFocus(focus);
+        // Charts with sections move the camera at each section (onSection).
+        if (psych_ && chart_.sections.empty() && !scene_->camForced) psychFocus(focus);
     }
     if (!psych_) {
         const bool focusLeft = (focus == 1) == playerLeft_;
@@ -206,7 +211,12 @@ void PlayState::draw() {
         return;
     }
     if (psych_) {
+        gfx::setViewWidth(gameW_);
         psychDraw();
+        if (gameW_ < gfx::W) {
+            gfx::drawLetterbox();  // the part of the picture past FlxG.width is not shown
+            gfx::setViewWidth(gfx::W);
+        }
     } else {
         gfx::beginCanvas(0.94f * camZoom_, camFocus_);
         stage_.drawBack(now);
@@ -309,10 +319,10 @@ void PlayState::layoutStrums() {
             if (psych_ && K == 4) {
                 // Psych Engine's own strum positions, so scripts line up.
                 const float baseX = s.middlescroll ? -278.0f : 42.0f;
-                float x = baseX + 50 + 112.0f * float(lane) + (side == 1 ? gfx::W * 0.5f : 0.0f);
+                float x = baseX + 50 + 112.0f * float(lane) + (side == 1 ? gameW_ * 0.5f : 0.0f);
                 if (s.middlescroll && side == 0) {
                     x += 310;
-                    if (lane > 1) x += gfx::W * 0.5f + 25;
+                    if (lane > 1) x += gameW_ * 0.5f + 25;
                 }
                 st.x = x;
                 st.y = s.downscroll ? gfx::H - 150.0f : 50.0f;
@@ -335,7 +345,7 @@ void PlayState::layoutStrums() {
             }
             if (psych_ && playerLeft_ && K == 4 && !s.middlescroll) {
                 // Playing as the opponent: the player's lanes are on the left.
-                st.x = 42.0f + 50 + 112.0f * float(lane) + (side == 0 ? gfx::W * 0.5f : 0.0f);
+                st.x = 42.0f + 50 + 112.0f * float(lane) + (side == 0 ? gameW_ * 0.5f : 0.0f);
             }
             st.defX = st.x;
             st.defY = st.y;
@@ -374,7 +384,7 @@ void PlayState::restart() {
     leadMs_ = 60000.0 / chart_.bpmAt(0) * 5.0;
     lastBeat_ = int(std::floor(chart_.beatAt(-leadMs_))) - 1;
     lastStep_ = lastBeat_ * 4 + 3;
-    lastSection_ = -100000;
+    lastSection_ = chart_.sections.empty() ? -100000 : 0;  // Psych: sectionHit from section 1 on
     lastFocus_ = -1;
     eventIdx_ = 0;
     for (int t = 0; t < Mixer::kTrackCount; ++t) a.mixer.setTrackVolume(t, 1.0f);
@@ -479,14 +489,11 @@ void PlayState::onResume() {
 
 // Touch controls option (desktop): each player lane is a full-height column around its strum.
 void PlayState::handleTouch() {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-    const float sc = std::min(sw / gfx::W, sh / gfx::H);
-    const float ox = (sw - gfx::W * sc) * 0.5f;
     bool want[9] = {};
     const int K = chart_.keys;
     const float half = std::min(112.0f, 500.0f / float(K)) * 0.5f + 4.0f;
     for (const TouchPoint& tp : touchPoints()) {  // fingers, or the mouse while clicked
-        const float x = (tp.pos.x - ox) / sc;
+        const float x = gfx::toCanvas(tp.pos).x;
         int best = -1;
         float bestD = 1e9f;
         for (int l = 0; l < K; ++l) {
@@ -635,15 +642,22 @@ void PlayState::onStep(int s) {
     scripts_->setGlobal("curDecStep", chart_.beatAt(songMs_) * 4.0);
     scripts_->call("onStepHit", {scene::Value(double(s))});
     if (scripts_->kadeMode) scripts_->call("stepHit", {scene::Value(double(s))});
-    if (s >= 0 && s % 16 == 0) onSection(s / 16);
+    if (chart_.sections.empty() && s >= 0 && s % 16 == 0) onSection(s / 16);
 }
 
 void PlayState::onSection(int s) {
     if (s == lastSection_) return;
     lastSection_ = s;
+    const SectionInfo* info =
+        s >= 0 && s < int(chart_.sections.size()) ? &chart_.sections[size_t(s)] : nullptr;
+    // Psych sectionHit: the camera goes to the section's singer unless a
+    // script or "Camera Follow Pos" holds it.
+    if (psych_ && info && !scene_->camForced) moveCameraSection(s);
     if (!scripts_) return;
     scripts_->setGlobal("curSection", double(s));
-    scripts_->setGlobal("mustHitSection", chart_.focusAt(songMs_ + 1) == 1);
+    scripts_->setGlobal("mustHitSection", info ? info->mustHit : chart_.focusAt(songMs_ + 1) == 1);
+    scripts_->setGlobal("gfSection", info && info->gf);
+    scripts_->setGlobal("altAnim", info && info->alt);
     scripts_->call("onSectionHit");
 }
 

@@ -133,16 +133,40 @@ void shutdown() {
 // ---------------------------------------------------------------- canvas --
 
 static int g_targetW = 0, g_targetH = 0;
+static float g_viewW = W;
 void setRenderTargetSize(int w, int h) {
     g_targetW = w;
     g_targetH = h;
 }
 
-Camera2D screenCamera(float zoom, Vector2 focus, float rotationDeg) {
+void setViewWidth(float w) { g_viewW = std::clamp(w, 64.0f, W); }
+float viewWidth() { return g_viewW; }
+
+// A render texture holds the whole canvas; the window shows 0..g_viewW of it.
+static float shownWidth() { return g_targetW > 0 ? W : g_viewW; }
+
+float canvasScale() {
     const float sw = float(g_targetW > 0 ? g_targetW : GetScreenWidth()), sh = float(g_targetH > 0 ? g_targetH : GetScreenHeight());
-    const float s = std::min(sw / W, sh / H);
+    return std::min(sw / shownWidth(), sh / H);
+}
+
+Vector2 canvasOrigin() {
+    const float sw = float(g_targetW > 0 ? g_targetW : GetScreenWidth()), sh = float(g_targetH > 0 ? g_targetH : GetScreenHeight());
+    const float s = canvasScale();
+    return {(sw - shownWidth() * s) * 0.5f, (sh - H * s) * 0.5f};
+}
+
+Vector2 toCanvas(Vector2 p) {
+    const Vector2 o = canvasOrigin();
+    const float s = canvasScale();
+    return {(p.x - o.x) / s, (p.y - o.y) / s};
+}
+
+Camera2D screenCamera(float zoom, Vector2 focus, float rotationDeg) {
+    const float s = canvasScale();
+    const Vector2 o = canvasOrigin();
     Camera2D cam{};
-    cam.offset = {(sw - W * s) * 0.5f + s * W * 0.5f, (sh - H * s) * 0.5f + s * H * 0.5f};
+    cam.offset = {o.x + s * W * 0.5f, o.y + s * H * 0.5f};
     cam.target = focus;
     cam.rotation = rotationDeg;
     cam.zoom = s * zoom;
@@ -154,15 +178,14 @@ void endCanvas() { EndMode2D(); }
 
 void drawLetterbox() {
     const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-    const float s = std::min(sw / W, sh / H);
-    const float bw = (sw - W * s) * 0.5f, bh = (sh - H * s) * 0.5f;
-    if (bw > 0.5f) {
-        DrawRectangleRec({0, 0, bw + 1, sh}, BLACK);
-        DrawRectangleRec({sw - bw - 1, 0, bw + 2, sh}, BLACK);
-    }
-    if (bh > 0.5f) {
-        DrawRectangleRec({0, 0, sw, bh + 1}, BLACK);
-        DrawRectangleRec({0, sh - bh - 1, sw, bh + 2}, BLACK);
+    const float s = canvasScale();
+    const Vector2 o = canvasOrigin();
+    const float right = o.x + g_viewW * s;
+    if (o.x > 0.5f) DrawRectangleRec({0, 0, o.x + 1, sh}, BLACK);
+    if (sw - right > 0.5f) DrawRectangleRec({right - 1, 0, sw - right + 2, sh}, BLACK);
+    if (o.y > 0.5f) {
+        DrawRectangleRec({0, 0, sw, o.y + 1}, BLACK);
+        DrawRectangleRec({0, sh - o.y - 1, sw, o.y + 2}, BLACK);
     }
 }
 

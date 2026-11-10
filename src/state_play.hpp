@@ -104,6 +104,8 @@ private:
     void drawLanes();
     void drawHud();
     void drawHudLayer();  // lanes, effects and HUD with the HUD camera
+    void drawHudCentered();
+    void setGameWidth(float w);  // FlxG.width
     void drawPause();
     void drawDead();
     void drawLoading();
@@ -124,6 +126,8 @@ private:
     void psychMiss(const GameEvent& ev, bool ghost);
     void psychBeat(int b);
     void psychFocus(int side);
+    void focusWho(int who);            // camera on 0 bf, 1 dad, 2 gf (Psych moveCamera)
+    void moveCameraSection(int sec);   // Psych moveCameraSection
     void psychHoldRefresh();
     void handleBuiltinEvent(const psych::ChartEvent& e);
     scene::Character* charForSide(int side);
@@ -178,6 +182,8 @@ private:
     Color leftColor_{}, rightColor_{};
     bool playerLeft_ = false;
     double songMs_ = -1e9, leadMs_ = 0, rate_ = 1.0, speedMult_ = 1.0;
+    float gameW_ = gfx::W;  // Flixel's FlxG.width (scripts may narrow the picture)
+    std::map<std::string, scene::Value, std::less<>> classVars_;  // openfl/lime window values and friends
     int lastBeat_ = -100000, lastStep_ = -100000, lastSection_ = -100000, lastFocus_ = -1;
     float camZoom_ = 1, hudZoom_ = 1, beatPulse_ = 0, minePulse_ = 0, healthShown_ = 1;
     Vector2 camFocus_{640, 370};

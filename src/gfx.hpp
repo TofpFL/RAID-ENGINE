@@ -23,6 +23,13 @@ void setRenderTargetSize(int w, int h);
 void beginCanvas(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
 void endCanvas();
 void drawLetterbox();
+// The part of the canvas shown in the window: x from 0 to viewWidth(), like
+// Flixel's FlxG.width (a script can narrow it to 960 for a 4:3 picture).
+void setViewWidth(float w);
+float viewWidth();
+float canvasScale();     // window pixels per canvas unit
+Vector2 canvasOrigin();  // window position of canvas point (0, 0)
+Vector2 toCanvas(Vector2 windowPos);
 
 // ---- text
 enum class FontId { Title, Ui };

@@ -423,12 +423,7 @@ private:
     float gridX() const { return gfx::W * 0.5f - laneW() * keys_; }
     float lineY() const { return 220.0f; }
     float pxPerMs() const { return 0.45f * zoom_; }
-    Vector2 mouse() const {
-        const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-        const float s = std::min(sw / gfx::W, sh / gfx::H);
-        const Vector2 m = GetMousePosition();
-        return {(m.x - (sw - gfx::W * s) * 0.5f) / s, (m.y - (sh - gfx::H * s) * 0.5f) / s};
-    }
+    Vector2 mouse() const { return gfx::toCanvas(GetMousePosition()); }
     bool mouseCell(int& col, double& t) {
         const Vector2 m = mouse();
         const float x0 = gridX();

@@ -195,7 +195,7 @@ int l_setProperty(lua_State* L) {
 
 bool isNoteGroup(const std::string& g) {
     const std::string l = toLower(g);
-    return l == "notes" || l == "unspawnnotes";
+    return l == "notes" || l == "unspawnnotes" || l == "eventnotes";
 }
 
 int l_getPropertyFromGroup(lua_State* L) {

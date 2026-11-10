@@ -69,6 +69,16 @@ int Chart::focusAt(double ms) const {
     return focus[lo].side;
 }
 
+int Chart::sectionAt(double ms) const {
+    if (sections.empty() || ms < sections[0].timeMs) return -1;
+    size_t lo = 0, hi = sections.size();
+    while (hi - lo > 1) {
+        const size_t mid = (lo + hi) / 2;
+        if (sections[mid].timeMs <= ms) lo = mid; else hi = mid;
+    }
+    return int(lo);
+}
+
 void Chart::finalize(double baseBpm) {
     if (!(baseBpm > 0)) baseBpm = 120;
     if (tempo.empty()) tempo.push_back({0, baseBpm, 0});
@@ -288,6 +298,7 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
         if (out.focus.empty() || out.focus.back().side != fside) out.focus.push_back({secStart, fside});
         const bool altSec = json::Document::boolean(doc.get(sec, "altAnim"), false);
         const bool gfSec = json::Document::boolean(doc.get(sec, "gfSection"), false);
+        out.sections.push_back({secStart, must, gfSec, altSec});
         const double stepMs = 15000.0 / curBpm;
 
         const json::Value* sv = doc.get(sec, "sectionNotes");

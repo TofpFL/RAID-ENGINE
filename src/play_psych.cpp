@@ -9,7 +9,9 @@
 
 #include "basegame.hpp"
 #include "common.hpp"
+#include "platform.hpp"
 #include "state_play.hpp"
+#include "rlgl.h"
 
 namespace gh {
 
@@ -263,9 +265,10 @@ void PlayState::setScriptGlobals() {
     set("ratingName", std::string("?"));
     set("ratingFC", std::string());
     set("inGameOver", false);
-    set("mustHitSection", chart_.focusAt(0) == 1);
-    set("altAnim", false);
-    set("gfSection", false);
+    const SectionInfo* sec0 = chart_.sections.empty() ? nullptr : &chart_.sections[0];
+    set("mustHitSection", sec0 ? sec0->mustHit : chart_.focusAt(0) == 1);
+    set("altAnim", sec0 && sec0->alt);
+    set("gfSection", sec0 && sec0->gf);
     set("healthGainMult", 1.0);
     set("healthLossMult", 1.0);
     set("playbackRate", rate_);
@@ -517,6 +520,21 @@ bool PlayState::setupPsych() {
     loadScripts(true);
     for (const psych::ChartEvent& e : chart_.events)
         scripts_->call("onEventPushed", {Value(e.name), Value(e.v1), Value(e.v2), Value(e.timeMs)});
+    // Psych's camera start: on the girlfriend, heading for the first section's
+    // focus. Scripts may move both in onCreatePost.
+    {
+        float gx = sc.stage.camGf[0], gy = sc.stage.camGf[1];
+        if (sc.gf) {
+            gx += sc.gf->x + sc.gf->frameW * 0.5f + sc.gf->camX;
+            gy += sc.gf->y + sc.gf->frameH * 0.5f + sc.gf->camY;
+        }
+        sc.followX = gx;
+        sc.followY = gy;
+        sc.camGame.scrollX = gx - gfx::W * 0.5f;
+        sc.camGame.scrollY = gy - gfx::H * 0.5f;
+        moveCameraSection(0);
+        if (!chart_.sections.empty()) lastSection_ = 0;  // Psych calls sectionHit from section 1 on
+    }
     scripts_->call("onCreatePost");
     scripts_->dispatchCompletions();
 
@@ -541,10 +559,6 @@ bool PlayState::setupPsych() {
         for (size_t i = 0; i < sc.gfx.missing.size() && i < 4; ++i) list += (i ? ", " : "") + sc.gfx.missing[i];
         debugPrint(std::to_string(sc.gfx.missing.size()) + " image(s) missing: " + list, 0xFFFFD040);
     }
-    // Snap the camera to the first focus.
-    psychFocus(chart_.focusAt(0));
-    sc.camGame.scrollX = sc.followX - gfx::W * 0.5f;
-    sc.camGame.scrollY = sc.followY - gfx::H * 0.5f;
     return true;
 }
 
@@ -698,20 +712,34 @@ void PlayState::psychBeat(int b) {
 void PlayState::psychFocus(int side) {
     scene::Scene& sc = *scene_;
     Character* c = charForSide(side == 1 ? 1 : 0);
-    const int who = c && c == sc.bf.get() ? 0 : 1;
+    focusWho(c && c == sc.bf.get() ? 0 : 1);
+}
+
+void PlayState::focusWho(int who) {
+    scene::Scene& sc = *scene_;
+    if (who == 2 && !sc.gf) who = 0;
     sc.focusOn(who);
     if (scripts_) {
-        scripts_->call("onMoveCamera", {Value(std::string(who == 0 ? "boyfriend" : "dad"))});
-        if (scripts_->kadeMode) scripts_->call(who == 0 ? "playerOneTurn" : "playerTwoTurn");
+        scripts_->call("onMoveCamera", {Value(std::string(who == 0 ? "boyfriend" : who == 1 ? "dad" : "gf"))});
+        if (scripts_->kadeMode && who < 2) scripts_->call(who == 0 ? "playerOneTurn" : "playerTwoTurn");
         scripts_->setGlobal("mustHit", who == 0);
     }
+}
+
+void PlayState::moveCameraSection(int sec) {
+    if (chart_.sections.empty()) {
+        psychFocus(chart_.focusAt(songMs_));
+        return;
+    }
+    const SectionInfo& s = chart_.sections[size_t(clampv(sec, 0, int(chart_.sections.size()) - 1))];
+    focusWho(s.gf && scene_->gf ? 2 : s.mustHit ? 0 : 1);
 }
 
 void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
     App& a = app();
     const std::string& n = e.name;
     if (n == "Add Camera Zoom") {
-        if (!a.settings.camZoom) return;
+        // Works whatever "Camera zoom on beat" says: that option only stops the beat bops.
         const double gz = numOr(e.v1, 0.015), hz = numOr(e.v2, 0.03);
         if (psych_) {
             if (scene_->camGame.zoom < 1.35f) {
@@ -764,7 +792,7 @@ void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
             sc.followX = float(numOr(v1, 0));
             sc.followY = float(numOr(v2, 0));
         } else {
-            psychFocus(chart_.focusAt(songMs_));
+            moveCameraSection(chart_.sectionAt(songMs_));
         }
     } else if (n == "Alt Idle Animation") {
         const std::string l = toLower(trim(e.v1));
@@ -872,7 +900,7 @@ void PlayState::drawHudLayer() {
         gfx::beginCanvas(cam.zoom, focus, cam.angle);
         drawLanes();
         fx_.draw(true);
-        drawHud();
+        drawHudCentered();
         gfx::endCanvas();
         EndTextureMode();
         DrawTextureRec(hudRt_.texture, {0, 0, float(w), -float(h)}, {0, 0}, gfx::fade(WHITE, cam.alpha));
@@ -880,10 +908,26 @@ void PlayState::drawHudLayer() {
         gfx::beginCanvas(cam.zoom, focus, cam.angle);
         drawLanes();
         fx_.draw(true);
-        drawHud();
+        drawHudCentered();
         gfx::endCanvas();
     }
     gfx::beginCanvas();
+}
+
+// The health bar and score sit in the middle of the game's width (a script
+// may have narrowed it, Flixel's FlxG.width).
+void PlayState::drawHudCentered() {
+    const float shift = (gameW_ - gfx::W) * 0.5f;
+    if (shift == 0) {
+        drawHud();
+        return;
+    }
+    rlDrawRenderBatchActive();
+    rlPushMatrix();
+    rlTranslatef(shift, 0, 0);
+    drawHud();
+    rlDrawRenderBatchActive();
+    rlPopMatrix();
 }
 
 void PlayState::psychDraw() {
@@ -936,8 +980,8 @@ void PlayState::psychDraw() {
             return;
         }
         gfx::endCanvas();
-        const int sw = GetScreenWidth(), sh = GetScreenHeight();
-        const float s = std::min(float(sw) / gfx::W, float(sh) / gfx::H);
+        const float s = gfx::canvasScale();
+        const Vector2 origin = gfx::canvasOrigin();
         const int rw = std::max(1, int(gfx::W * s)), rh = std::max(1, int(gfx::H * s));
         if (!camRt_.id || camRt_.texture.width != rw || camRt_.texture.height != rh) {
             if (camRt_.id) UnloadRenderTexture(camRt_);
@@ -956,7 +1000,7 @@ void PlayState::psychDraw() {
         gfx::endCanvas();
         gfx::setRenderTargetSize(0, 0);
         EndTextureMode();
-        renderer_.drawFiltered(sc, cam.filters, camRt_, Rectangle{(sw - rw) * 0.5f, (sh - rh) * 0.5f, float(rw), float(rh)});
+        renderer_.drawFiltered(sc, cam.filters, camRt_, Rectangle{origin.x, origin.y, float(rw), float(rh)});
         gfx::beginCanvas();
     };
     pass(scene::Cam::Game, sc.camGame, false);
@@ -1237,6 +1281,7 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
     if (path == "isStoryMode") return flag(req_.story);
     if (path == "notes.length") return num(noteCount("notes"));
     if (path == "unspawnNotes.length") return num(noteCount("unspawnNotes"));
+    if (path == "eventNotes.length") return num(noteCount("eventNotes"));
     if (path == "instakillOnMiss") return flag(false);
     if (path == "healthGain" || path == "healthLoss") return num(1);
     if (path == "showRating" || path == "showCombo" || path == "showComboNum") return flag(true);
@@ -1245,6 +1290,67 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
     if (path == "spawnTime") return num(2000);
     if (path.rfind("class:", 0) != 0) return false;
     const std::string_view c = path.substr(6);
+    // Flixel/OpenFL/Lime values a script can read and change (the window is
+    // never really resized or moved: FlxG.width narrows the picture instead).
+    if (c == "FlxG.width" || c == "Lib.current.stage.stageWidth") return num(gameW_);
+    if (c == "FlxG.height" || c == "Lib.current.stage.stageHeight") return num(gfx::H);
+    if (auto it = classVars_.find(c); it != classVars_.end()) { out = it->second; return true; }
+    for (std::string_view prefix : {"Lib.application.window.", "Application.current.window.", "Lib.current.window."}) {
+        if (c.rfind(prefix, 0) != 0) continue;
+        const std::string_view w = c.substr(prefix.size());
+        const Vector2 pos = platform::kAndroid ? Vector2{0, 0} : GetWindowPosition();
+        if (w == "width") return num(gameW_);
+        if (w == "height") return num(gfx::H);
+        if (w == "x") return num(pos.x);
+        if (w == "y") return num(pos.y);
+        if (w == "title") { out = std::string("God's Hand"); return true; }
+        if (w == "fullscreen") return flag(IsWindowFullscreen());
+        if (w == "resizable") return flag(!platform::kAndroid);
+        if (w == "borderless" || w == "maximized" || w == "minimized") return flag(false);
+        if (w == "frameRate") return num(s.fpsCap > 0 ? s.fpsCap : 240);
+        return false;
+    }
+    for (const auto& [prefix, mode] : {std::pair<std::string_view, int>{"FlxG.keys.justPressed.", 1},
+                                       {"FlxG.keys.pressed.", 0}, {"FlxG.keys.justReleased.", 2}}) {
+        if (c.rfind(prefix, 0) == 0) return flag(keyboardState(c.substr(prefix.size()), mode));
+    }
+    if (c == "FlxG.sound.music.pitch") return num(rate_);
+    if (c == "FlxG.sound.music.length") return num(prep_.inst ? a.mixer.lengthSec() * 1000.0 : chart_.lengthMs);
+    if (c == "FlxG.sound.music.playing") return flag(phase_ == Phase::Playing && songMs_ >= 0);
+    if (c == "FlxG.mouse.visible") return flag(false);
+    if (c == "FlxG.timeScale" || c == "FlxG.game.timeScale") return num(1);
+    if (c == "FlxG.fullscreen") return flag(IsWindowFullscreen());
+    if (c == "FlxG.drawFramerate" || c == "FlxG.updateFramerate") return num(s.fpsCap > 0 ? s.fpsCap : 240);
+    if (c == "FlxG.game.ticks") return num(a.now * 1000.0);
+    if (c == "FlxG.autoPause") return flag(true);
+    if (c == "Conductor.safeZoneOffset") return num(kMissWindowMs);
+    if (c == "Conductor.offset") return num(0);
+    if (c == "PlayState.deathCounter" || c == "PlayState.storyWeek" || c == "PlayState.campaignScore" ||
+        c == "PlayState.campaignMisses")
+        return num(0);
+    if (c == "PlayState.isPixelStage") return flag(scene_ && scene_->stage.pixel);
+    if (c == "PlayState.seenCutscene") return flag(true);
+    if (c == "PlayState.SONG.player1") { out = chart_.player; return true; }
+    if (c == "PlayState.SONG.player2") { out = chart_.opponent; return true; }
+    if (c == "PlayState.SONG.gfVersion" || c == "PlayState.SONG.player3") { out = chart_.gf; return true; }
+    if (c == "PlayState.SONG.stage") { out = stageName_; return true; }
+    if (c == "PlayState.SONG.needsVoices") return flag(prep_.voiceP != nullptr || prep_.voiceO != nullptr);
+    if (c == "MainMenuState.psychEngineVersion") { out = std::string("0.7.3"); return true; }
+    if (c == "GameOverSubstate.characterName") { out = std::string("bf-dead"); return true; }
+    if (c == "GameOverSubstate.deathSoundName") { out = std::string("fnf_loss_sfx"); return true; }
+    if (c == "GameOverSubstate.loopSoundName") { out = std::string("gameOver"); return true; }
+    if (c == "GameOverSubstate.endSoundName") { out = std::string("gameOverEnd"); return true; }
+    if (c == "ClientPrefs.noteSplashes") return flag(s.noteSplashes);
+    if (c == "ClientPrefs.enableColorShader" || c == "ClientPrefs.charsAndBG" || c == "ClientPrefs.showNotes") return flag(true);
+    if (c == "ClientPrefs.oldSusStyle" || c == "ClientPrefs.ffmpegMode" || c == "ClientPrefs.showcaseMode" ||
+        c == "ClientPrefs.lessBotLag" || c == "ClientPrefs.ezSpam")
+        return flag(false);
+    if (c == "ClientPrefs.ratingOffset" || c.rfind("ClientPrefs.comboOffset[", 0) == 0) return num(0);
+    if (c == "ClientPrefs.sickWindow") return num(45);
+    if (c == "ClientPrefs.goodWindow") return num(90);
+    if (c == "ClientPrefs.badWindow") return num(135);
+    if (c == "ClientPrefs.safeFrames") return num(10);
+    if (c == "ClientPrefs.iconBounceType") { out = std::string("Psych"); return true; }
     if (c == "ClientPrefs.downScroll") return flag(s.downscroll);
     if (c == "ClientPrefs.middleScroll") return flag(s.middlescroll);
     if (c == "ClientPrefs.ghostTapping") return flag(s.ghostTapping);
@@ -1297,8 +1403,42 @@ bool PlayState::setGameProp(std::string_view path, const Value& v) {
     if (path == "cpuControlled" || path == "botPlay") { session_.setBotplay(scene::toBool(v)); cfg_.botplay = scene::toBool(v); return true; }
     if (path == "practiceMode") { session_.setPractice(scene::toBool(v)); cfg_.practice = scene::toBool(v); return true; }
     if (path == "inCutscene") { inCutscene_ = scene::toBool(v); return true; }
-    if (path == "class:FlxG.sound.music.volume") { app().mixer.setTrackVolume(Mixer::kInst, float(d)); return true; }
-    return false;
+    if (path.rfind("class:", 0) != 0) return false;
+    const std::string_view c = path.substr(6);
+    if (c == "FlxG.sound.music.volume") { app().mixer.setTrackVolume(Mixer::kInst, float(d)); return true; }
+    if (c == "FlxG.width" || c == "Lib.current.stage.stageWidth" || c == "Lib.application.window.width" ||
+        c == "Application.current.window.width") {
+        // Only the game's width matters here; the window keeps its size.
+        if (c == "FlxG.width") setGameWidth(float(d));
+        return true;
+    }
+    if (c == "PlayState.SONG.speed") {
+        const Settings& s = app().settings;
+        if (s.scrollSpeed <= 0.001f && d > 0 && chart_.speed > 0) speedMult_ = d / chart_.speed;
+        return true;
+    }
+    // Live values (song position, music, input) are not overwritten by a stored copy.
+    for (std::string_view live : {"Conductor.", "FlxG.sound.", "FlxG.mouse.", "FlxG.keys.", "FlxG.elapsed", "FlxG.game."})
+        if (c.rfind(live, 0) == 0) return true;
+    classVars_[std::string(c)] = v;  // window position, title, GameOverSubstate names...: kept for reading back
+    return true;
+}
+
+void PlayState::setGameWidth(float w) {
+    if (!(w > 0)) return;
+    gameW_ = clampv(w, 320.0f, gfx::W);
+    if (countdownStarted_ || !scene_) return;
+    // Psych lays the strums out when the countdown starts, from FlxG.width.
+    layoutStrums();
+    if (!scripts_) return;
+    for (int i = 0; i < chart_.keys && i < 9; ++i) {
+        const scene::Strum& p = strum(1, i);
+        const scene::Strum& o = strum(0, i);
+        scripts_->setGlobal(TextFormat("defaultPlayerStrumX%d", i), double(p.x));
+        scripts_->setGlobal(TextFormat("defaultPlayerStrumY%d", i), double(p.y));
+        scripts_->setGlobal(TextFormat("defaultOpponentStrumX%d", i), double(o.x));
+        scripts_->setGlobal(TextFormat("defaultOpponentStrumY%d", i), double(o.y));
+    }
 }
 
 void PlayState::triggerEvent(const std::string& name, const std::string& v1, const std::string& v2) {
@@ -1392,17 +1532,9 @@ bool PlayState::mouseState(std::string_view button, int mode) {
     return !mouseNow_[b] && prevMouse_[b];
 }
 
-float PlayState::mouseX() {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-    const float s = std::min(sw / gfx::W, sh / gfx::H);
-    return (GetMousePosition().x - (sw - gfx::W * s) * 0.5f) / s;
-}
+float PlayState::mouseX() { return gfx::toCanvas(GetMousePosition()).x; }
 
-float PlayState::mouseY() {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
-    const float s = std::min(sw / gfx::W, sh / gfx::H);
-    return (GetMousePosition().y - (sh - gfx::H * s) * 0.5f) / s;
-}
+float PlayState::mouseY() { return gfx::toCanvas(GetMousePosition()).y; }
 
 LaneNote* PlayState::noteRef(std::string_view group, int index, int* sideOut, int* laneOut) {
     if (index < 0) return nullptr;
@@ -1428,7 +1560,11 @@ LaneNote* PlayState::noteRef(std::string_view group, int index, int* sideOut, in
     return &lane[r.idx];
 }
 
+// Psych's eventNotes: the chart events that have not fired yet.
+static bool isEventGroup(std::string_view g) { return equalsI(g, "eventNotes"); }
+
 int PlayState::noteCount(std::string_view group) {
+    if (isEventGroup(group)) return int(chart_.events.size() - std::min(eventIdx_, chart_.events.size()));
     const double spawn = 2000.0 * rate_ / std::max(0.1, std::min(1.0, scrollSpeed()));
     const auto& notes = chart_.notes;
     const size_t k = size_t(std::upper_bound(notes.begin(), notes.end(), songMs_ + spawn,
@@ -1440,6 +1576,17 @@ int PlayState::noteCount(std::string_view group) {
 }
 
 bool PlayState::noteGet(std::string_view group, int index, std::string_view f, Value& out) {
+    if (isEventGroup(group)) {
+        const size_t i = eventIdx_ + size_t(std::max(0, index));
+        if (index < 0 || i >= chart_.events.size()) return false;
+        const psych::ChartEvent& e = chart_.events[i];
+        if (f == "strumTime") { out = e.timeMs; return true; }
+        if (f == "event") { out = e.name; return true; }
+        if (f == "value1") { out = e.v1; return true; }
+        if (f == "value2") { out = e.v2; return true; }
+        if (f == "value3") { out = std::string(); return true; }
+        return false;
+    }
     int side = 0, lane = 0;
     LaneNote* n = noteRef(group, index, &side, &lane);
     if (!n) return false;
@@ -1476,6 +1623,16 @@ bool PlayState::noteGet(std::string_view group, int index, std::string_view f, V
 }
 
 bool PlayState::noteSet(std::string_view group, int index, std::string_view f, const Value& v) {
+    if (isEventGroup(group)) {
+        const size_t i = eventIdx_ + size_t(std::max(0, index));
+        if (index < 0 || i >= chart_.events.size()) return false;
+        psych::ChartEvent& e = chart_.events[i];
+        if (f == "strumTime") e.timeMs = scene::toNum(v, e.timeMs);  // order is kept: Psych does not re-sort either
+        else if (f == "event") e.name = scene::toStr(v);
+        else if (f == "value1") e.v1 = scene::toStr(v);
+        else if (f == "value2") e.v2 = scene::toStr(v);
+        return true;
+    }
     LaneNote* n = noteRef(group, index);
     if (!n) return false;
     auto bit = [&](uint8_t b) {

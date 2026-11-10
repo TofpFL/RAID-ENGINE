@@ -52,6 +52,15 @@ float frand(unsigned& s) {
     s = s * 1664525u + 1013904223u;
     return float((s >> 8) & 0xFFFF) / 65535.0f * 2.0f - 1.0f;
 }
+
+// PlayState.boyfriendCameraOffset / opponentCameraOffset / girlfriendCameraOffset
+// (the stage's camera offsets), by lower-case name.
+const float* camOffsetOf(const psych::StageDef& st, const std::string& lower) {
+    if (lower == "boyfriendcameraoffset") return st.camBf;
+    if (lower == "opponentcameraoffset") return st.camDad;
+    if (lower == "girlfriendcameraoffset") return st.camGf;
+    return nullptr;
+}
 }  // namespace
 
 double toNum(const Value& v, double def) {
@@ -759,10 +768,22 @@ bool Scene::getProp(std::string_view path, Value& out) const {
     const std::string h = toLower(head);
     Scene* self = const_cast<Scene*>(this);
     if (Camera* c = self->camera(head); c && !rest.empty()) return c->get(rest, out);
-    if (h == "camfollow" || h == "camfollowpos") {
+    // camFollow is where the camera is heading; camFollowPos (Psych 0.6,
+    // JS Engine) is where it is now: the centre of camGame.
+    if (h == "camfollow") {
         if (rest == "x") { out = double(followX); return true; }
         if (rest == "y") { out = double(followY); return true; }
         return false;
+    }
+    if (h == "camfollowpos") {
+        if (rest == "x") { out = double(camGame.scrollX + kW * 0.5f); return true; }
+        if (rest == "y") { out = double(camGame.scrollY + kH * 0.5f); return true; }
+        return false;
+    }
+    if (const float* off = camOffsetOf(stage, h)) {  // boyfriendCameraOffset[0] and friends
+        if (rest != "[0]" && rest != "[1]") return false;
+        out = double(off[rest == "[1]" ? 1 : 0]);
+        return true;
     }
     if (path == "defaultCamZoom") { out = defaultCamZoom; return true; }
     if (path == "cameraSpeed") { out = cameraSpeed; return true; }
@@ -806,10 +827,20 @@ bool Scene::setProp(std::string_view path, const Value& v) {
     splitHead(path, head, rest);
     const std::string h = toLower(head);
     if (Camera* c = camera(head); c && !rest.empty()) return c->set(rest, v);
-    if (h == "camfollow" || h == "camfollowpos") {
+    if (h == "camfollow") {
         if (rest == "x") { followX = float(toNum(v)); return true; }
         if (rest == "y") { followY = float(toNum(v)); return true; }
         return false;
+    }
+    if (h == "camfollowpos") {  // moves the camera itself
+        if (rest == "x") { camGame.scrollX = float(toNum(v)) - kW * 0.5f; return true; }
+        if (rest == "y") { camGame.scrollY = float(toNum(v)) - kH * 0.5f; return true; }
+        return false;
+    }
+    if (const float* off = camOffsetOf(stage, h)) {
+        if (rest != "[0]" && rest != "[1]") return false;
+        const_cast<float*>(off)[rest == "[1]" ? 1 : 0] = float(toNum(v));
+        return true;
     }
     if (path == "defaultCamZoom") { defaultCamZoom = toNum(v, defaultCamZoom); return true; }
     if (path == "cameraSpeed") { cameraSpeed = toNum(v, 1); return true; }
@@ -958,9 +989,19 @@ void Scene::update(double dt, double stepMs, bool playerHolding) {
     camGame.scrollX = approach(camGame.scrollX, tx, rate, float(dt));
     camGame.scrollY = approach(camGame.scrollY, ty, rate, float(dt));
     if (camZooming) {
+        // The zoom drifts back to its default, except while a tween (a zoom
+        // event, a script) is moving it: the tween wins.
+        auto tweened = [&](const Camera& c) {
+            for (const Tween& t : tweens) {
+                if (t.delay > 0 || camera(t.target) != &c) continue;
+                for (const Tween::Field& f : t.fields)
+                    if (f.name == "zoom") return true;
+            }
+            return false;
+        };
         const float zr = float(3.125 * camZoomingDecay);
-        camGame.zoom = approach(camGame.zoom, float(defaultCamZoom), zr, float(dt));
-        camHud.zoom = approach(camHud.zoom, 1.0f, zr, float(dt));
+        if (!tweened(camGame)) camGame.zoom = approach(camGame.zoom, float(defaultCamZoom), zr, float(dt));
+        if (!tweened(camHud)) camHud.zoom = approach(camHud.zoom, 1.0f, zr, float(dt));
     }
 }
 

@@ -34,6 +34,8 @@ constexpr uint16_t kMaxStack = 65535;
 
 struct TempoPoint { double timeMs = 0; double bpm = 120; double beat = 0; };
 struct FocusPoint { double timeMs = 0; uint8_t side = 0; };
+// A section of a legacy/Psych chart (Psych's SONG.notes[i]).
+struct SectionInfo { double timeMs = 0; bool mustHit = true, gf = false, alt = false; };
 
 struct Chart {
     std::string title;
@@ -48,6 +50,7 @@ struct Chart {
     std::vector<Note> notes;   // sorted by time
     std::vector<TempoPoint> tempo;
     std::vector<FocusPoint> focus;
+    std::vector<SectionInfo> sections;  // empty for V-Slice charts and built-in songs
     double lengthMs = 0;       // end of the last note
     uint64_t playerNotes = 0, opponentNotes = 0;  // stacked notes included
     uint64_t rawNoteCount = 0;  // notes in the file, before stacked notes were merged
@@ -57,6 +60,7 @@ struct Chart {
     double msAtBeat(double beat) const;
     double stepMs(double ms) const { return 15000.0 / bpmAt(ms); }
     int focusAt(double ms) const;  // side the camera should follow
+    int sectionAt(double ms) const;  // index into sections (-1: before the first, or none)
 
     // Sorts notes, removes stacked duplicates, fills tempo beats and stats.
     void finalize(double baseBpm);
