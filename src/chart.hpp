@@ -35,7 +35,11 @@ constexpr uint16_t kMaxStack = 65535;
 struct TempoPoint { double timeMs = 0; double bpm = 120; double beat = 0; };
 struct FocusPoint { double timeMs = 0; uint8_t side = 0; };
 // A section of a legacy/Psych chart (Psych's SONG.notes[i]).
-struct SectionInfo { double timeMs = 0; bool mustHit = true, gf = false, alt = false; };
+struct SectionInfo {
+    double timeMs = 0;
+    bool mustHit = true, gf = false, alt = false;
+    double beats = 4, bpm = 0;  // length in beats, tempo in force (the chart editor keeps both)
+};
 
 struct Chart {
     std::string title;

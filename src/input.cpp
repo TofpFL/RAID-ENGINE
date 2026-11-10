@@ -22,6 +22,7 @@ void Input::poll(double now) {
         if (IsMouseButtonReleased(b)) mousePend_[b] |= 2;
     }
     wheelPend_ += GetMouseWheelMove();
+    for (int c = GetCharPressed(); c != 0; c = GetCharPressed()) charsPend_.push_back(char32_t(c));
     if (IsGamepadAvailable(0)) {
         for (int b = 1; b < 18; ++b) {
             const int code = kPadBase + b;
@@ -55,6 +56,8 @@ void Input::beginFrame(double dt) {
     }
     wheel_ = wheelPend_;
     wheelPend_ = 0;
+    chars_.swap(charsPend_);
+    charsPend_.clear();
     static const int navKeys[4][3] = {
         {KEY_UP, KEY_W, kPadBase + GAMEPAD_BUTTON_LEFT_FACE_UP},
         {KEY_DOWN, KEY_S, kPadBase + GAMEPAD_BUTTON_LEFT_FACE_DOWN},

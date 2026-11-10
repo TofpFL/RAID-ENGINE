@@ -1,6 +1,8 @@
-// Chart editor (Freeplay: 7). A Psych-style grid: opponent lanes on the left,
-// player lanes on the right, time flowing down past a fixed line. Saves
-// legacy/Psych 0.x JSON that this game and Psych Engine both read.
+// Chart editor (Freeplay: 7). A Psych / JS Engine style grid: an event lane,
+// the opponent's lanes, then the player's, time flowing down past a fixed
+// line; tabs on the right edit the song, the section under the line, the
+// selected notes, the events and playback. Saves legacy/Psych 0.x JSON that
+// this game, Psych Engine and JS Engine all read.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -8,12 +10,15 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <map>
+#include <random>
 
 #include "app.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
 #include "raylib.h"
+#include "scene.hpp"
 
 namespace gh {
 
@@ -28,19 +33,62 @@ std::string pathStr(const fs::path& p) {
     return std::string(s.begin(), s.end());
 }
 
-const char* kNoteTypes[] = {"", "Alt Animation", "Hurt Note", "GF Sing", "No Animation", "Hey!"};
+const char* kBaseNoteTypes[] = {"", "Alt Animation", "Hurt Note", "GF Sing", "No Animation", "Hey!"};
 const int kSnaps[] = {4, 8, 12, 16, 24, 32, 48, 64, 96, 192};
+
+// Built-in events (Psych Engine and JS Engine), with what their values do.
+struct EventInfo {
+    const char* name;
+    const char* help;
+};
+const EventInfo kEvents[] = {
+    {"Hey!", "Value 1: BF, GF or empty for both. Value 2: seconds (default 0.6)."},
+    {"Set GF Speed", "Value 1: beats per head bop (1 normal, 2 half speed...)."},
+    {"Add Camera Zoom", "Value 1: game zoom to add (0.015). Value 2: HUD zoom to add (0.03)."},
+    {"Set Camera Zoom", "Value 1: new default zoom ('default' or empty: the stage's)."},
+    {"Tween Camera Zoom", "Value 1: zoom ('default' or empty: the stage's). Value 2: 'seconds, ease'."},
+    {"Camera Bopping", "Value 1: beats between bops (4). Value 2: strength (1)."},
+    {"Enable Camera Bop", "The camera bops on beats from here on."},
+    {"Disable Camera Bop", "The camera stops bopping and returns to its zoom."},
+    {"Camera Twist", "Value 1: strength. Value 2: 0 stops the twist, anything else starts it."},
+    {"Camera Follow Pos", "Value 1: X, Value 2: Y. Both empty: back to following the singer."},
+    {"Screen Shake", "Values 1 (camera) and 2 (HUD): 'seconds, strength', e.g. '1, 0.05'."},
+    {"Play Animation", "Value 1: animation. Value 2: BF, GF or Dad (default Dad)."},
+    {"Alt Idle Animation", "Value 1: BF, GF or Dad. Value 2: idle suffix, e.g. -alt."},
+    {"Change Character", "Value 1: BF, GF or Dad. Value 2: the new character's name."},
+    {"Change Scroll Speed", "Value 1: speed multiplier (1). Value 2: seconds to get there."},
+    {"Change Note Multiplier", "Value 1: notes counted per hit. Value 2: 1 opponent, 2 player, empty both."},
+    {"Fake Song Length", "Value 1: seconds shown on the time bar (empty: the real length). Value 2: 'true' to tween."},
+    {"Change Song Name", "Value 1: name on the time bar (empty: the real one)."},
+    {"Credits Popup", "Value 1: title (empty: the song). Value 2: composer(s)."},
+    {"Popup", "Value 1: title. Value 2: message. The song waits until it is closed."},
+    {"Popup (No Pause)", "Value 1: title. Value 2: message. The song keeps going."},
+    {"Windows Notification", "Value 1: title. Value 2: message (shown in the game)."},
+    {"Rainbow Eyesore", "Flashing colours until a step. Value 1: last step. Value 2: speed."},
+    {"Enable Bot Energy", "The player can hold CTRL (BOT on touch) to let the bot play while energy lasts."},
+    {"Disable Bot Energy", "Turns bot energy off."},
+    {"Set Bot Energy Speeds", "Value 1: drain speed (1). Value 2: refill speed (1)."},
+    {"Set Property", "Value 1: property (e.g. camGame.alpha). Value 2: new value."},
+    {"Play Sound", "Value 1: sound file. Value 2: volume (1)."},
+    {"Philly Glow", "Week 3 only. Value 1: 0 off, 1 on, 2 new colour."},
+    {"Kill Henchmen", "Week 4 only."},
+    {"BG Freaks Expression", "Week 6 (school stage) only."},
+    {"Trigger BG Ghouls", "Week 6 (evil school stage) only."},
+    {"Dadbattle Spotlight", "Week 1 only. Value 1: 0/1 off/on, 2 Dad, 3 BF."},
+};
 
 struct EdNote {
     double t = 0;
     int col = 0;  // 0..K-1 opponent, K..2K-1 player
     double len = 0;
     std::string type;
+    int stack = 1;  // notes of the file stacked here (written back that many times)
+    bool sel = false;
 };
 
 struct EdSection {
     bool mustHit = true, altAnim = false, gf = false;
-    double bpm = 120;
+    double bpm = 120, beats = 4;
 };
 
 bool writeWav(const std::string& path, const Pcm& p) {
@@ -81,6 +129,149 @@ std::string num(double v) {
     return s;
 }
 
+std::string utf8(char32_t c) {
+    std::string o;
+    if (c < 0x80) o += char(c);
+    else if (c < 0x800) { o += char(0xC0 | (c >> 6)); o += char(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { o += char(0xE0 | (c >> 12)); o += char(0x80 | ((c >> 6) & 0x3F)); o += char(0x80 | (c & 0x3F)); }
+    else { o += char(0xF0 | (c >> 18)); o += char(0x80 | ((c >> 12) & 0x3F)); o += char(0x80 | ((c >> 6) & 0x3F)); o += char(0x80 | (c & 0x3F)); }
+    return o;
+}
+
+void popUtf8(std::string& s) {
+    while (!s.empty()) {
+        const unsigned char c = (unsigned char)s.back();
+        s.pop_back();
+        if ((c & 0xC0) != 0x80) break;
+    }
+}
+
+const Color kPanel{12, 8, 20, 232};
+const Color kInk{232, 226, 246, 255};
+const Color kDim{170, 160, 196, 255};
+const Color kAccent{255, 214, 120, 255};
+
+// Immediate-mode widgets for the side panel (canvas coordinates).
+struct Ui {
+    Vector2 mouse{};
+    bool click = false, rclick = false;
+    float wheel = 0;
+    const Input* in = nullptr;
+    std::string focus;  // id of the text field being typed into
+    bool used = false;  // the mouse did something in the panel this frame
+
+    bool hover(Rectangle r) const { return CheckCollisionPointRec(mouse, r); }
+    void box(Rectangle r, bool on = false, bool hot = false) const {
+        DrawRectangleRounded(r, 0.25f, 6, on ? Color{90, 66, 140, 255} : hot ? Color{58, 44, 88, 255} : Color{36, 28, 56, 255});
+        DrawRectangleRoundedLinesEx(r, 0.25f, 6, 1.5f, on ? kAccent : Color{110, 92, 150, 200});
+    }
+    bool button(Rectangle r, const std::string& label, bool on = false) {
+        const bool h = hover(r);
+        box(r, on, h);
+        gfx::text(FontId::Ui, label, r.x + r.width * 0.5f, r.y + (r.height - 18) * 0.5f, 18, kInk, Align::Center);
+        if (h && click) {
+            used = true;
+            focus.clear();
+            return true;
+        }
+        return false;
+    }
+    bool check(Rectangle r, const std::string& label, bool& v) {
+        const Rectangle b{r.x, r.y + (r.height - 18) * 0.5f, 18, 18};
+        const bool h = hover(r);
+        box(b, v, h);
+        if (v) gfx::text(FontId::Ui, "x", b.x + 9, b.y - 1, 18, kAccent, Align::Center);
+        gfx::text(FontId::Ui, label, r.x + 28, r.y + (r.height - 18) * 0.5f, 18, kInk);
+        if (h && click) {
+            v = !v;
+            used = true;
+            focus.clear();
+            return true;
+        }
+        return false;
+    }
+    // label  [-] value [+]   (the wheel over it works too)
+    bool stepper(Rectangle r, const std::string& label, double& v, double step, double lo, double hi, const char* fmt) {
+        gfx::text(FontId::Ui, label, r.x, r.y + (r.height - 18) * 0.5f, 18, kDim);
+        const float bw = 28, vx = r.x + r.width - 150;
+        const Rectangle minus{vx, r.y, bw, r.height}, plus{r.x + r.width - bw, r.y, bw, r.height};
+        bool changed = false;
+        const bool shift = in && (in->isDown(KEY_LEFT_SHIFT) || in->isDown(KEY_RIGHT_SHIFT));
+        const double s = shift ? step * 10 : step;
+        if (button(minus, "-")) { v -= s; changed = true; }
+        if (button(plus, "+")) { v += s; changed = true; }
+        const Rectangle mid{vx + bw + 2, r.y, 150 - 2 * bw - 4, r.height};
+        if (hover(mid) && wheel != 0) {
+            v += (wheel > 0 ? s : -s);
+            changed = true;
+            used = true;
+        }
+        v = clampv(v, lo, hi);
+        box(mid);
+        gfx::text(FontId::Ui, TextFormat(fmt, v), mid.x + mid.width * 0.5f, r.y + (r.height - 18) * 0.5f, 18, kInk, Align::Center);
+        return changed;
+    }
+    // A text field: click to type, ENTER or a click elsewhere to finish.
+    bool text(const std::string& id, Rectangle r, const std::string& label, std::string& s) {
+        float fx = r.x;
+        if (!label.empty()) {
+            gfx::text(FontId::Ui, label, r.x, r.y + (r.height - 18) * 0.5f, 18, kDim);
+            fx = r.x + 92;
+        }
+        const Rectangle f{fx, r.y, r.x + r.width - fx, r.height};
+        const bool h = hover(f);
+        if (h && click) {
+            focus = id;
+            used = true;
+        }
+        const bool on = focus == id;
+        box(f, on, h);
+        bool changed = false;
+        if (on && in) {
+            for (char32_t c : in->typed())
+                if (c >= 32 && c != 127) {
+                    s += utf8(c);
+                    changed = true;
+                }
+            if (in->pressed(KEY_BACKSPACE) && !s.empty()) {
+                popUtf8(s);
+                changed = true;
+            }
+            if (in->pressed(KEY_ENTER) || in->pressed(KEY_KP_ENTER) || in->pressed(KEY_TAB)) focus.clear();
+        }
+        BeginScissorMode(int(gfx::canvasOrigin().x + (f.x + 4) * gfx::canvasScale()), int(gfx::canvasOrigin().y + f.y * gfx::canvasScale()),
+                         int((f.width - 8) * gfx::canvasScale()), int(f.height * gfx::canvasScale()));
+        const std::string shown = s + (on && std::fmod(GetTime(), 1.0) < 0.5 ? "|" : "");
+        const float tw = gfx::measure(FontId::Ui, shown, 18).x;
+        gfx::text(FontId::Ui, shown, std::min(f.x + 6, f.x + f.width - 8 - tw), f.y + (f.height - 18) * 0.5f, 18, kInk);
+        EndScissorMode();
+        return changed;
+    }
+    // label  < option >   (click the arrows, or the wheel over it)
+    bool choice(Rectangle r, const std::string& label, const std::vector<std::string>& opts, int& idx, float labelW = 92) {
+        if (opts.empty()) return false;
+        gfx::text(FontId::Ui, label, r.x, r.y + (r.height - 18) * 0.5f, 18, kDim);
+        const float x0 = r.x + labelW, bw = 28;
+        const Rectangle prev{x0, r.y, bw, r.height}, next{r.x + r.width - bw, r.y, bw, r.height};
+        const Rectangle mid{x0 + bw + 2, r.y, r.width - labelW - 2 * bw - 4, r.height};
+        const int n = int(opts.size());
+        int d = 0;
+        if (button(prev, "<")) d = -1;
+        if (button(next, ">")) d = 1;
+        if (hover(mid) && wheel != 0) {
+            d = wheel > 0 ? -1 : 1;
+            used = true;
+        }
+        if (d) idx = ((idx + d) % n + n) % n;
+        idx = clampv(idx, 0, n - 1);
+        box(mid);
+        const std::string& o = opts[size_t(idx)];
+        gfx::text(FontId::Ui, o.empty() ? "(normal)" : o, mid.x + mid.width * 0.5f, r.y + (r.height - 18) * 0.5f, 18, kInk,
+                  Align::Center);
+        return d != 0;
+    }
+};
+
 }  // namespace
 
 class ChartEditorState : public State {
@@ -104,8 +295,9 @@ public:
     bool wantsMenuMusic() const override { return false; }
     TouchLayout touchLayout() const override {
         TouchLayout t;
+        t.pad = false;
         if (loaded_ && error_.empty())
-            t.keys = {{"PLAY", KEY_SPACE}, {"SAVE", KEY_F2}, {"UNDO", KEY_F3}, {"SECTION -", KEY_A}, {"SECTION +", KEY_D}};
+            t.keys = {{"PLAY", KEY_SPACE}, {"SAVE", KEY_F2}, {"UNDO", KEY_F3}, {"BACK", KEY_ESCAPE}};
         return t;
     }
 
@@ -124,38 +316,50 @@ public:
             return;
         }
         if (!a.autoRun.editorExport.empty()) {  // testing: write the chart and quit
-            std::ofstream(toPath(a.autoRun.editorExport), std::ios::binary) << buildJson();
+            std::ofstream(toPath(a.autoRun.editorExport), std::ios::binary) << buildJson(eventsInChart());
             a.quit = true;
             return;
         }
         (void)dt;
-        const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-        const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        ui_.in = &in;
+        ui_.mouse = gfx::toCanvas(GetMousePosition());
+        ui_.click = in.mousePressed(MOUSE_BUTTON_LEFT) && !(a.touchMode && a.touch.covers(GetMousePosition()));
+        ui_.rclick = in.mousePressed(MOUSE_BUTTON_RIGHT);
+        ui_.wheel = in.wheel();
+        ui_.used = false;
+        typing_ = !ui_.focus.empty();
+        const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
+        const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
 
         // Playback
-        if (in.pressed(KEY_SPACE)) togglePlay();
         if (playing_) {
             const double t = a.mixer.time(a.now) * 1000.0;
-            tickHitsounds(lastT_, t);
+            tickSounds(lastT_, t);
             lastT_ = t;
             cur_ = t;
             if (a.mixer.ended() || cur_ > songLength() + 2000) stopPlay();
         }
+        if (typing_) {
+            if (in.pressed(KEY_ESCAPE)) ui_.focus.clear();
+            return;  // keys go to the text field (the panel still runs in draw)
+        }
+        if (in.pressed(KEY_SPACE)) togglePlay();
 
-        // Navigation
-        const float wheel = in.wheel();
+        // Navigation (the wheel scrolls the grid unless it is over the panel)
+        const bool overPanel = ui_.mouse.x >= kPanelX - 10;
+        const float wheel = overPanel ? 0.0f : in.wheel();
         if (wheel != 0 || in.pressed(KEY_UP) || in.pressed(KEY_DOWN) || in.pressed(KEY_W) || in.pressed(KEY_S)) {
-            if (playing_) stopPlay();
-            int steps = wheel != 0 ? -int(std::round(wheel)) : (in.pressed(KEY_UP) || in.pressed(KEY_W) ? -1 : 1);
-            if (shift) steps *= 4;
-            const double b = snapBeat(beatAt(cur_)) + steps * snapBeats();
-            cur_ = std::max(0.0, msAtBeat(b));
+            if (!(ctrl && in.pressed(KEY_S))) {
+                if (playing_) stopPlay();
+                int steps = wheel != 0 ? -int(std::round(wheel)) : (in.pressed(KEY_UP) || in.pressed(KEY_W) ? -1 : 1);
+                if (shift) steps *= 4;
+                const double b = snapBeat(beatAt(cur_)) + steps * snapBeats();
+                cur_ = std::max(0.0, msAtBeat(b));
+            }
         }
-        if (in.pressed(KEY_A) || in.pressed(KEY_PAGE_UP) || in.pressed(KEY_D) || in.pressed(KEY_PAGE_DOWN)) {
-            if (playing_) stopPlay();
-            const int s = sectionAt(cur_) + ((in.pressed(KEY_A) || in.pressed(KEY_PAGE_UP)) ? -1 : 1);
-            cur_ = sectionStart(std::max(0, s));
-        }
+        if (in.pressed(KEY_A) && !ctrl) gotoSection(sectionAt(cur_) - 1);
+        if (in.pressed(KEY_D) || in.pressed(KEY_PAGE_DOWN)) gotoSection(sectionAt(cur_) + 1);
+        if (in.pressed(KEY_PAGE_UP)) gotoSection(sectionAt(cur_) - 1);
         if (in.pressed(KEY_HOME)) cur_ = 0;
         if (in.pressed(KEY_END)) cur_ = songLength();
         if (in.pressed(KEY_LEFT)) snapIdx_ = std::max(0, snapIdx_ - 1);
@@ -167,6 +371,7 @@ public:
         if ((ctrl && in.pressed(KEY_Z)) || in.pressed(KEY_F3)) undo();
         if (ctrl && in.pressed(KEY_Y)) redo();
         if ((ctrl && in.pressed(KEY_S)) || in.pressed(KEY_F2)) save(false);
+        if (ctrl && in.pressed(KEY_A)) selectSection();
         if (in.pressed(KEY_TAB)) {
             snapshot();
             EdSection& s = section(sectionAt(cur_));
@@ -174,37 +379,33 @@ public:
             dirty_ = true;
         }
         if (in.pressed(KEY_T)) {
-            typeIdx_ = (typeIdx_ + 1) % int(std::size(kNoteTypes));
-            if (EdNote* n = selected()) { snapshot(); n->type = kNoteTypes[typeIdx_]; dirty_ = true; }
+            typeIdx_ = (typeIdx_ + 1) % int(noteTypes_.size());
+            applyToSelection([&](EdNote& n) { n.type = noteTypes_[size_t(typeIdx_)]; });
         }
         if (in.pressed(KEY_Q) || in.pressed(KEY_E)) {
-            if (EdNote* n = selected()) {
-                snapshot();
-                const double stepMs = 60000.0 / bpmAt(n->t) * snapBeats();
-                n->len = std::max(0.0, n->len + (in.pressed(KEY_E) ? stepMs : -stepMs));
-                dirty_ = true;
-            }
+            const bool longer = in.pressed(KEY_E);
+            applyToSelection([&](EdNote& n) {
+                const double stepMs = 60000.0 / bpmAt(n.t) * snapBeats();
+                n.len = std::max(0.0, n.len + (longer ? stepMs : -stepMs));
+            });
         }
         if (in.pressed(KEY_LEFT_BRACKET) || in.pressed(KEY_RIGHT_BRACKET)) {
-            snapshot();
-            const int s = sectionAt(cur_);
-            const double step = shift ? 0.1 : 1.0;
-            const double nb = clampv(section(s).bpm + (in.pressed(KEY_RIGHT_BRACKET) ? step : -step), 10.0, 1000.0);
-            // A BPM change carries on to the following sections that shared the old value.
-            const double old = section(s).bpm;
-            for (size_t i = size_t(s); i < sections_.size() && std::fabs(sections_[i].bpm - old) < 1e-9; ++i) sections_[i].bpm = nb;
-            dirty_ = true;
+            double nb = section(sectionAt(cur_)).bpm + (in.pressed(KEY_RIGHT_BRACKET) ? 1 : -1) * (shift ? 0.1 : 1.0);
+            setSectionBpm(sectionAt(cur_), nb);
         }
         if (in.pressed(KEY_MINUS)) { speed_ = std::max(0.1, std::round((speed_ - 0.1) * 10) / 10); dirty_ = true; }
         if (in.pressed(KEY_EQUAL)) { speed_ = std::min(10.0, std::round((speed_ + 0.1) * 10) / 10); dirty_ = true; }
-        if (ctrl && in.pressed(KEY_C)) copySection();
-        if (ctrl && in.pressed(KEY_V)) pasteSection();
-        if (in.pressed(KEY_DELETE)) clearSection();
+        if (ctrl && in.pressed(KEY_C)) copySelectionOrSection();
+        if (ctrl && in.pressed(KEY_V)) paste();
+        if (in.pressed(KEY_M)) mirror();
+        if (in.pressed(KEY_DELETE)) {
+            if (anySelected()) deleteSelection();
+            else clearSection(true, false);
+        }
         if (in.pressed(KEY_ENTER) || in.pressed(KEY_KP_ENTER)) {
             if (save(true)) return;
         }
-        handleMouse();
-        if (in.back()) {
+        if (in.back() && !in.pressed(KEY_BACKSPACE)) {
             if (dirty_ && a.now - escAt_ > 2.0) {
                 escAt_ = a.now;
                 flash("Unsaved changes: ESC again to leave, Ctrl+S to save");
@@ -233,14 +434,25 @@ public:
             return;
         }
         drawGrid();
-        drawPanels();
+        drawInfo();
+        drawPanel();  // also handles the panel's clicks (immediate mode)
+        if (!ui_.used && !typing_) handleGridMouse();
         if (a.now - flashAt_ < 3.0)
-            gfx::text(FontId::Ui, flash_, gfx::W / 2, gfx::H - 40, 24,
+            gfx::text(FontId::Ui, flash_, kGridCenter, gfx::H - 40, 24,
                       gfx::fade(gfx::rgb(0xFFE08A), float(std::min(1.0, 3.0 - (a.now - flashAt_)))), Align::Center, 1.5f);
         gfx::endCanvas();
     }
 
 private:
+    static constexpr float kPanelX = 880, kGridCenter = 555;
+    struct UndoStep {
+        std::vector<EdNote> notes;
+        std::vector<EdSection> sections;
+        std::vector<psych::ChartEvent> events;
+        double speed = 1;
+    };
+
+
     // --------------------------------------------------------- loading --
     void load(const Prepared& p) {
         const Chart& c = p.chart;
@@ -254,16 +466,30 @@ private:
         inst_ = p.inst;
         voiceP_ = p.voiceP;
         voiceO_ = p.voiceO;
-        // Sections of 4 beats with the BPM in force at their start.
+        needsVoices_ = voiceP_ || voiceO_;
         const double audioMs = inst_ ? double(inst_->frames()) * 1000.0 / Mixer::kRate : 0.0;
         const double endMs = std::max({c.lengthMs + 4000.0, audioMs, 8000.0});
-        double t = 0;
-        while (t < endMs && sections_.size() < 200000) {
-            EdSection s;
-            s.bpm = c.bpmAt(t + 0.01);
-            s.mustHit = c.focusAt(t + 1) == 1;
-            sections_.push_back(s);
-            t += 4 * 60000.0 / s.bpm;
+        if (!c.sections.empty()) {
+            // The chart's own sections, lengths and tempos included.
+            for (const SectionInfo& si : c.sections) {
+                EdSection s;
+                s.mustHit = si.mustHit;
+                s.gf = si.gf;
+                s.altAnim = si.alt;
+                s.beats = si.beats > 0 ? si.beats : 4;
+                s.bpm = si.bpm > 0 ? si.bpm : c.bpmAt(si.timeMs + 0.01);
+                sections_.push_back(s);
+            }
+        } else {
+            // Sections of 4 beats with the BPM in force at their start.
+            double t = 0;
+            while (t < endMs && sections_.size() < 200000) {
+                EdSection s;
+                s.bpm = c.bpmAt(t + 0.01);
+                s.mustHit = c.focusAt(t + 1) == 1;
+                sections_.push_back(s);
+                t += 4 * 60000.0 / s.bpm;
+            }
         }
         notes_.reserve(c.notes.size());
         for (const Note& n : c.notes) {
@@ -273,11 +499,20 @@ private:
             e.len = n.length;
             e.type = n.type < c.noteTypes.size() ? c.noteTypes[n.type] : "";
             if (e.type.empty() && n.kind == kMine) e.type = "Hurt Note";
+            e.stack = std::max<int>(1, n.stack);
             notes_.push_back(e);
         }
         sortNotes();
         events_ = c.events;
+        sortEvents();
         rebuildStarts();
+        // Psych keeps events in events.json when the song has one: keep doing so.
+        if (!entry_->dataDir.empty()) {
+            std::error_code ec;
+            for (const auto& f : fs::directory_iterator(toPath(entry_->dataDir), ec))
+                if (equalsI(pathStr(f.path().filename()), "events.json")) eventsFile_ = pathStr(f.path());
+        }
+        scanNames(c);
         loaded_ = true;
         App& a = app();
         a.mixer.setTracks(inst_, voiceP_, voiceO_);
@@ -286,50 +521,94 @@ private:
         else if (entry_->autoChart) flash("AutoChart draft: save to keep it as a real chart");
     }
 
+    // Note types and events offered in the lists: the built-in ones, the
+    // mod's custom_notetypes / custom_events, and whatever the chart uses.
+    void scanNames(const Chart& c) {
+        scene::Files files;
+        std::vector<std::string> roots = entry_->assetRoots;
+        if (roots.empty() && !entry_->modRoot.empty()) roots.push_back(entry_->modRoot);
+        roots.push_back(app().base + "mods/");
+        files.setRoots(roots);
+        auto addUnique = [](std::vector<std::string>& v, const std::string& s) {
+            if (std::find(v.begin(), v.end(), s) == v.end()) v.push_back(s);
+        };
+        auto stem = [](const std::string& path) {
+            std::string n = pathStr(toPath(path).filename());
+            const size_t dot = n.rfind('.');
+            return dot == std::string::npos ? n : n.substr(0, dot);
+        };
+        for (const char* t : kBaseNoteTypes) addUnique(noteTypes_, t);
+        for (const char* ext : {".lua", ".hx", ".txt"})
+            for (const std::string& f : files.list("custom_notetypes", ext)) addUnique(noteTypes_, stem(f));
+        for (const std::string& t : c.noteTypes) addUnique(noteTypes_, t);
+        for (const EventInfo& e : kEvents) addUnique(eventNames_, e.name);
+        for (const char* ext : {".lua", ".hx", ".txt"})
+            for (const std::string& f : files.list("custom_events", ext)) {
+                const std::string n = stem(f);
+                addUnique(eventNames_, n);
+                if (endsWithI(f, ".txt")) {
+                    std::string text;
+                    if (scene::readFile(f, text)) eventHelp_[n] = trim(text);
+                }
+            }
+        for (const psych::ChartEvent& e : events_) addUnique(eventNames_, e.name);
+    }
+
     // ------------------------------------------------------------ timing --
     void rebuildStarts() {
-        starts_.resize(sections_.size() + 1);
-        starts_[0] = 0;
-        for (size_t i = 0; i < sections_.size(); ++i) starts_[i + 1] = starts_[i] + 4 * 60000.0 / sections_[i].bpm;
+        starts_.assign(sections_.size() + 1, 0.0);
+        beatStarts_.assign(sections_.size() + 1, 0.0);
+        for (size_t i = 0; i < sections_.size(); ++i) {
+            starts_[i + 1] = starts_[i] + sections_[i].beats * 60000.0 / sections_[i].bpm;
+            beatStarts_[i + 1] = beatStarts_[i] + sections_[i].beats;
+        }
     }
     EdSection& section(int i) {
-        while (int(sections_.size()) <= i) {
-            EdSection s = sections_.empty() ? EdSection{} : sections_.back();
-            sections_.push_back(s);
+        i = std::max(0, i);
+        if (int(sections_.size()) <= i) {
+            while (int(sections_.size()) <= i) {
+                EdSection s = sections_.empty() ? EdSection{} : sections_.back();
+                s.altAnim = s.gf = false;
+                sections_.push_back(s);
+            }
+            rebuildStarts();
         }
-        return sections_[size_t(std::max(0, i))];
+        return sections_[size_t(i)];
     }
+    double lastBpm() const { return sections_.empty() ? 120 : sections_.back().bpm; }
+    double lastBeats() const { return sections_.empty() ? 4 : sections_.back().beats; }
     int sectionAt(double ms) {
         if (starts_.size() != sections_.size() + 1) rebuildStarts();
         if (ms < 0) return 0;
         const auto it = std::upper_bound(starts_.begin(), starts_.end(), ms);
         int i = int(it - starts_.begin()) - 1;
-        if (i >= int(sections_.size())) {
-            // Past the end: extend with the last tempo.
-            const double last = sections_.empty() ? 120 : sections_.back().bpm;
-            i = int(sections_.size()) + int((ms - starts_.back()) / (4 * 60000.0 / last));
-        }
+        if (i >= int(sections_.size())) i = int(sections_.size()) + int((ms - starts_.back()) / (lastBeats() * 60000.0 / lastBpm()));
         return std::max(0, i);
     }
     double sectionStart(int i) {
         if (starts_.size() != sections_.size() + 1) rebuildStarts();
-        if (i < int(starts_.size())) return starts_[size_t(i)];
-        const double last = sections_.empty() ? 120 : sections_.back().bpm;
-        return starts_.back() + (i - int(sections_.size())) * 4 * 60000.0 / last;
+        if (i < int(starts_.size())) return starts_[size_t(std::max(0, i))];
+        return starts_.back() + (i - int(sections_.size())) * lastBeats() * 60000.0 / lastBpm();
+    }
+    double sectionBeatStart(int i) {
+        if (i < int(beatStarts_.size())) return beatStarts_[size_t(std::max(0, i))];
+        return beatStarts_.back() + (i - int(sections_.size())) * lastBeats();
     }
     double bpmAt(double ms) {
         const int s = sectionAt(ms);
-        return s < int(sections_.size()) ? sections_[size_t(s)].bpm : (sections_.empty() ? 120 : sections_.back().bpm);
+        return s < int(sections_.size()) ? sections_[size_t(s)].bpm : lastBpm();
     }
     double beatAt(double ms) {
         const int s = sectionAt(ms);
-        return s * 4.0 + (ms - sectionStart(s)) * bpmAt(ms) / 60000.0;
+        return sectionBeatStart(s) + (ms - sectionStart(s)) * bpmAt(ms) / 60000.0;
     }
     double msAtBeat(double beat) {
         if (beat <= 0) return beat * 60000.0 / bpmAt(0);
-        const int s = int(std::floor(beat / 4.0));
-        const double bpm = s < int(sections_.size()) ? sections_[size_t(s)].bpm : (sections_.empty() ? 120 : sections_.back().bpm);
-        return sectionStart(s) + (beat - s * 4.0) * 60000.0 / bpm;
+        int s;
+        if (beat < beatStarts_.back()) s = int(std::upper_bound(beatStarts_.begin(), beatStarts_.end(), beat) - beatStarts_.begin()) - 1;
+        else s = int(sections_.size()) + int((beat - beatStarts_.back()) / lastBeats());
+        const double bpm = s < int(sections_.size()) ? sections_[size_t(s)].bpm : lastBpm();
+        return sectionStart(s) + (beat - sectionBeatStart(s)) * 60000.0 / bpm;
     }
     double snapBeats() const { return 4.0 / kSnaps[snapIdx_]; }
     double snapBeat(double b) const { return std::round(b / snapBeats()) * snapBeats(); }
@@ -338,6 +617,19 @@ private:
         if (!notes_.empty()) l = std::max(l, notes_.back().t + notes_.back().len);
         return l;
     }
+    void gotoSection(int s) {
+        if (playing_) stopPlay();
+        cur_ = sectionStart(std::max(0, s));
+    }
+    // A section's tempo; the following sections that shared the old one follow.
+    void setSectionBpm(int s, double bpm) {
+        bpm = clampv(bpm, 10.0, 2000.0);
+        snapshot();
+        const double old = section(s).bpm;
+        for (size_t i = size_t(s); i < sections_.size() && std::fabs(sections_[i].bpm - old) < 1e-9; ++i) sections_[i].bpm = bpm;
+        rebuildStarts();
+        dirty_ = true;
+    }
 
     // ------------------------------------------------------------ editing --
     void sortNotes() {
@@ -345,37 +637,66 @@ private:
             return a.t != b.t ? a.t < b.t : a.col < b.col;
         });
     }
+    void sortEvents() {
+        std::stable_sort(events_.begin(), events_.end(),
+                         [](const psych::ChartEvent& a, const psych::ChartEvent& b) { return a.timeMs < b.timeMs; });
+    }
     void snapshot() {
-        undo_.push_back({notes_, sections_, speed_});
+        undo_.push_back({notes_, sections_, events_, speed_});
         const size_t cap = notes_.size() > 200000 ? 4 : 60;
         while (undo_.size() > cap) undo_.erase(undo_.begin());
         redo_.clear();
     }
-    void undo() {
-        if (undo_.empty()) return;
-        redo_.push_back({notes_, sections_, speed_});
-        notes_ = std::move(undo_.back().notes);
-        sections_ = std::move(undo_.back().sections);
-        speed_ = undo_.back().speed;
-        undo_.pop_back();
+    void restore(std::vector<UndoStep>& from, std::vector<UndoStep>& to, const char* what) {
+        if (from.empty()) return;
+        to.push_back({notes_, sections_, events_, speed_});
+        notes_ = std::move(from.back().notes);
+        sections_ = std::move(from.back().sections);
+        events_ = std::move(from.back().events);
+        speed_ = from.back().speed;
+        from.pop_back();
         rebuildStarts();
-        selected_ = -1;
+        selEvent_ = -1;
         dirty_ = true;
-        flash("Undo");
+        flash(what);
     }
-    void redo() {
-        if (redo_.empty()) return;
-        undo_.push_back({notes_, sections_, speed_});
-        notes_ = std::move(redo_.back().notes);
-        sections_ = std::move(redo_.back().sections);
-        speed_ = redo_.back().speed;
-        redo_.pop_back();
-        rebuildStarts();
-        selected_ = -1;
+    void undo() { restore(undo_, redo_, "Undo"); }
+    void redo() { restore(redo_, undo_, "Redo"); }
+
+    bool anySelected() const {
+        return std::any_of(notes_.begin(), notes_.end(), [](const EdNote& n) { return n.sel; });
+    }
+    EdNote* firstSelected() {
+        for (EdNote& n : notes_)
+            if (n.sel) return &n;
+        return nullptr;
+    }
+    int selectedCount() const {
+        return int(std::count_if(notes_.begin(), notes_.end(), [](const EdNote& n) { return n.sel; }));
+    }
+    void clearSelection() {
+        for (EdNote& n : notes_) n.sel = false;
+    }
+    template <class F>
+    void applyToSelection(F f) {
+        if (!anySelected()) return;
+        snapshot();
+        for (EdNote& n : notes_)
+            if (n.sel) f(n);
+        sortNotes();
         dirty_ = true;
-        flash("Redo");
     }
-    EdNote* selected() { return selected_ >= 0 && selected_ < long(notes_.size()) ? &notes_[size_t(selected_)] : nullptr; }
+    void selectSection() {
+        const int s = sectionAt(cur_);
+        const double a = sectionStart(s), b = sectionStart(s + 1);
+        for (EdNote& n : notes_) n.sel = n.t >= a - 0.5 && n.t < b - 0.5;
+        flash(TextFormat("%d notes selected", selectedCount()));
+    }
+    void deleteSelection() {
+        snapshot();
+        notes_.erase(std::remove_if(notes_.begin(), notes_.end(), [](const EdNote& n) { return n.sel; }), notes_.end());
+        dirty_ = true;
+    }
 
     long findNote(double t, int col, double tolMs) {
         auto lo = std::lower_bound(notes_.begin(), notes_.end(), t - tolMs, [](const EdNote& n, double v) { return n.t < v; });
@@ -383,100 +704,296 @@ private:
             if (it->col == col) return long(it - notes_.begin());
         return -1;
     }
+    long findEvent(double t, double tolMs) {
+        for (size_t i = 0; i < events_.size(); ++i)
+            if (std::fabs(events_[i].timeMs - t) <= tolMs) return long(i);
+        return -1;
+    }
 
-    void copySection() {
-        const int s = sectionAt(cur_);
-        const double a = sectionStart(s), b = sectionStart(s + 1);
+    // Copy: the selected notes (or the section under the line), relative to
+    // the first one's snapped time; paste puts them at the line.
+    void copySelectionOrSection() {
         clipboard_.clear();
-        for (const EdNote& n : notes_)
-            if (n.t >= a - 0.5 && n.t < b - 0.5) {
-                EdNote c = n;
-                c.t -= a;
-                clipboard_.push_back(c);
-            }
+        clipEvents_.clear();
+        double base;
+        if (anySelected()) {
+            base = msAtBeat(snapBeat(beatAt(firstSelected()->t)));
+            for (const EdNote& n : notes_)
+                if (n.sel) clipboard_.push_back(n);
+        } else {
+            const int s = sectionAt(cur_);
+            base = sectionStart(s);
+            const double b = sectionStart(s + 1);
+            for (const EdNote& n : notes_)
+                if (n.t >= base - 0.5 && n.t < b - 0.5) clipboard_.push_back(n);
+            for (const psych::ChartEvent& e : events_)
+                if (e.timeMs >= base - 0.5 && e.timeMs < b - 0.5) clipEvents_.push_back(e);
+        }
+        for (EdNote& n : clipboard_) {
+            n.t -= base;
+            n.sel = false;
+        }
+        for (psych::ChartEvent& e : clipEvents_) e.timeMs -= base;
         flash(TextFormat("Copied %d notes", int(clipboard_.size())));
     }
-    void pasteSection() {
-        if (clipboard_.empty()) return;
+    void paste() {
+        if (clipboard_.empty() && clipEvents_.empty()) return;
         snapshot();
-        const double a = sectionStart(sectionAt(cur_));
+        clearSelection();
+        const double at = anySelected() ? cur_ : msAtBeat(snapBeat(beatAt(cur_)));
         for (EdNote c : clipboard_) {
-            c.t += a;
+            c.t += at;
+            c.sel = true;
             if (findNote(c.t, c.col, 0.5) < 0) notes_.push_back(c);
         }
+        for (psych::ChartEvent e : clipEvents_) {
+            e.timeMs += at;
+            events_.push_back(e);
+        }
         sortNotes();
+        sortEvents();
         dirty_ = true;
         flash(TextFormat("Pasted %d notes", int(clipboard_.size())));
     }
-    void clearSection() {
+    void clearSection(bool notes, bool events) {
         snapshot();
         const int s = sectionAt(cur_);
         const double a = sectionStart(s), b = sectionStart(s + 1);
-        notes_.erase(std::remove_if(notes_.begin(), notes_.end(), [&](const EdNote& n) { return n.t >= a - 0.5 && n.t < b - 0.5; }),
-                     notes_.end());
-        selected_ = -1;
+        if (notes)
+            notes_.erase(std::remove_if(notes_.begin(), notes_.end(), [&](const EdNote& n) { return n.t >= a - 0.5 && n.t < b - 0.5; }),
+                         notes_.end());
+        if (events)
+            events_.erase(std::remove_if(events_.begin(), events_.end(),
+                                         [&](const psych::ChartEvent& e) { return e.timeMs >= a - 0.5 && e.timeMs < b - 0.5; }),
+                          events_.end());
+        selEvent_ = -1;
         dirty_ = true;
     }
-
-    // ------------------------------------------------------------- layout --
-    float laneW() const { return keys_ > 6 ? 40.0f : 52.0f; }
-    float gridX() const { return gfx::W * 0.5f - laneW() * keys_; }
-    float lineY() const { return 220.0f; }
-    float pxPerMs() const { return 0.45f * zoom_; }
-    Vector2 mouse() const { return gfx::toCanvas(GetMousePosition()); }
-    bool mouseCell(int& col, double& t) {
-        const Vector2 m = mouse();
-        const float x0 = gridX();
-        if (m.x < x0 || m.x >= x0 + laneW() * 2 * keys_ || m.y < 40 || m.y > gfx::H) return false;
-        col = int((m.x - x0) / laneW());
-        const double raw = cur_ + (m.y - lineY()) / pxPerMs();
-        t = msAtBeat(snapBeat(beatAt(std::max(0.0, raw))));
-        return t >= 0;
+    // Notes of the selection (or the section) change sides.
+    void swapSides() {
+        const bool sel = anySelected();
+        snapshot();
+        const int s = sectionAt(cur_);
+        const double a = sectionStart(s), b = sectionStart(s + 1);
+        for (EdNote& n : notes_)
+            if (sel ? n.sel : (n.t >= a - 0.5 && n.t < b - 0.5)) n.col = n.col >= keys_ ? n.col - keys_ : n.col + keys_;
+        sortNotes();
+        dirty_ = true;
     }
-
-    void handleMouse() {
-        const Input& in = app().input;
-        int col = 0;
-        double t = 0;
-        // A finger on an on-screen button is not a click on the grid.
-        const bool inGrid = mouseCell(col, t) && !(app().touchMode && app().touch.covers(GetMousePosition()));
-        if (in.mousePressed(MOUSE_BUTTON_LEFT) && inGrid) {
-            const long hit = findNote(t, col, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
-            snapshot();
-            if (hit >= 0) {
-                if (selected_ == hit) {  // second click on a selected note removes it
-                    notes_.erase(notes_.begin() + hit);
-                    selected_ = -1;
-                } else {
-                    selected_ = hit;
-                }
-            } else {
+    // Left becomes right within each side.
+    void mirror() {
+        const bool sel = anySelected();
+        snapshot();
+        const int s = sectionAt(cur_);
+        const double a = sectionStart(s), b = sectionStart(s + 1);
+        for (EdNote& n : notes_)
+            if (sel ? n.sel : (n.t >= a - 0.5 && n.t < b - 0.5)) {
+                const int side = n.col >= keys_ ? 1 : 0, lane = n.col % keys_;
+                n.col = side * keys_ + (keys_ - 1 - lane);
+            }
+        sortNotes();
+        dirty_ = true;
+        flash("Mirrored");
+    }
+    // Copies the notes of the section `back` sections earlier into this one.
+    void copyLastSection(int back) {
+        const int s = sectionAt(cur_), from = s - back;
+        if (from < 0) return;
+        snapshot();
+        const double fa = sectionStart(from), fb = sectionStart(from + 1), to = sectionStart(s);
+        std::vector<EdNote> add;
+        for (const EdNote& n : notes_)
+            if (n.t >= fa - 0.5 && n.t < fb - 0.5) {
+                EdNote c = n;
+                c.t = to + (n.t - fa);
+                c.sel = false;
+                add.push_back(c);
+            }
+        for (const EdNote& c : add)
+            if (findNote(c.t, c.col, 0.5) < 0) notes_.push_back(c);
+        sortNotes();
+        dirty_ = true;
+        flash(TextFormat("Copied %d notes from section %d", int(add.size()), from));
+    }
+    // JS Engine style spam tools: a note on every snap of the section.
+    void fillSection(int pattern, int side) {
+        snapshot();
+        const int s = sectionAt(cur_);
+        const double b0 = sectionBeatStart(s), b1 = sectionBeatStart(s + 1);
+        std::mt19937 r(unsigned(s * 7919 + snapIdx_));
+        int k = 0;
+        for (double b = b0; b < b1 - 1e-6; b += snapBeats(), ++k) {
+            const double t = msAtBeat(b);
+            int lane = 0;
+            if (pattern == 0) lane = fillLane_ % keys_;                       // one lane
+            else if (pattern == 1) lane = k % keys_;                          // stairs
+            else if (pattern == 2) lane = (keys_ - 1) - (k % keys_);          // stairs down
+            else if (pattern == 3) lane = int(r() % unsigned(keys_));         // random
+            else lane = (k % 2) ? keys_ - 1 - (k / 2) % keys_ : (k / 2) % keys_;  // zigzag
+            for (int sd = 0; sd < 2; ++sd) {
+                if (side != 2 && side != sd) continue;
+                const int col = sd * keys_ + lane;
+                if (findNote(t, col, 0.5) >= 0) continue;
                 EdNote n;
                 n.t = t;
                 n.col = col;
-                n.type = kNoteTypes[typeIdx_];
+                n.type = noteTypes_[size_t(typeIdx_)];
+                notes_.push_back(n);
+            }
+        }
+        sortNotes();
+        dirty_ = true;
+        flash(TextFormat("Filled section %d", s));
+    }
+    void setKeys(int k) {
+        k = clampv(k, 1, 9);
+        if (k == keys_) return;
+        snapshot();
+        std::vector<EdNote> kept;
+        int dropped = 0;
+        for (EdNote n : notes_) {
+            const int side = n.col >= keys_ ? 1 : 0, lane = n.col % keys_;
+            if (lane >= k) { ++dropped; continue; }
+            n.col = side * k + lane;
+            kept.push_back(n);
+        }
+        notes_.swap(kept);
+        keys_ = k;
+        dirty_ = true;
+        flash(dropped ? TextFormat("%d keys (%d notes past the last lane removed)", k, dropped) : TextFormat("%d keys", k));
+    }
+
+    // ------------------------------------------------------------- layout --
+    // The event lane and both sides share the space between the panels.
+    float laneW() const { return std::min(48.0f, 590.0f / float(2 * keys_ + 1)); }
+    float gridX() const {
+        const float lw = laneW(), total = float(2 * keys_ + 1) * lw + 10;
+        return 250 + (610 - total) * 0.5f + lw + 10;
+    }
+    float eventX() const { return gridX() - laneW() - 10; }
+    float lineY() const { return 220.0f; }
+    float pxPerMs() const { return 0.45f * zoom_; }
+    double snappedTimeAtY(float y) {
+        const double raw = cur_ + (y - lineY()) / pxPerMs();
+        return msAtBeat(snapBeat(beatAt(std::max(0.0, raw))));
+    }
+    bool mouseCell(int& col, double& t) {
+        const Vector2 m = ui_.mouse;
+        const float x0 = gridX();
+        if (m.x < x0 || m.x >= x0 + laneW() * 2 * keys_ || m.y < 40 || m.y > gfx::H) return false;
+        col = int((m.x - x0) / laneW());
+        t = snappedTimeAtY(m.y);
+        return t >= 0;
+    }
+    bool mouseEventCell(double& t) {
+        const Vector2 m = ui_.mouse;
+        if (m.x < eventX() || m.x >= eventX() + laneW() || m.y < 40 || m.y > gfx::H) return false;
+        t = snappedTimeAtY(m.y);
+        return t >= 0;
+    }
+
+    void handleGridMouse() {
+        const Input& in = app().input;
+        const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
+        const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
+        int col = 0;
+        double t = 0;
+        const bool inGrid = mouseCell(col, t);
+        double et = 0;
+        const bool inEvents = mouseEventCell(et);
+        const double tol = std::max(4.0, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
+        // Event lane: click selects or adds, right click removes.
+        if (inEvents && ui_.click) {
+            const long hit = findEvent(et, tol);
+            if (hit >= 0) {
+                selEvent_ = hit;
+            } else {
+                snapshot();
+                psych::ChartEvent e;
+                e.timeMs = et;
+                e.name = eventNames_.empty() ? std::string("Hey!") : eventNames_[size_t(eventIdx_)];
+                e.v1 = eventV1_;
+                e.v2 = eventV2_;
+                events_.push_back(e);
+                sortEvents();
+                selEvent_ = findEvent(et, 0.01);
+                dirty_ = true;
+            }
+            tab_ = 3;
+            return;
+        }
+        if (inEvents && ui_.rclick) {
+            const long hit = findEvent(et, tol);
+            if (hit >= 0) {
+                snapshot();
+                events_.erase(events_.begin() + hit);
+                selEvent_ = -1;
+                dirty_ = true;
+            }
+            return;
+        }
+        // Box selection: SHIFT + drag on the grid.
+        if (ui_.click && inGrid && shift) {
+            boxing_ = true;
+            boxA_ = ui_.mouse;
+            return;
+        }
+        if (boxing_) {
+            if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                boxing_ = false;
+                const float ya = std::min(boxA_.y, ui_.mouse.y), yb = std::max(boxA_.y, ui_.mouse.y);
+                const float xa = std::min(boxA_.x, ui_.mouse.x), xb = std::max(boxA_.x, ui_.mouse.x);
+                const double ta = cur_ + (ya - lineY()) / pxPerMs(), tb = cur_ + (yb - lineY()) / pxPerMs();
+                const int ca = int((xa - gridX()) / laneW()), cb = int((xb - gridX()) / laneW());
+                if (!ctrl) clearSelection();
+                for (EdNote& n : notes_)
+                    if (n.t >= ta && n.t <= tb && n.col >= ca && n.col <= cb) n.sel = true;
+                flash(TextFormat("%d notes selected", selectedCount()));
+            }
+            return;
+        }
+        if (ui_.click && inGrid) {
+            const long hit = findNote(t, col, tol);
+            if (hit >= 0) {
+                EdNote& n = notes_[size_t(hit)];
+                if (ctrl) {
+                    n.sel = !n.sel;
+                } else if (n.sel && selectedCount() == 1) {  // second click on a selected note removes it
+                    snapshot();
+                    notes_.erase(notes_.begin() + hit);
+                    dirty_ = true;
+                } else {
+                    clearSelection();
+                    n.sel = true;
+                }
+            } else {
+                snapshot();
+                clearSelection();
+                EdNote n;
+                n.t = t;
+                n.col = col;
+                n.type = noteTypes_[size_t(typeIdx_)];
+                n.sel = true;
                 notes_.push_back(n);
                 sortNotes();
-                selected_ = findNote(t, col, 0.01);
                 dragging_ = true;
+                dirty_ = true;
             }
-            dirty_ = true;
+            tab_ = tab_ == 3 ? 2 : tab_;
         }
         if (dragging_ && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             // Drag down to stretch the new note into a hold.
-            if (EdNote* n = selected()) {
-                const double raw = cur_ + (mouse().y - lineY()) / pxPerMs();
-                const double end = msAtBeat(snapBeat(beatAt(std::max(0.0, raw))));
+            if (EdNote* n = firstSelected()) {
+                const double end = snappedTimeAtY(ui_.mouse.y);
                 n->len = std::max(0.0, end - n->t);
             }
         }
         if (in.mouseReleased(MOUSE_BUTTON_LEFT)) dragging_ = false;
-        if (in.mousePressed(MOUSE_BUTTON_RIGHT) && inGrid) {
-            const long hit = findNote(t, col, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
+        if (ui_.rclick && inGrid) {
+            const long hit = findNote(t, col, tol);
             if (hit >= 0) {
                 snapshot();
                 notes_.erase(notes_.begin() + hit);
-                selected_ = -1;
                 dirty_ = true;
             }
         }
@@ -487,6 +1004,8 @@ private:
         if (playing_) { stopPlay(); return; }
         App& a = app();
         a.mixer.setTracks(inst_, voiceP_, voiceO_);
+        a.mixer.setRate(playRate_);
+        applyVolumes();
         a.mixer.play(cur_ / 1000.0);
         playing_ = true;
         lastT_ = cur_;
@@ -496,28 +1015,31 @@ private:
         app().mixer.pause();
         playing_ = false;
     }
-    void tickHitsounds(double from, double to) {
+    void applyVolumes() {
+        Mixer& m = app().mixer;
+        m.setTrackVolume(Mixer::kInst, float(instVol_));
+        m.setTrackVolume(Mixer::kVoicePlayer, muteVoices_ ? 0.0f : float(voiceVol_));
+        m.setTrackVolume(Mixer::kVoiceOpponent, muteVoices_ ? 0.0f : float(voiceVol_));
+    }
+    void tickSounds(double from, double to) {
         if (to <= from || to - from > 500) return;
         auto lo = std::upper_bound(notes_.begin(), notes_.end(), from, [](double v, const EdNote& n) { return v < n.t; });
         int count = 0;
-        for (auto it = lo; it != notes_.end() && it->t <= to && count < 4; ++it, ++count)
-            sfxPlay(it->col >= keys_ ? Sfx::Hit : Sfx::Scroll, it->col >= keys_ ? 0.45f : 0.25f);
+        for (auto it = lo; it != notes_.end() && it->t <= to && count < 4; ++it) {
+            const bool player = it->col >= keys_;
+            if (player ? !hitPlayer_ : !hitOpponent_) continue;
+            sfxPlay(player ? Sfx::Hit : Sfx::Scroll, player ? 0.45f : 0.25f);
+            ++count;
+        }
+        if (metronome_ && std::floor(beatAt(to)) != std::floor(beatAt(from)))
+            sfxPlay(Sfx::Scroll, 0.5f, int(std::floor(beatAt(to))) % 4 == 0 ? 1.4f : 1.0f);
     }
 
     // ------------------------------------------------------------- saving --
-    std::string buildJson() {
-        // Sections up to the last note (at least one).
-        int last = 0;
-        if (!notes_.empty()) last = sectionAt(notes_.back().t);
-        std::string o;
-        o.reserve(notes_.size() * 28 + 4096);
-        o += "{\"song\": {\n  \"song\": " + jsonStr(title_) + ",\n  \"bpm\": " + num(sections_.empty() ? 120 : sections_[0].bpm) +
-             ",\n  \"speed\": " + num(speed_) + ",\n  \"needsVoices\": " + (voiceP_ || voiceO_ ? "true" : "false") +
-             ",\n  \"player1\": " + jsonStr(player_) + ",\n  \"player2\": " + jsonStr(opponent_);
-        if (!gf_.empty()) o += ",\n  \"gfVersion\": " + jsonStr(gf_);
-        if (!stage_.empty()) o += ",\n  \"stage\": " + jsonStr(stage_);
-        if (keys_ != 4) o += ",\n  \"keyCount\": " + std::to_string(keys_) + ",\n  \"mania\": " + std::to_string(keys_ - 1);
-        o += ",\n  \"events\": [";
+    bool eventsInChart() const { return eventsFile_.empty() || !eventsSeparate_; }
+
+    std::string eventsJson() const {
+        std::string o = "[";
         bool firstEv = true;
         for (size_t i = 0; i < events_.size();) {
             const double t = events_[i].timeMs;
@@ -531,20 +1053,38 @@ private:
             o += "]]";
             firstEv = false;
         }
-        o += events_.empty() ? "]" : "\n  ]";
+        return o + (events_.empty() ? "]" : "\n  ]");
+    }
+
+    std::string buildJson(bool withEvents) {
+        // Sections up to the last note or event (at least one).
+        int last = 0;
+        if (!notes_.empty()) last = sectionAt(notes_.back().t);
+        if (!events_.empty()) last = std::max(last, sectionAt(events_.back().timeMs));
+        std::string o;
+        long long total = 0;
+        for (const EdNote& n : notes_) total += n.stack;
+        o.reserve(size_t(total) * 28 + 4096);
+        o += "{\"song\": {\n  \"song\": " + jsonStr(title_) + ",\n  \"bpm\": " + num(sections_.empty() ? 120 : sections_[0].bpm) +
+             ",\n  \"speed\": " + num(speed_) + ",\n  \"needsVoices\": " + (needsVoices_ ? "true" : "false") +
+             ",\n  \"player1\": " + jsonStr(player_) + ",\n  \"player2\": " + jsonStr(opponent_);
+        if (!gf_.empty()) o += ",\n  \"gfVersion\": " + jsonStr(gf_);
+        if (!stage_.empty()) o += ",\n  \"stage\": " + jsonStr(stage_);
+        if (keys_ != 4) o += ",\n  \"keyCount\": " + std::to_string(keys_) + ",\n  \"mania\": " + std::to_string(keys_ - 1);
+        o += ",\n  \"events\": " + (withEvents ? eventsJson() : std::string("[]"));
         o += ",\n  \"notes\": [";
         size_t ni = 0;
         double prevBpm = sections_.empty() ? 120 : sections_[0].bpm;
         for (int s = 0; s <= last; ++s) {
-            const EdSection& sec = section(s);
+            const EdSection sec = section(s);
             const double a = sectionStart(s), b = sectionStart(s + 1);
-            o += std::string(s ? "," : "") + "\n    {\"sectionBeats\": 4, \"lengthInSteps\": 16, \"mustHitSection\": " +
-                 (sec.mustHit ? "true" : "false");
+            o += std::string(s ? "," : "") + "\n    {\"sectionBeats\": " + num(sec.beats) + ", \"lengthInSteps\": " +
+                 std::to_string(int(std::lround(sec.beats * 4))) + ", \"mustHitSection\": " + (sec.mustHit ? "true" : "false");
             if (std::fabs(sec.bpm - prevBpm) > 1e-9) o += ", \"changeBPM\": true, \"bpm\": " + num(sec.bpm);
             else o += ", \"changeBPM\": false, \"bpm\": " + num(sec.bpm);
             prevBpm = sec.bpm;
-            if (sec.altAnim) o += ", \"altAnim\": true";
-            if (sec.gf) o += ", \"gfSection\": true";
+            o += std::string(", \"altAnim\": ") + (sec.altAnim ? "true" : "false");
+            o += std::string(", \"gfSection\": ") + (sec.gf ? "true" : "false");
             o += ", \"sectionNotes\": [";
             bool first = true;
             while (ni < notes_.size() && (notes_[ni].t < b - 0.5 || s == last)) {
@@ -554,10 +1094,13 @@ private:
                 const bool player = n.col >= keys_;
                 const int lane = player ? n.col - keys_ : n.col;
                 const int data = (player == sec.mustHit) ? lane : lane + keys_;
-                o += std::string(first ? "" : ", ") + "[" + num(n.t) + ", " + std::to_string(data) + ", " + num(n.len);
-                if (!n.type.empty()) o += ", " + jsonStr(n.type);
-                o += "]";
-                first = false;
+                std::string one = "[" + num(n.t) + ", " + std::to_string(data) + ", " + num(n.len);
+                if (!n.type.empty()) one += ", " + jsonStr(n.type);
+                one += "]";
+                for (int k = 0; k < std::max(1, n.stack); ++k) {  // stacked notes stay stacked
+                    o += std::string(first ? "" : ", ") + one;
+                    first = false;
+                }
             }
             o += "]}";
         }
@@ -586,6 +1129,12 @@ private:
         return pathStr(toPath(e.dataDir) / toPath(file));
     }
 
+    static bool writeText(const fs::path& p, const std::string& text) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out.write(text.data(), std::streamsize(text.size()));
+        return bool(out);
+    }
+
     bool save(bool playtest) {
         App& a = app();
         const std::string path = savePath();
@@ -609,20 +1158,22 @@ private:
                 if (!fs::exists(dst, ec)) fs::copy_file(audio, dst, ec);
             }
         }
-        const std::string text = buildJson();
-        {
-            std::ofstream out(p, std::ios::binary | std::ios::trunc);
-            out.write(text.data(), std::streamsize(text.size()));
-            if (!out) {
-                flash("Could not save " + path);
-                return false;
-            }
+        if (!writeText(p, buildJson(eventsInChart()))) {
+            flash("Could not save " + path);
+            return false;
+        }
+        if (!eventsInChart()) {
+            const fs::path ep = toPath(eventsFile_);
+            if (!fs::exists(toPath(eventsFile_ + ".bak"), ec)) fs::copy_file(ep, toPath(eventsFile_ + ".bak"), ec);
+            writeText(ep, "{\"song\": {\n  \"events\": " + eventsJson() + ",\n  \"notes\": []\n}}\n");
         }
         dirty_ = false;
-        flash("Saved " + pathStr(p.filename()) + TextFormat(" (%d notes)", int(notes_.size())));
+        long long total = 0;
+        for (const EdNote& n : notes_) total += n.stack;
+        flash("Saved " + pathStr(p.filename()) + " (" + fmtThousands(total) + " notes, " + std::to_string(events_.size()) + " events)");
         // New files: rescan so Freeplay (and the playtest) see the chart.
         std::string id = songId_;
-        if (entry_->builtin || entry_->autoChart || !fs::equivalent(p, toPath(savePath()), ec)) {
+        if (entry_->builtin || entry_->autoChart) {
             a.library.scan(a.base);
             for (const SongEntry& s : a.library.songs())
                 for (const std::string& cp : s.chartPaths)
@@ -651,19 +1202,21 @@ private:
 
     // ------------------------------------------------------------ drawing --
     void drawGrid() {
-        const float lw = laneW(), x0 = gridX(), ly = lineY(), pp = pxPerMs();
+        const float lw = laneW(), x0 = gridX(), ly = lineY(), pp = pxPerMs(), ex = eventX();
         const int cols = 2 * keys_;
         const float gw = lw * cols;
         const double tTop = cur_ - (ly - 40) / pp, tBot = cur_ + (gfx::H - ly) / pp;
-        // Section backgrounds: the camera's side is lighter.
+        // Section backgrounds: the camera's side is lighter, gf sections tinted.
         const int s0 = sectionAt(std::max(0.0, tTop)), s1 = sectionAt(std::max(0.0, tBot));
         for (int s = s0; s <= s1; ++s) {
-            const float ya = ly + float((sectionStart(s) - cur_) * pp), yb = ly + float((sectionStart(s + 1) - cur_) * pp);
-            const bool must = section(s).mustHit;
-            DrawRectangleRec({x0, std::max(40.0f, ya), lw * keys_, std::min(float(gfx::H), yb) - std::max(40.0f, ya)},
-                             must ? Color{28, 22, 40, 255} : Color{44, 34, 66, 255});
-            DrawRectangleRec({x0 + lw * keys_, std::max(40.0f, ya), lw * keys_, std::min(float(gfx::H), yb) - std::max(40.0f, ya)},
-                             must ? Color{44, 34, 66, 255} : Color{28, 22, 40, 255});
+            const float ya = std::max(40.0f, ly + float((sectionStart(s) - cur_) * pp));
+            const float yb = std::min(float(gfx::H), ly + float((sectionStart(s + 1) - cur_) * pp));
+            if (yb <= ya) continue;
+            const EdSection& sec = section(s);
+            const Color on = sec.gf ? Color{54, 40, 52, 255} : Color{44, 34, 66, 255}, off{28, 22, 40, 255};
+            DrawRectangleRec({x0, ya, lw * keys_, yb - ya}, sec.mustHit ? off : on);
+            DrawRectangleRec({x0 + lw * keys_, ya, lw * keys_, yb - ya}, sec.mustHit ? on : off);
+            DrawRectangleRec({ex, ya, lw, yb - ya}, Color{24, 18, 34, 255});
         }
         // Beat / snap lines
         const double b0 = std::floor(beatAt(std::max(0.0, tTop))), b1 = std::ceil(beatAt(std::max(0.0, tBot)));
@@ -671,16 +1224,35 @@ private:
             const float y = ly + float((msAtBeat(b) - cur_) * pp);
             if (y < 40 || y > gfx::H) continue;
             const bool beat = std::fabs(b - std::round(b)) < 1e-6;
-            const bool sec = beat && int(std::round(b)) % 4 == 0;
-            DrawRectangleRec({x0, y - (sec ? 1.5f : 0.5f), gw, sec ? 3.0f : 1.0f},
-                             sec ? Color{170, 140, 220, 200} : beat ? Color{110, 90, 150, 140} : Color{80, 66, 110, 70});
-            if (sec) gfx::text(FontId::Ui, std::to_string(int(std::round(b)) / 4), x0 - 10, y - 10, 18, gfx::fade(WHITE, 0.6f), Align::Right);
+            DrawRectangleRec({ex, y - 0.5f, x0 + gw - ex, 1.0f},
+                             beat ? Color{110, 90, 150, 140} : Color{80, 66, 110, 70});
+        }
+        for (int s = s0; s <= s1 + 1; ++s) {  // section starts, numbered
+            const float y = ly + float((sectionStart(s) - cur_) * pp);
+            if (y < 40 || y > gfx::H) continue;
+            DrawRectangleRec({ex, y - 1.5f, x0 + gw - ex, 3.0f}, Color{170, 140, 220, 200});
+            gfx::text(FontId::Ui, std::to_string(s), ex - 8, y - 10, 18, gfx::fade(WHITE, 0.6f), Align::Right);
         }
         for (int c = 0; c <= cols; ++c)
             DrawRectangleRec({x0 + c * lw - (c == keys_ ? 1.5f : 0.5f), 40, c == keys_ ? 3.0f : 1.0f, gfx::H - 40.0f},
                              c == keys_ ? Color{200, 170, 255, 200} : Color{70, 58, 96, 160});
+        DrawRectangleRec({ex + lw, 40, 1, gfx::H - 40.0f}, Color{70, 58, 96, 160});
+        // Events
+        for (size_t i = 0; i < events_.size(); ++i) {
+            const psych::ChartEvent& e = events_[i];
+            const float y = ly + float((e.timeMs - cur_) * pp);
+            if (y < 30 || y > gfx::H + 20) continue;
+            const bool sel = long(i) == selEvent_;
+            DrawRectangleRounded({ex + 4, y - lw * 0.32f, lw - 8, lw * 0.64f}, 0.3f, 6, sel ? kAccent : Color{150, 120, 220, 255});
+            gfx::text(FontId::Ui, "E", ex + lw * 0.5f, y - 10, 18, Color{20, 12, 36, 255}, Align::Center);
+            if (sel || (i + 1 < events_.size() && events_[i + 1].timeMs == e.timeMs && i + 1 == size_t(selEvent_))) {
+                gfx::text(FontId::Ui, e.name, ex - 8, y + 6, 16, gfx::fade(kAccent, 0.9f), Align::Right);
+            }
+        }
         // Notes in view (sustains first)
         auto lo = std::lower_bound(notes_.begin(), notes_.end(), tTop - 60000.0, [](const EdNote& n, double v) { return n.t < v; });
+        float lastY[18];
+        std::fill(std::begin(lastY), std::end(lastY), -1e9f);
         for (int pass = 0; pass < 2; ++pass) {
             for (auto it = lo; it != notes_.end() && it->t <= tBot; ++it) {
                 const EdNote& n = *it;
@@ -695,93 +1267,340 @@ private:
                     continue;
                 }
                 if (y < 30 || y > gfx::H + 30) continue;
-                const bool sel = selected_ >= 0 && &n == &notes_[size_t(selected_)];
+                // Spam charts: one note per pixel row is enough to see them.
+                if (std::fabs(y - lastY[n.col]) < 1.0f && !n.sel) continue;
+                lastY[n.col] = y;
                 const bool mine = n.type.find("Hurt") != std::string::npos;
                 if (mine) DrawCircleV({cx, y}, lw * 0.32f, Color{220, 40, 60, 255});
                 else gfx::drawNote(dir, {cx, y}, lw * 0.82f, 1.0f);
                 if (!n.type.empty() && !mine) DrawCircleV({cx + lw * 0.3f, y - lw * 0.3f}, 5, gfx::rgb(0xFFD54A));
-                if (sel) DrawRectangleLinesEx({cx - lw * 0.48f, y - lw * 0.48f, lw * 0.96f, lw * 0.96f}, 2, gfx::rgb(0xFFFFFF));
+                if (n.stack > 1)
+                    gfx::text(FontId::Ui, "x" + std::to_string(n.stack), cx + lw * 0.42f, y + 2, 14, kAccent, Align::Right, 1.0f);
+                if (n.sel) DrawRectangleLinesEx({cx - lw * 0.48f, y - lw * 0.48f, lw * 0.96f, lw * 0.96f}, 2, gfx::rgb(0xFFFFFF));
             }
         }
-        // Mouse cursor cell
+        // Mouse cursor cell / selection box
         int col = 0;
         double t = 0;
-        if (mouseCell(col, t)) {
+        if (boxing_) {
+            const Rectangle r{std::min(boxA_.x, ui_.mouse.x), std::min(boxA_.y, ui_.mouse.y), std::fabs(ui_.mouse.x - boxA_.x),
+                              std::fabs(ui_.mouse.y - boxA_.y)};
+            DrawRectangleRec(r, Color{255, 255, 255, 30});
+            DrawRectangleLinesEx(r, 1.5f, Color{255, 255, 255, 160});
+        } else if (mouseCell(col, t)) {
             const float y = ly + float((t - cur_) * pp);
             DrawRectangleRec({x0 + col * lw + 2, y - lw * 0.45f, lw - 4, lw * 0.9f}, Color{255, 255, 255, 40});
+        } else if (mouseEventCell(t)) {
+            const float y = ly + float((t - cur_) * pp);
+            DrawRectangleRec({ex + 2, y - lw * 0.45f, lw - 4, lw * 0.9f}, Color{255, 255, 255, 40});
         }
         // Strum line and receptors
-        DrawRectangleRec({x0 - 6, ly - 2, gw + 12, 4}, Color{255, 220, 120, 220});
+        DrawRectangleRec({ex - 6, ly - 2, x0 + gw - ex + 12, 4}, Color{255, 220, 120, 220});
         for (int c = 0; c < cols; ++c) {
             const int dir = gfx::laneDir(keys_, c % keys_);
             gfx::drawReceptor(dir, {x0 + (c + 0.5f) * lw, ly}, lw * 0.82f, Color{200, 190, 230, 120});
         }
         // Top bar
         DrawRectangleRec({0, 0, gfx::W, 40}, Color{8, 5, 14, 235});
+        gfx::text(FontId::Ui, "EVENTS", ex + lw * 0.5f, 10, 16, gfx::fade(WHITE, 0.6f), Align::Center);
         gfx::text(FontId::Ui, "OPPONENT", x0 + lw * keys_ * 0.5f, 8, 22, gfx::fade(WHITE, 0.75f), Align::Center);
         gfx::text(FontId::Ui, "PLAYER", x0 + lw * keys_ * 1.5f, 8, 22, gfx::fade(WHITE, 0.75f), Align::Center);
     }
 
-    void drawPanels() {
+    void drawInfo() {
         const float x = 18;
         float y = 56;
-        auto line = [&](const std::string& s, Color c = Color{230, 225, 245, 255}, float size = 20) {
+        auto line = [&](const std::string& s, Color c = kInk, float size = 18) {
             gfx::text(FontId::Ui, s, x, y, size, c);
-            y += size + 6;
+            y += size + 5;
         };
-        DrawRectangleRounded({8, 48, 300, 430}, 0.04f, 6, Color{10, 6, 18, 220});
-        line(title_, gfx::rgb(0xFFE08A), 24);
-        line(diff_ + (dirty_ ? "   (unsaved)" : ""), gfx::fade(WHITE, 0.7f));
+        DrawRectangleRounded({8, 48, 232, 330}, 0.04f, 6, kPanel);
+        line(title_, kAccent, 22);
+        line(diff_ + (dirty_ ? "  (unsaved)" : ""), gfx::fade(WHITE, 0.7f));
         const int sec = sectionAt(cur_);
         const double beat = beatAt(cur_);
         line("Time  " + fmtTime(cur_ / 1000.0) + TextFormat(".%03d", int(std::fmod(std::max(0.0, cur_), 1000.0))));
-        line(TextFormat("Beat  %.2f   Step  %d", beat, int(std::floor(beat * 4))));
-        line(TextFormat("Section  %d  (camera: %s)", sec, section(sec).mustHit ? "player" : "opponent"));
-        line(TextFormat("BPM  %.2f", bpmAt(cur_)));
-        line(TextFormat("Scroll speed  %.1f", speed_));
-        line(TextFormat("Snap  1/%d", kSnaps[snapIdx_]));
-        line(TextFormat("Keys  %d   Zoom  %.2fx", keys_, zoom_));
-        line(std::string("Note type  ") + (kNoteTypes[typeIdx_][0] ? kNoteTypes[typeIdx_] : "normal"));
-        line(TextFormat("Notes  %s", fmtThousands((long long)notes_.size()).c_str()));
-        if (const EdNote* n = selected())
-            line(TextFormat("Selected  %.0f ms, hold %.0f ms", n->t, n->len), gfx::rgb(0x9AE6FF), 18);
-        // Help
-        const float hx = gfx::W - 300;
-        float hy = 56;
-        DrawRectangleRounded({hx - 10, 48, 300, 560}, 0.04f, 6, Color{10, 6, 18, 220});
-        static const char* help[] = {
-            "SPACE  play / pause",       "Wheel, W/S  move by snap",    "A/D  previous / next section",
-            "LEFT/RIGHT  snap",          "Click  add / select note",    "Click selected  delete",
-            "Drag down  hold length",    "Right click  delete",         "Q/E  shorter / longer hold",
-            "T  note type",              "TAB  camera side of section", "[ ]  BPM (SHIFT: 0.1)",
-            "- =  scroll speed",         "Z/X  zoom",                   "Ctrl+C / Ctrl+V  copy section",
-            "DEL  clear section",        "Ctrl+Z / Ctrl+Y  undo, redo", "Ctrl+S or F2  save",
-            "ENTER  save and play",      "ESC  back"};
-        for (const char* h : help) {
-            gfx::text(FontId::Ui, h, hx, hy, 18, gfx::fade(WHITE, 0.75f));
-            hy += 26;
+        line(TextFormat("Beat %.2f  Step %d", beat, int(std::floor(beat * 4))));
+        line(TextFormat("Section %d  BPM %.2f", sec, bpmAt(cur_)));
+        line(TextFormat("Snap 1/%d  Zoom %.2fx", kSnaps[snapIdx_], zoom_));
+        long long total = 0;
+        for (const EdNote& n : notes_) total += n.stack;
+        line("Notes " + fmtThousands(total));
+        line(TextFormat("Events %d", int(events_.size())));
+        if (const int sc = selectedCount()) line(TextFormat("Selected %d", sc), gfx::rgb(0x9AE6FF));
+        y += 6;
+        static const char* help[] = {"SPACE play", "Wheel/W/S move", "A/D section", "LEFT/RIGHT snap",
+                                     "Click add/select", "SHIFT+drag select", "Ctrl+C/V copy",
+                                     "DEL delete", "M mirror", "Ctrl+Z/Y undo", "ENTER save+play"};
+        for (const char* h : help) line(h, gfx::fade(WHITE, 0.55f), 15);
+    }
+
+    // The tabbed panel. Immediate mode: drawing and clicks happen together.
+    void drawPanel() {
+        if (ui_.click) ui_.focus.clear();  // a click anywhere ends typing; a text field takes it back
+        DrawRectangleRounded({kPanelX - 8, 46, gfx::W - kPanelX, gfx::H - 54}, 0.03f, 6, kPanel);
+        static const char* tabs[] = {"Song", "Section", "Note", "Events", "Charting"};
+        const float tw = (gfx::W - kPanelX - 16) / 5.0f;
+        for (int i = 0; i < 5; ++i)
+            if (ui_.button({kPanelX + i * tw, 52, tw - 4, 30}, tabs[i], tab_ == i)) tab_ = i;
+        const float x = kPanelX, w = gfx::W - kPanelX - 18;
+        float y = 96;
+        auto row = [&](float h = 30) {
+            const Rectangle r{x, y, w, h};
+            y += h + 8;
+            return r;
+        };
+        auto half = [&](int i) { return Rectangle{x + i * (w * 0.5f + 4), y, w * 0.5f - 4, 30}; };
+        auto heading = [&](const std::string& s) {
+            gfx::text(FontId::Ui, s, x, y, 18, kAccent);
+            y += 26;
+        };
+        switch (tab_) {
+            case 0: {  // Song
+                if (ui_.text("title", row(), "Song", title_)) dirty_ = true;
+                if (ui_.text("p1", row(), "Player", player_)) dirty_ = true;
+                if (ui_.text("p2", row(), "Opponent", opponent_)) dirty_ = true;
+                if (ui_.text("gf", row(), "Girlfriend", gf_)) dirty_ = true;
+                if (ui_.text("stage", row(), "Stage", stage_)) dirty_ = true;
+                double bpm = sections_.empty() ? 120 : sections_[0].bpm;
+                if (ui_.stepper(row(), "BPM", bpm, 1, 10, 2000, "%.2f")) setSectionBpm(0, bpm);
+                if (ui_.stepper(row(), "Scroll speed", speed_, 0.1, 0.1, 10, "%.1f")) dirty_ = true;
+                double k = keys_;
+                if (ui_.stepper(row(), "Keys", k, 1, 1, 9, "%.0f")) setKeys(int(k));
+                if (ui_.check(row(), "Needs voices", needsVoices_)) dirty_ = true;
+                if (!eventsFile_.empty() && ui_.check(row(), "Events in events.json", eventsSeparate_)) dirty_ = true;
+                y += 6;
+                if (ui_.button(half(0), "Save (F2)")) save(false);
+                if (ui_.button(half(1), "Save and play")) {
+                    if (save(true)) return;
+                }
+                y += 38;
+                if (ui_.button(half(0), "Clear notes")) {
+                    snapshot();
+                    notes_.clear();
+                    dirty_ = true;
+                }
+                if (ui_.button(half(1), "Clear events")) {
+                    snapshot();
+                    events_.clear();
+                    selEvent_ = -1;
+                    dirty_ = true;
+                }
+                y += 38;
+                break;
+            }
+            case 1: {  // Section
+                const int s = sectionAt(cur_);
+                EdSection& sec = section(s);
+                heading(TextFormat("Section %d", s));
+                bool must = sec.mustHit, gf = sec.gf, alt = sec.altAnim;
+                if (ui_.check(row(), "Must hit section (camera on the player)", must)) { snapshot(); section(s).mustHit = must; dirty_ = true; }
+                if (ui_.check(row(), "GF section (girlfriend sings)", gf)) { snapshot(); section(s).gf = gf; dirty_ = true; }
+                if (ui_.check(row(), "Alt animation (opponent)", alt)) { snapshot(); section(s).altAnim = alt; dirty_ = true; }
+                double beats = section(s).beats;
+                if (ui_.stepper(row(), "Beats", beats, 0.25, 0.25, 64, "%.2f")) {
+                    snapshot();
+                    section(s).beats = beats;
+                    rebuildStarts();
+                    dirty_ = true;
+                }
+                double sbpm = section(s).bpm;
+                if (ui_.stepper(row(), "Section BPM", sbpm, 1, 10, 2000, "%.2f")) setSectionBpm(s, sbpm);
+                y += 4;
+                if (ui_.button(half(0), "Copy")) copySelectionOrSection();
+                if (ui_.button(half(1), "Paste")) paste();
+                y += 38;
+                if (ui_.button(half(0), "Clear notes")) clearSection(true, false);
+                if (ui_.button(half(1), "Clear events")) clearSection(false, true);
+                y += 38;
+                if (ui_.button(half(0), "Swap sides")) swapSides();
+                if (ui_.button(half(1), "Mirror lanes")) mirror();
+                y += 38;
+                if (ui_.stepper(row(), "Sections back", copyBack_, 1, 1, 64, "%.0f")) {}
+                if (ui_.button(row(), "Copy notes from that section")) copyLastSection(int(copyBack_));
+                if (ui_.button(row(), "Select all notes of the section (Ctrl+A)")) selectSection();
+                break;
+            }
+            case 2: {  // Note
+                EdNote* n = firstSelected();
+                const int count = selectedCount();
+                heading(count == 0 ? std::string("No note selected") : count == 1 ? std::string("Selected note")
+                                                                                   : TextFormat("%d notes selected", count));
+                if (ui_.choice(row(), "Type", noteTypes_, typeIdx_))
+                    applyToSelection([&](EdNote& e) { e.type = noteTypes_[size_t(typeIdx_)]; });
+                if (n) {
+                    double t = n->t;
+                    if (ui_.stepper(row(), "Time (ms)", t, 60000.0 / bpmAt(n->t) * snapBeats(), 0, 1e9, "%.1f")) {
+                        const double d = t - n->t;
+                        applyToSelection([&](EdNote& e) { e.t = std::max(0.0, e.t + d); });
+                    }
+                    double len = n->len;
+                    if (ui_.stepper(row(), "Hold (ms)", len, 60000.0 / bpmAt(n->t) * snapBeats(), 0, 1e7, "%.1f"))
+                        applyToSelection([&](EdNote& e) { e.len = len; });
+                    double st = n->stack;
+                    if (ui_.stepper(row(), "Stacked notes", st, 1, 1, 65535, "%.0f"))
+                        applyToSelection([&](EdNote& e) { e.stack = int(st); });
+                    if (ui_.button(half(0), "Delete")) deleteSelection();
+                    if (ui_.button(half(1), "Unselect")) clearSelection();
+                    y += 38;
+                }
+                y += 6;
+                heading("Spam tools");
+                ui_.stepper(row(), "Stack amount", stackAmount_, 1, 1, 65535, "%.0f");
+                if (ui_.button(row(), "Stack the selected notes")) {
+                    const int k = int(stackAmount_);
+                    applyToSelection([&](EdNote& e) { e.stack = k; });
+                }
+                static const std::vector<std::string> patterns = {"One lane", "Stairs up", "Stairs down", "Random", "Zigzag"};
+                static const std::vector<std::string> sides = {"Opponent", "Player", "Both"};
+                ui_.choice(row(), "Pattern", patterns, fillPattern_);
+                if (fillPattern_ == 0) {
+                    double lane = fillLane_;
+                    if (ui_.stepper(row(), "Lane", lane, 1, 0, keys_ - 1, "%.0f")) fillLane_ = int(lane);
+                }
+                ui_.choice(row(), "Side", sides, fillSide_);
+                if (ui_.button(row(), "Fill the section (one note per snap)")) fillSection(fillPattern_, fillSide_);
+                break;
+            }
+            case 3: {  // Events
+                psych::ChartEvent* e = selEvent_ >= 0 && selEvent_ < long(events_.size()) ? &events_[size_t(selEvent_)] : nullptr;
+                if (e) {
+                    // Events sharing this time: step through them.
+                    int first = int(selEvent_), lastI = int(selEvent_);
+                    while (first > 0 && events_[size_t(first - 1)].timeMs == e->timeMs) --first;
+                    while (lastI + 1 < int(events_.size()) && events_[size_t(lastI + 1)].timeMs == e->timeMs) ++lastI;
+                    heading(TextFormat("Event %d of %d at %.0f ms", int(selEvent_) - first + 1, lastI - first + 1, e->timeMs));
+                    if (ui_.button(half(0), "< previous")) selEvent_ = selEvent_ > first ? selEvent_ - 1 : lastI;
+                    if (ui_.button(half(1), "next >")) selEvent_ = selEvent_ < lastI ? selEvent_ + 1 : first;
+                    y += 38;
+                    int idx = int(std::find(eventNames_.begin(), eventNames_.end(), e->name) - eventNames_.begin());
+                    if (idx >= int(eventNames_.size())) {
+                        eventNames_.push_back(e->name);
+                        idx = int(eventNames_.size()) - 1;
+                    }
+                    if (ui_.choice(row(), "Event", eventNames_, idx, 64)) {
+                        snapshot();
+                        e->name = eventNames_[size_t(idx)];
+                        eventIdx_ = idx;
+                        dirty_ = true;
+                    }
+                    if (ui_.text("ev1", row(), "Value 1", e->v1)) dirty_ = true;
+                    if (ui_.text("ev2", row(), "Value 2", e->v2)) dirty_ = true;
+                    drawEventHelp(e->name, y);
+                    if (ui_.button(half(0), "Add here")) {
+                        snapshot();
+                        psych::ChartEvent c = *e;
+                        events_.insert(events_.begin() + selEvent_ + 1, c);
+                        ++selEvent_;
+                        dirty_ = true;
+                    }
+                    if (ui_.button(half(1), "Remove")) {
+                        snapshot();
+                        events_.erase(events_.begin() + selEvent_);
+                        selEvent_ = -1;
+                        dirty_ = true;
+                    }
+                    y += 38;
+                } else {
+                    heading("New events");
+                    ui_.choice(row(), "Event", eventNames_, eventIdx_, 64);
+                    ui_.text("nv1", row(), "Value 1", eventV1_);
+                    ui_.text("nv2", row(), "Value 2", eventV2_);
+                    if (!eventNames_.empty()) drawEventHelp(eventNames_[size_t(eventIdx_)], y);
+                    if (ui_.button(row(), "Add at the line")) {
+                        snapshot();
+                        psych::ChartEvent c;
+                        c.timeMs = msAtBeat(snapBeat(beatAt(cur_)));
+                        c.name = eventNames_.empty() ? std::string("Hey!") : eventNames_[size_t(eventIdx_)];
+                        c.v1 = eventV1_;
+                        c.v2 = eventV2_;
+                        events_.push_back(c);
+                        sortEvents();
+                        selEvent_ = findEvent(c.timeMs, 0.01);
+                        dirty_ = true;
+                    }
+                    gfx::text(FontId::Ui, "Click the EVENTS lane to add or select one;", x, y, 16, kDim);
+                    gfx::text(FontId::Ui, "right click removes it.", x, y + 20, 16, kDim);
+                }
+                break;
+            }
+            case 4: {  // Charting
+                if (ui_.stepper(row(), "Playback rate", playRate_, 0.05, 0.25, 3, "%.2fx") && playing_) app().mixer.setRate(playRate_);
+                if (ui_.stepper(row(), "Music volume", instVol_, 0.1, 0, 1, "%.1f")) applyVolumes();
+                if (ui_.stepper(row(), "Voices volume", voiceVol_, 0.1, 0, 1, "%.1f")) applyVolumes();
+                if (ui_.check(row(), "Mute voices", muteVoices_)) applyVolumes();
+                ui_.check(row(), "Hit sounds: player", hitPlayer_);
+                ui_.check(row(), "Hit sounds: opponent", hitOpponent_);
+                ui_.check(row(), "Metronome", metronome_);
+                double snap = snapIdx_;
+                if (ui_.stepper(row(), "Snap (1/N)", snap, 1, 0, double(std::size(kSnaps) - 1), "%.0f")) snapIdx_ = int(snap);
+                gfx::text(FontId::Ui, TextFormat("= 1/%d of a bar", kSnaps[snapIdx_]), x, y, 16, kDim);
+                y += 24;
+                double z = zoom_;
+                if (ui_.stepper(row(), "Zoom", z, 0.25, 0.25, 8, "%.2fx")) zoom_ = float(z);
+                break;
+            }
+            default: break;
         }
     }
 
-    // ------------------------------------------------------------- state --
-    struct UndoStep {
-        std::vector<EdNote> notes;
-        std::vector<EdSection> sections;
-        double speed = 1;
-    };
+    void drawEventHelp(const std::string& name, float& y) {
+        std::string help;
+        for (const EventInfo& e : kEvents)
+            if (name == e.name) help = e.help;
+        if (help.empty())
+            if (auto it = eventHelp_.find(name); it != eventHelp_.end()) help = it->second;
+        if (help.empty()) help = "A custom event: its script decides what the values do.";
+        // Word wrap to the panel.
+        const float maxW = gfx::W - kPanelX - 24;
+        std::string lineText, word;
+        auto flushLine = [&]() {
+            gfx::text(FontId::Ui, lineText, kPanelX, y, 16, kDim);
+            y += 20;
+            lineText.clear();
+        };
+        for (size_t i = 0; i <= help.size(); ++i) {
+            const char c = i < help.size() ? help[i] : ' ';
+            if (c == ' ' || c == '\n') {
+                const std::string cand = lineText.empty() ? word : lineText + " " + word;
+                if (gfx::measure(FontId::Ui, cand, 16).x > maxW && !lineText.empty()) {
+                    flushLine();
+                    lineText = word;
+                } else {
+                    lineText = cand;
+                }
+                word.clear();
+                if (c == '\n') flushLine();
+            } else {
+                word += c;
+            }
+        }
+        if (!lineText.empty()) flushLine();
+        y += 8;
+    }
 
+    // ------------------------------------------------------------- state --
     std::string songId_, diff_, error_, title_, player_, opponent_, gf_, stage_, flash_;
     const SongEntry* entry_ = nullptr;
     std::future<Prepared> job_;
-    bool loaded_ = false, playing_ = false, dirty_ = false, dragging_ = false, backedUp_ = false;
-    int keys_ = 4, snapIdx_ = 3, typeIdx_ = 0;
-    long selected_ = -1;
+    bool loaded_ = false, playing_ = false, dirty_ = false, dragging_ = false, backedUp_ = false, typing_ = false;
+    bool needsVoices_ = true, eventsSeparate_ = true, boxing_ = false;
+    bool hitPlayer_ = true, hitOpponent_ = true, metronome_ = false, muteVoices_ = false;
+    int keys_ = 4, snapIdx_ = 3, typeIdx_ = 0, tab_ = 2, eventIdx_ = 0, fillPattern_ = 1, fillSide_ = 1, fillLane_ = 0;
+    long selEvent_ = -1;
     double cur_ = 0, lastT_ = 0, speed_ = 1, flashAt_ = -10, escAt_ = -10;
+    double playRate_ = 1, instVol_ = 1, voiceVol_ = 1, stackAmount_ = 10, copyBack_ = 1;
     float zoom_ = 1.0f;
+    Vector2 boxA_{};
+    Ui ui_;
     std::vector<EdNote> notes_, clipboard_;
+    std::vector<psych::ChartEvent> clipEvents_;
     std::vector<EdSection> sections_;
-    std::vector<double> starts_;
+    std::vector<double> starts_, beatStarts_;
     std::vector<psych::ChartEvent> events_;
+    std::vector<std::string> noteTypes_, eventNames_;
+    std::map<std::string, std::string> eventHelp_;
+    std::string eventV1_, eventV2_, eventsFile_;
     std::vector<UndoStep> undo_, redo_;
     PcmPtr inst_, voiceP_, voiceO_;
 };

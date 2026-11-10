@@ -298,7 +298,7 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
         if (out.focus.empty() || out.focus.back().side != fside) out.focus.push_back({secStart, fside});
         const bool altSec = json::Document::boolean(doc.get(sec, "altAnim"), false);
         const bool gfSec = json::Document::boolean(doc.get(sec, "gfSection"), false);
-        out.sections.push_back({secStart, must, gfSec, altSec});
+        out.sections.push_back({secStart, must, gfSec, altSec, beats, curBpm});
         const double stepMs = 15000.0 / curBpm;
 
         const json::Value* sv = doc.get(sec, "sectionNotes");
