@@ -107,6 +107,27 @@ static void testPsychV1AndExtraKeys() {
     CHECK(parseChart(kade, "Hard", c, err) && c.keys == 9);
     CHECK(parseChart(ek, "Hard", c, err) && c.keys == 4);
 
+    // Shaggy-style multi-key numbers mania 0-8 as 4, 6, 9, 5, 7, 8, 1, 2, 3 keys.
+    // Notes mostly on the section's own side: every lane of a side in use
+    // (0-4 with mania 3, 0-7 with mania 5) says 5 and 8 keys, not Extra Keys' 4 and 6.
+    auto chartWith = [](int mania, const std::vector<int>& lanes) {
+        std::string j = R"({"song": {"song": "M", "bpm": 150, "mania": )" + std::to_string(mania) +
+                        R"(, "notes": [{"mustHitSection": true, "sectionNotes": [)";
+        for (size_t i = 0; i < lanes.size(); ++i)
+            j += (i ? "," : "") + std::string("[") + std::to_string(i * 10) + "," + std::to_string(lanes[i]) + ",0]";
+        return j + "]}]}}";
+    };
+    std::vector<int> five, eight, six;
+    for (int i = 0; i < 50; ++i) {
+        five.push_back(i % 5);
+        eight.push_back(i % 8);
+        six.push_back(i % 12);
+    }
+    eight.push_back(14);  // a stray note on the other side
+    CHECK(parseChart(chartWith(3, five), "Hard", c, err) && c.keys == 5);
+    CHECK(parseChart(chartWith(5, eight), "Hard", c, err) && c.keys == 8);
+    CHECK(parseChart(chartWith(5, six), "Hard", c, err) && c.keys == 6);  // Extra Keys 6K, both sides
+
     // Stacked notes (same lane within 1 ms) are one note that counts as all of them.
     const char* stacked = R"({"song": {"song": "S", "bpm": 100, "notes": [{"mustHitSection": true,
       "sectionNotes": [[100, 0, 0], [100.4, 0, 0], [100, 1, 0], [100.2, 0, 0]]}]}})";

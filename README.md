@@ -29,7 +29,7 @@ spam charts of any size, has a chart editor, charts any song by itself, records 
 - **Shaders**: os `.frag` do Psych/Flixel (`#pragma header`, `flixel_texture2D`) são traduzidos para OpenGL 3.3 e funcionam em sprites (`setSpriteShader`) e em câmaras inteiras (`setFilters` em HScript).
 - **Vídeos**: `startVideo` (cutscenes, ENTER salta) e `makeVideoSprite`. Ficheiros `.mpg` tocam diretamente; `.mp4`/`.webm` são convertidos uma vez com o **ffmpeg** (se estiver instalado ou ao lado do jogo) para `cache/videos/`.
 - **Builds completas do Kade / jogo base** (pasta `assets/` com `shared/`, `week1`...): as personagens e cenários das semanas 1–6 são reconstruídos a partir das imagens do mod.
-- **Qualquer formato de pasta**: mods do Psych, pastas dentro de pastas, charts soltos (agrupados por música, com o áudio procurado em todos os mods), V-Slice, 1 a 9 teclas (`mania` do Dave & Bambi / Kade).
+- **Qualquer formato de pasta**: mods do Psych, pastas dentro de pastas, charts soltos (agrupados por música, com o áudio procurado em todos os mods), V-Slice, 1 a 9 teclas (`keyCount`, ou `mania` do Dave & Bambi / Kade, Psych Extra Keys e Shaggy: as notas decidem qual numeração o chart usa; sem nada disto o chart tem 4 teclas, como no Psych).
 - **Charts de spam gigantes**: um chart de 1,5 GB (25 milhões de notas) abre em ~5 s. As notas empilhadas no mesmo milissegundo ficam juntas em memória mas **contam todas** (acertos, combo, pontuação, total no fim), e as notas desenham-se até 1 pixel de distância. Charts sem número de teclas são de 4 teclas, como no Psych/JS Engine.
 - Os scripts correm isolados (sem `io` nem `os`; `require` só lê módulos do próprio mod, `saveFile` só escreve dentro de `mods/`) e param se entrarem em ciclo infinito.
 
@@ -99,7 +99,7 @@ O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, 
 - Shaders: OpenFL/Flixel fragment shaders are translated to GLSL 330 and run on sprites and whole cameras.
 - Videos: `startVideo` cutscenes and `makeVideoSprite` with pl_mpeg; `.mp4`/`.webm` are converted once with ffmpeg when available.
 - Full Kade/base-game builds: the week 1–6 characters, stages and stage behaviour are rebuilt from the mod's own images.
-- Any folder layout: nested mod folders, loose charts grouped by song with audio found across mods, 1–9 keys (`mania`), V-Slice.
+- Any folder layout: nested mod folders, loose charts grouped by song with audio found across mods, 1–9 keys (`keyCount`, or `mania` from Dave & Bambi / Kade, Psych Extra Keys and Shaggy: the notes decide which numbering a chart uses; without either a chart has 4 keys, as in Psych), V-Slice.
 - Huge spam charts are streamed: 1.5 GB / 25 million notes load in about 5 s with bounded memory. Notes stacked in one millisecond stay merged in memory but every one of them counts (hits, combo, score, totals), notes are drawn down to one pixel apart, and charts without a key count are 4-key charts, as in Psych and JS Engine.
 - Scripts are sandboxed and stopped if they loop forever.
 

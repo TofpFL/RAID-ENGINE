@@ -174,32 +174,60 @@ static void applyNoteType(std::string_view type, Note& n, Chart& c) {
     if (t == "hey!" || t == "hey") n.flags |= kFlagHey;
 }
 
+// How badly a key count fits the noteData values a chart uses (0 = fits).
+// Values past both sides cost the most; a side that has notes but leaves
+// some of its lanes empty costs that many lanes times its share of notes
+// (with too few keys, one side's lanes spill into the other's first lanes;
+// with too many, the last lanes of a side stay empty).
+static double keyMisfit(const std::array<uint64_t, 64>& dataCount, uint64_t total, int keys) {
+    if (total == 0) return 0;
+    uint64_t past = 0;
+    for (size_t d = size_t(2 * keys); d < dataCount.size(); ++d) past += dataCount[d];
+    double cost = 50.0 * double(past) / double(total);
+    for (int side = 0; side < 2; ++side) {
+        uint64_t n = 0;
+        int empty = 0;
+        for (int l = 0; l < keys; ++l) {
+            const uint64_t c = dataCount[size_t(side * keys + l)];
+            n += c;
+            empty += c == 0;
+        }
+        cost += double(empty) * double(n) / double(total);
+    }
+    return cost;
+}
+
 // Key count of a legacy/Psych chart. Only an explicit count makes it an
 // extra-key chart: Psych and JS Engine play every other chart with 4 keys
 // (lane = noteData % 4), whatever values its notes use.
 static int keysFromMetadata(const json::Document& doc, const json::Value& s, const std::array<uint64_t, 64>& dataCount) {
     int keys = int(json::Document::num(doc.get(s, "keyCount"), 0));  // Leather Engine
     if (keys >= 1 && keys <= 9) return keys;
-    uint64_t total = 0;
-    for (uint64_t c : dataCount) total += c;
-    auto usedFrom = [&](int d) {
-        uint64_t n = 0;
-        for (size_t i = size_t(std::max(0, d)); i < dataCount.size(); ++i) n += dataCount[i];
-        return n;
-    };
-    // "mania": Dave & Bambi / Kade multi-key forks (in "options"): 0=4K 1=6K 2=7K 3=9K.
-    // Psych Extra Keys puts it on the song with keys = mania + 1.
+    // "mania" numbers key counts differently from fork to fork: Dave & Bambi /
+    // Kade forks (in "options": 0=4K 1=6K 2=7K 3=9K), Psych Extra Keys
+    // (keys = mania + 1) and Shaggy-style multi-key (4, 6, 9, 5, 7, 8, 1, 2, 3).
     static const int dnb[] = {4, 6, 7, 9};
+    static const int shaggy[] = {4, 6, 9, 5, 7, 8, 1, 2, 3};
     const json::Value* opts = doc.get(s, "options");
     const double om = opts ? json::Document::num(doc.get(*opts, "mania"), -1) : -1;
     const double sm = json::Document::num(doc.get(s, "mania"), -1);
     if (om >= 0 && om <= 3) return dnb[int(om)];
     if (sm >= 0 && sm <= 8) {
-        const int ek = int(sm) + 1;
-        // Same number, two meanings: the notes tell them apart. A few stray
-        // values past Extra Keys' lanes do not make it a Kade chart.
-        if (sm <= 3 && usedFrom(2 * ek) * 100 > total && usedFrom(2 * ek) > 8) return dnb[int(sm)];
-        return ek;
+        // The reading the notes fit best (Extra Keys first on a tie).
+        uint64_t total = 0;
+        for (uint64_t c : dataCount) total += c;
+        const int m = int(sm);
+        int best = 0;
+        double bestCost = 0;
+        for (int k : {m + 1, m <= 3 ? dnb[m] : 0, shaggy[m]}) {
+            if (k < 1 || k > 9) continue;
+            const double cost = keyMisfit(dataCount, total, k);
+            if (best == 0 || cost < bestCost - 1e-9) {
+                best = k;
+                bestCost = cost;
+            }
+        }
+        return best;
     }
     return 4;
 }
