@@ -1459,6 +1459,27 @@ bool PlayState::makeVideoSprite(const std::string& tag, const std::string& name,
     return openVideo(v);
 }
 
+bool PlayState::playVideoOnTop(const std::string& tag, const std::string& name, bool loop) {
+    if (!makeVideoSprite(tag, name, 0, 0, "camOther", loop)) return false;
+    videoSprites_[tag].fit = true;
+    return true;
+}
+
+bool PlayState::makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) {
+    if (!psych_ || tag.empty() || name.empty()) return false;
+    scene::CharacterPtr c = makeCharacter(name, isPlayer, isPlayer ? 0 : 1);
+    if (!c) return false;
+    // Psych's Character(x, y, ...) sits exactly there: the JSON position is
+    // only applied to the three main characters.
+    c->x = x;
+    c->y = y;
+    c->groupX = c->groupY = 0;
+    c->tag = tag;
+    scene_->objects[tag] = c;
+    renderer_.preload(*scene_);
+    return true;
+}
+
 bool PlayState::updateVideos(double dt) {
     // Video sprites: (re)attach the frame texture once the video is open.
     for (auto it = videoSprites_.begin(); it != videoSprites_.end();) {
@@ -1477,11 +1498,22 @@ bool PlayState::updateVideos(double dt) {
                 f.h = f.fh = float(v.player->height());
                 g->frames.push_back(f);
                 s->setGraphic(g);
+                if (v.fit) {
+                    s->setGraphicSize(gfx::W, gfx::H);
+                    s->updateHitbox();
+                    s->scrollX = s->scrollY = 0;
+                }
             }
             renderer_.setDynamicTexture(key, v.player->texture());
             if (v.player->ended()) {
                 renderer_.removeDynamicTexture(key);
                 if (scripts_) scripts_->call("onVideoFinished", {Value(v.tag)});
+                if (v.tag.rfind("__hx", 0) == 0) {  // an HScript player's finish callback
+                    scene::Completion c;
+                    c.tag = v.tag;
+                    scene_->completions.push_back(c);
+                    if (scripts_) scripts_->dispatchCompletions();
+                }
                 if (s) s->visible = false;
                 it = videoSprites_.erase(it);
                 continue;

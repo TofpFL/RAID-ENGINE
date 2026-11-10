@@ -140,6 +140,8 @@ private:
     void loopSong(double ms) override;
     bool gamepadState(int pad, std::string_view button, int mode) override;
     double gamepadAxis(int pad, int axis) override;
+    bool makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) override;
+    bool playVideoOnTop(const std::string& tag, const std::string& name, bool loop) override;
     // JS Engine events: camera twist, fake length, popups, credits, bot energy...
     bool handleJsEngineEvent(const psych::ChartEvent& e);
     void updateJsEngine(double dt);
@@ -219,7 +221,7 @@ private:
     struct VideoSlot {
         std::unique_ptr<VideoPlayer> player;
         std::string name, tag;
-        bool loop = false, skippable = true, waiting = false;
+        bool loop = false, skippable = true, waiting = false, fit = false;  // fit: stretched over the screen
     };
     std::unique_ptr<VideoSlot> cutscene_;
     std::map<std::string, VideoSlot> videoSprites_;

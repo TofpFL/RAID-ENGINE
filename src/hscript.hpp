@@ -104,6 +104,7 @@ public:
 
     double budget = 2.0;  // seconds before a runaway script is stopped
     std::string scriptName;
+    std::string luaPath;  // runHaxeCode: the Lua script it runs for (Psych 0.7 parentLua)
 
     // Implementation access for the bridge.
     scene::Scene& sc;

@@ -63,6 +63,14 @@ public:
     // LEFT_SHOULDER; mode as keyState; pad -1 = any.
     virtual bool gamepadState(int pad, std::string_view button, int mode) { return false; }
     virtual double gamepadAxis(int pad, int axis) { return 0; }  // 0 left x, 1 left y, 2 right x, 3 right y
+    // HScript `new Character(x, y, name, isPlayer)`: an extra character (not
+    // in the scene yet), registered under `tag`.
+    virtual bool makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) {
+        return false;
+    }
+    // HScript video players (MP4Handler, VideoHandler...): a full-screen video
+    // on camOther; scripts hear onVideoFinished(tag) when it ends.
+    virtual bool playVideoOnTop(const std::string& tag, const std::string& name, bool loop) { return false; }
 };
 
 class ScriptHost {
@@ -98,6 +106,7 @@ public:
     scene::Scene& scene;
     ScriptGame& game;
     std::vector<std::unique_ptr<Script>>& scriptList() { return scripts_; }
+    std::vector<std::string> scriptPaths() const;  // running Lua scripts (HScript game.luaArray)
 
     // HScript (.hx files and runHaxeCode)
     std::shared_ptr<hx::Shared> hxShared;

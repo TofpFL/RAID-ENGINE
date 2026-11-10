@@ -1731,6 +1731,7 @@ hx::Interp& hxOf(lua_State* L) {
     if (!s.hx) {
         s.hx = std::make_unique<hx::Interp>(SC(L), G(L), &H(L), H(L).hxShared);
         s.hx->scriptName = s.name + " (haxe)";
+        s.hx->luaPath = s.path;
     }
     s.hx->budget = s.budget;
     return *s.hx;
@@ -2287,6 +2288,13 @@ void ScriptHost::registerHxCallback(const std::string& name, hx::Interp* owner, 
         lua_pushcclosure(s->L, l_hxCallback, 1);
         lua_setglobal(s->L, name.c_str());
     }
+}
+
+std::vector<std::string> ScriptHost::scriptPaths() const {
+    std::vector<std::string> out;
+    for (const auto& s : scripts_)
+        if (!s->closed) out.push_back(s->path);
+    return out;
 }
 
 size_t ScriptHost::count() const {

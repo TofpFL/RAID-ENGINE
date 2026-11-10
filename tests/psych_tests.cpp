@@ -53,6 +53,22 @@ struct StubGame : ScriptGame {
     void startCountdown() override { ++countdownStarts; }
     std::string saveRoot;
     std::string saveDir() override { return saveRoot; }
+    scene::Scene* scene = nullptr;  // for extra characters (HScript new Character)
+    bool makeExtraCharacter(const std::string& tag, const std::string& name, bool isPlayer, float x, float y) override {
+        if (!scene) return false;
+        auto c = std::make_shared<scene::Character>();
+        c->kind = scene::Kind::Character;
+        c->name = name;
+        c->tag = tag;
+        c->builtin = true;
+        c->isPlayer = isPlayer;
+        c->x = x;
+        c->y = y;
+        c->width = c->frameW = 400;
+        c->height = c->frameH = 400;
+        scene->objects[tag] = c;
+        return true;
+    }
 };
 
 const char* kAtlas = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
@@ -428,6 +444,7 @@ int runPsychCorpus(const char* dir) {
                 sc.hud[hudName] = s;
             }
             StubGame game;
+            game.scene = &sc;
             ScriptHost host(sc, game);
             host.callBudget = 0.5;
             ++scripts;
@@ -452,6 +469,8 @@ int runPsychCorpus(const char* dir) {
             host.setGlobal("altAnim", false);
             host.setGlobal("curSection", 0.0);
             host.setGlobal("shadersEnabled", true);
+            host.setGlobal("playbackRate", 1.0);
+            host.setGlobal("version", std::string("0.7.3"));
             for (const char* n : {"boyfriendName", "dadName", "gfName"}) host.setGlobal(n, std::string(n).substr(0, std::string(n).size() - 4));
             for (int i = 0; i < 4; ++i) {
                 host.setGlobal(("defaultPlayerStrumX" + std::to_string(i)).c_str(), 732.0 + 112 * i);
@@ -766,6 +785,49 @@ void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }')
     PCHECK(pnear(scene::toNum(sc.vars["lastHit"]), 12));
     PCHECK(host.call("onStartCountdown") == ScriptHost::kStop);
     PCHECK(host.errors.empty());
+
+    // JS Engine mods: camera lists and live filter lists, extra characters,
+    // video players, openfl paths, parentLua (Psych 0.7), CoolUtil.
+    game.scene = &sc;
+    game.prints.clear();
+    sc.camGame.filters.clear();
+    PCHECK(host.loadString("jsengine.lua", R"LUA(
+        function onCreatePost()
+            debugPrint(runHaxeCode([[
+                for (cam in FlxG.cameras.list) cam.setFilters([]);
+                FlxG.cameras.cameraAdded.add(function(c) {});
+                var s = new FlxRuntimeShader('#pragma header
+void main() { gl_FragColor = flixel_texture2D(bitmap, openfl_TextureCoordv); }');
+                game.camGame._filters.push(new ShaderFilter(s));
+                var n = 0;
+                for (f in game.camGame._filters) if (f.shader == s) n++;
+                var ghost = new Character(100, 200, 'pico', false);
+                game.add(ghost);
+                ghost.alpha = 0.5;
+                var video = new MP4Handler();
+                video.finishCallback = function() { setVar('videoDone', true); };
+                video.playVideo(Paths.video('intro'));
+                openfl.Lib.application.window.title = 'Spam';
+                var nums = CoolUtil.numberArray(3, 0);
+                return FlxG.cameras.list.length + ' ' + n + ' ' + ghost.x + ' ' + nums.length + ' ' +
+                       (parentLua.scriptName != null) + ' ' + openfl.Lib.application.window.title;
+            ]]))
+            addChromaticAbberationEffect('camHUD', 0.01)
+            addWiggleEffect('game', 'flag', 1, 2, 0.05)
+            addVCREffect('dad')
+            clearEffects('v2')
+        end)LUA"));
+    host.call("onCreatePost");
+    for (const std::string& e : host.errors) std::printf("  %s\n", e.c_str());
+    PCHECK(host.errors.empty());
+    PCHECK(!game.prints.empty() && game.prints[0] == "3 1 100 3 true Spam");
+    PCHECK(sc.objects.count("__hxchar1") || std::any_of(sc.objects.begin(), sc.objects.end(), [](const auto& kv) {
+               return kv.second->kind == scene::Kind::Character && pnear(kv.second->x, 100);
+           }));
+    PCHECK(sc.camHud.filters.size() == 1 && sc.camHud.filters[0]->name == "__fx_chromatic");
+    PCHECK(sc.camGame.filters.empty());  // clearEffects with an unknown name clears the game camera
+    host.dispatchCompletions();
+    PCHECK(scene::toBool(sc.vars["videoDone"]));  // no video player in tests: the callback still runs
 }
 
 void testLuaExtras() {

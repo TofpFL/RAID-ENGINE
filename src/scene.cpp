@@ -979,6 +979,9 @@ void Scene::update(double dt, double stepMs, bool playerHolding) {
         Sprite& s = *kv.second;
         if (!s.active) continue;
         s.updateAnim(dt);
+        // Extra characters made by scripts behave like the main three.
+        if (s.kind == Kind::Character && &s != bf.get() && &s != dad.get() && &s != gf.get())
+            static_cast<Character&>(s).updateChar(dt, stepMs, false);
     }
     for (Character* c : {bf.get(), dad.get(), gf.get()}) {
         if (!c) continue;
