@@ -73,14 +73,23 @@ public:
             {Row::Header, "INTERFACE", ""},
             {Row::Choice, "Note counter", "Notes hit so far, under the score: your side only, or both sides added up.", nullptr,
              nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
-            {Row::Bool, "Psych Engine interface", "Notes, ratings, countdown and sounds from your own Psych / JS Engine copy.",
+            {Row::Bool, "Psych Engine interface", "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds, from your own copy.",
              &s.psychUi},
             {Row::Action, "Psych Engine folder...", ""},
+            {Row::Bool, "Hit popups", "Rating pictures and combo numbers that pop up on each hit.", &s.hitPopups},
+            {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
+             {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
+            {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
             {Row::Header, "AUDIO", ""},
             {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
             {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
             {Row::Number, "Sound effects", "", nullptr, &s.sfxVol, 0, 1, 0.05f},
             {Row::Number, "Hit sounds", "A tick on every note you hit.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
+            {Row::Header, "DEBUG", ""},
+            {Row::Choice, "Lua errors", "Errors of mod scripts on screen. Psych shows them only for scripts that set luaDebugMode.",
+             nullptr, nullptr, 0, 0, 0, &s.luaErrors, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
+            {Row::Choice, "Lua warnings", "Missing images, sounds and objects that mods ask for. Psych: only with luaDebugMode.",
+             nullptr, nullptr, 0, 0, 0, &s.luaWarnings, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
         };
         for (Row& r : rows_) {
             if (r.label == "Scroll speed") r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
@@ -199,7 +208,13 @@ public:
         if (in.back() && !in.pressed(KEY_BACKSPACE)) {
             a.saveSettings();
             sfxPlay(Sfx::Cancel);
-            a.change(makeMainMenu());
+            if (a.optionsReturn) {  // opened from a song's pause menu: back to that song
+                const PlayRequest req = *a.optionsReturn;
+                a.optionsReturn.reset();
+                a.change(makePlay(req));
+            } else {
+                a.change(makeMainMenu());
+            }
         }
     }
 
@@ -304,6 +319,9 @@ private:
     int sel_ = 1, slot_ = 0;
     float anim_ = 1;
     bool waiting_ = false;
+
+public:
+    bool keyReserved(int) const override { return waiting_; }  // rebinding: the next key is the binding
 };
 
 // ------------------------------------------------------------ Calibration --

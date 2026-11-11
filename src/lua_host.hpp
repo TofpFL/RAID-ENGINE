@@ -25,7 +25,13 @@ public:
     virtual bool getGameProp(std::string_view path, scene::Value& out) = 0;
     virtual bool setGameProp(std::string_view path, const scene::Value& v) = 0;
     virtual void triggerEvent(const std::string& name, const std::string& v1, const std::string& v2) = 0;
-    virtual void debugPrint(const std::string& text, uint32_t argb) = 0;
+    virtual void debugPrint(const std::string& text, uint32_t argb) = 0;  // a script's own debugPrint: always shown
+    // Warnings (a missing image, sound or object) and errors of mod content.
+    // debugMode: the script set luaDebugMode, the only case Psych shows them
+    // on screen; Options > DEBUG decides here.
+    virtual void debugNotice(const std::string& text, bool error, bool debugMode) {
+        debugPrint(text, error ? 0xFFFF4050 : 0xFFFFD040);
+    }
     virtual void endSong() {}
     virtual void restartSong() {}
     virtual void exitSong() {}
@@ -118,7 +124,8 @@ public:
         hx::Value fn;
     };
     std::map<std::string, HxCallback> hxCallbacks;
-    void reportError(const std::string& msg);
+    // debugMode: the failing script set luaDebugMode (see ScriptGame::debugNotice).
+    void reportError(const std::string& msg, bool debugMode = false);
     void setHxGlobal(const std::string& name, const hx::Value& v);  // setOnHScript
 
 private:

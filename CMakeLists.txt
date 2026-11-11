@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.3.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -98,6 +98,7 @@ add_library(gh_core STATIC
   src/psych.cpp
   src/scene.cpp
   src/song_scan.cpp
+  src/flp_import.cpp
   src/lua_host.cpp
   src/replay.cpp
   src/mod_install.cpp

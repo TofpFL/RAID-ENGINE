@@ -30,6 +30,13 @@ public:
     ~PlayState() override;
     bool wantsMenuMusic() const override { return false; }
     TouchLayout touchLayout() const override;
+    static constexpr int kPauseItems = 4;  // Resume, Restart, Options, Exit to menu
+    void openChartEditor();
+    void openOptions();
+    // Keys bound to a lane are notes, not volume keys.
+    bool keyReserved(int key) const override {
+        return key > 0 && key < int(keyLane_.size()) && keyLane_[size_t(key)] >= 0;
+    }
     void onResume() override;
     void enter() override;
     void update(double dt) override;
@@ -41,6 +48,7 @@ public:
     bool setGameProp(std::string_view path, const scene::Value& v) override;
     void triggerEvent(const std::string& name, const std::string& v1, const std::string& v2) override;
     void debugPrint(const std::string& text, uint32_t argb) override;
+    void debugNotice(const std::string& text, bool error, bool debugMode) override;
     void endSong() override;
     void restartSong() override;
     void exitSong() override;
@@ -107,6 +115,8 @@ private:
     void drawHudCentered();
     void setGameWidth(float w);  // FlxG.width
     void drawPause();
+    void drawPsychPause();  // the Psych Engine interface's pause menu
+    void stopPauseMusic();
     void drawDead();
     void drawLoading();
     void drawDebugLog();
@@ -209,6 +219,10 @@ private:
     long long nps_ = 0, maxNps_ = 0;
     gfx::Particles fx_;
     int pauseSel_ = 0, deadSel_ = 0;
+    float pauseScroll_ = 0;  // the Psych pause menu's items glide to the selection
+    double pausedAt_ = 0;
+    Music pauseMusic_{};     // Psych's breakfast, fading in while paused
+    float pauseMusicVol_ = 0;
     double deadAt_ = 0, loadStart_ = 0, lastHitsound_ = 0, lastMissSfx_ = 0, waitStart_ = 0, endWaitStart_ = 0;
     double lastSplash_[9] = {};
     bool finished_ = false, songStarted_ = false, countdownStarted_ = false, endRequested_ = false;

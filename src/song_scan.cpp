@@ -11,6 +11,7 @@
 #include "chart.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
+#include "flp_import.hpp"
 #include "json.hpp"
 
 namespace gh {
@@ -707,6 +708,9 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
         std::map<std::string, std::string> signatureOf;
         auto sameFile = [&](const std::string& a, const std::string& b) {
             if (a == b) return true;
+            std::string fa, fb;
+            int pa = 0, pb = 0;
+            if (flpChartPath(a, fa, pa) || flpChartPath(b, fb, pb)) return false;  // FL Studio patterns: by name only
             if (fileSize(a) != fileSize(b)) return false;
             for (const std::string* p : {&a, &b})
                 if (!signatureOf.count(*p)) signatureOf[*p] = fileSignature(toPath(*p));
@@ -809,7 +813,36 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
             std::vector<std::pair<std::string, std::string>> charts;  // label, path
         };
         std::vector<Group> groups;
+        auto groupFor = [&](const std::string& title, const std::string& key, const LooseDir& ld) -> Group& {
+            for (Group& x : groups)
+                if (x.key == key) return x;
+            groups.push_back({title, key, ld.dir, ld.root, {}});
+            return groups.back();
+        };
         for (const LooseDir& ld : m.loose) {
+            // FL Studio projects charted for SNIFF: each pattern with notes in
+            // the chart lanes is a difficulty ("song.flp#3").
+            for (const fs::path& f : listDir(ld.dir, false)) {
+                const std::string n = toLower(pathStr(f.filename()));
+                if (!endsWithI(n, ".flp") && !endsWithI(n, ".fsc")) continue;
+                if (fileSize(pathStr(f)) > (256u << 20)) continue;
+                FlpProject proj;
+                std::string err;
+                if (!readFlpFile(pathStr(f), proj, err)) continue;
+                const std::vector<int> pats = flpChartPatterns(proj);
+                if (pats.empty()) continue;  // a music project, not a chart
+                std::string title = proj.title.empty() ? prettyName(stripVariant(pathStr(f.stem()))) : proj.title;
+                std::string key = fuzzyKey(title);
+                if (key.empty()) key = groupKey(title);
+                Group& g = groupFor(title, key, ld);
+                for (int pat : pats) {
+                    std::string label = (pats.size() == 1 ? std::string("Normal") : flpPatternLabel(proj, pat)) + " (FL Studio)";
+                    for (int k = 2; std::any_of(g.charts.begin(), g.charts.end(), [&](const auto& c) { return equalsI(c.first, label); }); ++k)
+                        label = (pats.size() == 1 ? std::string("Normal") : flpPatternLabel(proj, pat)) + " (FL Studio " +
+                                std::to_string(k) + ")";
+                    g.charts.push_back({label, pathStr(f) + "#" + std::to_string(pat)});
+                }
+            }
             for (const fs::path& f : listDir(ld.dir, false)) {
                 ChartPeek pk;
                 if (!looksLikeChart(f, pk)) continue;

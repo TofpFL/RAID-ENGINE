@@ -295,7 +295,10 @@ void SceneRenderer::drawSprite(const Sprite& s, const Camera& cam) {
             u[0] = x1; v[0] = y0; u[1] = x1; v[1] = y1; u[2] = x0; v[2] = y1; u[3] = x0; v[3] = y0;
         }
     } else {
-        for (int i = 0; i < 4; ++i) u[i] = v[i] = 0;
+        // makeGraphic: a bitmap of its own in Flixel, so a shader on it sees
+        // openfl_TextureCoordv run from 0 to 1 across the sprite (sampling the
+        // 1x1 white texture anywhere gives the same colour).
+        u[0] = 0; v[0] = 0; u[1] = 1; v[1] = 0; u[2] = 1; v[2] = 1; u[3] = 0; v[3] = 1;
     }
 
     uint32_t tint = s.color & 0xFFFFFF;
@@ -316,7 +319,9 @@ void SceneRenderer::drawSprite(const Sprite& s, const Camera& cam) {
         // Shader output is premultiplied (OpenFL style).
         rlDrawRenderBatchActive();
         BeginShaderMode(shp->sh);
-        applyUniforms(*shp, *s.shader, tex ? float(tex->width) : 1.0f, tex ? float(tex->height) : 1.0f, false, *sc_);
+        // openfl_TextureSize: the bitmap's size (a makeGraphic's own width and height).
+        applyUniforms(*shp, *s.shader, tex ? float(tex->width) : std::max(1.0f, f.w), tex ? float(tex->height) : std::max(1.0f, f.h),
+                      false, *sc_);
         setBlend(blend_, 5);
     } else {
         setBlend(blend_, s.blend);

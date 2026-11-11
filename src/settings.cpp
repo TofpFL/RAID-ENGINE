@@ -41,7 +41,12 @@ bool Settings::load(const std::string& path) {
         else if (k == "shaders") shaders = b;
         else if (k == "extraKeys") extraKeys = b;
         else if (k == "noteCounter") noteCounter = clampv(int(d), 0, 2);
+        else if (k == "luaErrors") luaErrors = clampv(int(d), 0, 2);
+        else if (k == "luaWarnings") luaWarnings = clampv(int(d), 0, 2);
         else if (k == "psychUi") psychUi = b;
+        else if (k == "hitPopups") hitPopups = b;
+        else if (k == "timeBar") timeBar = clampv(int(d), 0, 3);
+        else if (k == "healthBarAlpha") healthBarAlpha = clampv(float(d), 0.0f, 1.0f);
         else if (k == "psychFolder") psychFolder = v;
         else if (k == "fullscreen") fullscreen = b;
         else if (k == "showTimings") showTimings = b;
@@ -54,6 +59,7 @@ bool Settings::load(const std::string& path) {
         else if (k == "musicVol") musicVol = clampv(float(d), 0.0f, 1.0f);
         else if (k == "sfxVol") sfxVol = clampv(float(d), 0.0f, 1.0f);
         else if (k == "hitsoundVol") hitsoundVol = clampv(float(d), 0.0f, 1.0f);
+        else if (k == "muted") muted = b;
     }
     return true;
 }
@@ -66,10 +72,12 @@ bool Settings::save(const std::string& path) const {
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
       << "\nshowFps=" << showFps << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter
+      << "\nluaErrors=" << luaErrors << "\nluaWarnings=" << luaWarnings << "\nhitPopups=" << hitPopups
+      << "\ntimeBar=" << timeBar << "\nhealthBarAlpha=" << healthBarAlpha
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
-      << "\nhitsoundVol=" << hitsoundVol << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
+      << "\nhitsoundVol=" << hitsoundVol << "\nmuted=" << muted << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
     return bool(f);
 }
 

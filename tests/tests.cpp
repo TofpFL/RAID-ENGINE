@@ -19,6 +19,7 @@ using namespace gh;
 int g_fail = 0, g_pass = 0;
 void runPsychTests();
 void runScanTests();
+int printFlp(int argc, char** argv, int first);
 void runExtraTests(bool audio);
 int runPsychCorpus(const char* dir);
 #define CHECK(cond)                                                              \
@@ -414,6 +415,8 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--keys")) return printKeys(argc, argv, i + 1);
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--psych-corpus")) return runPsychCorpus(argv[i + 1]);
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--flp")) return printFlp(argc, argv, i + 1);
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--audio")) audio = true;
         if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) { wav = argv[++i]; audio = true; }

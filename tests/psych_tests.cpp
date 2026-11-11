@@ -2,8 +2,11 @@
 // stage JSON, events, the scene model and the Lua API. Also a corpus runner:
 // gh_tests --psych-corpus <dir> loads every atlas, character, stage and
 // script found under <dir> and reports anything that fails.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +53,12 @@ struct StubGame : ScriptGame {
         events.push_back(n + "|" + a + "|" + b);
     }
     void debugPrint(const std::string& t, uint32_t) override { prints.push_back(t); }
+    struct Notice { std::string text; bool error, debugMode; };
+    std::vector<Notice> notices;
+    void debugNotice(const std::string& t, bool error, bool debugMode) override {
+        notices.push_back({t, error, debugMode});
+        prints.push_back(t);
+    }
     void startCountdown() override { ++countdownStarts; }
     std::string saveRoot;
     std::string saveDir() override { return saveRoot; }
@@ -356,6 +365,40 @@ void testLua() {
     const size_t before = host.errors.size();
     host.call("onUpdate", {scene::Value(0.016)});
     PCHECK(host.errors.size() == before + 1 && host.errors.back().find("too long") != std::string::npos);
+
+    // os.clock counts real time, as on Windows: a shader's iTime keeps moving
+    // while the game waits (Linux's C clock() counts CPU time).
+    game.prints.clear();
+    PCHECK(host.loadString("clock.lua", R"LUA(
+        local t0 = 0
+        function onCreate() t0 = os.clock() end
+        function onBeatHit() debugPrint(tostring(os.clock() - t0)) end)LUA"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    host.call("onBeatHit");
+    PCHECK(!game.prints.empty() && std::atof(game.prints.back().c_str()) >= 0.1 && std::atof(game.prints.back().c_str()) < 5);
+
+    // Warnings and errors say whether the script set luaDebugMode (Psych only
+    // shows them on screen then; Options > DEBUG decides here).
+    game.notices.clear();
+    PCHECK(host.loadString("quiet.lua", R"LUA(
+        function onCreate() makeLuaSprite('a', 'no_such_image', 0, 0) end
+        function onStepHit() local x = nil; x.y = 1 end)LUA"));
+    PCHECK(host.loadString("loud.lua", R"LUA(
+        luaDebugMode = true
+        function onCreate() makeLuaSprite('b', 'no_such_image', 0, 0) end
+        function onStepHit() local x = nil; x.y = 1 end)LUA"));
+    host.call("onStepHit");
+    auto noticeOf = [&](const char* script, bool error) -> const StubGame::Notice* {
+        for (const auto& n : game.notices)
+            if (n.error == error && n.text.find(script) != std::string::npos) return &n;
+        return nullptr;
+    };
+    PCHECK(noticeOf("quiet.lua", false) && !noticeOf("quiet.lua", false)->debugMode);
+    PCHECK(noticeOf("quiet.lua", true) && !noticeOf("quiet.lua", true)->debugMode);
+    PCHECK(noticeOf("loud.lua", false) && noticeOf("loud.lua", false)->debugMode);
+    PCHECK(noticeOf("loud.lua", true) && noticeOf("loud.lua", true)->debugMode);
+    PCHECK(!host.loadString("nope.lua", "function onCreate( end"));  // a script that does not load is always reported
+    PCHECK(noticeOf("nope.lua", true) && noticeOf("nope.lua", true)->debugMode);
 
     // Syntax errors are reported, not fatal.
     PCHECK(!host.loadString("broken.lua", "function onCreate( end"));
