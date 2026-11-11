@@ -29,7 +29,14 @@ bool readFile(const std::string& path, std::string& out);  // binary-safe, UTF-8
 class Files {
 public:
     void setRoots(std::vector<std::string> roots);
+    // The other installed mods' asset folders: find() looks there when the
+    // song's own roots do not have a file (mods reuse each other's characters,
+    // stages, images and sounds; a borrowed stage or character brings its
+    // script). list() never does, so another mod's global scripts/ do not run
+    // in this one.
+    void setSharedRoots(std::vector<std::string> roots);
     const std::vector<std::string>& roots() const { return roots_; }
+    const std::vector<std::string>& sharedRoots() const { return shared_; }
     std::string find(const std::string& rel) const;  // full path or ""
     // Files directly inside relDir (across roots, first root wins per name).
     std::vector<std::string> list(const std::string& relDir, const std::string& ext) const;
@@ -37,8 +44,9 @@ public:
 private:
     std::string resolveIn(const std::string& root, const std::string& rel) const;
     const std::vector<std::string>& dirEntries(const std::string& dir) const;
-    std::vector<std::string> roots_;
+    std::vector<std::string> roots_, shared_;
     mutable std::map<std::string, std::vector<std::string>> dirCache_;
+    mutable std::map<std::string, std::string> sharedFound_;  // rel path -> file ("" = none) in the shared roots
 };
 
 struct Graphic {

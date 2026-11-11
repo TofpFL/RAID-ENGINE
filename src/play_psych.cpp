@@ -313,7 +313,17 @@ void PlayState::setScriptGlobals() {
     set("noResetButton", true);
     set("lowQuality", s.lowDetail);
     set("shadersEnabled", s.shaders);
-    set("currentModDirectory", entry_->subtitle);
+    {
+        // The song's folder inside mods/, as in Psych ("MyMod" for mods/MyMod/,
+        // "" outside mods/), so 'mods/'..currentModDirectory..'/images/x.png'
+        // finds the file.
+        std::string dir = entry_->modRoot, mods = app().base + "mods/", cur;
+        std::replace(dir.begin(), dir.end(), '\\', '/');
+        std::replace(mods.begin(), mods.end(), '\\', '/');
+        if (dir.rfind(mods, 0) == 0) cur = dir.substr(mods.size());
+        while (!cur.empty() && cur.back() == '/') cur.pop_back();
+        set("currentModDirectory", cur);
+    }
     set("noteSkin", std::string());
     set("noteSkinPostfix", std::string());
     set("splashSkin", std::string());
@@ -393,6 +403,7 @@ bool PlayState::setupPsych() {
     if (roots.empty() && !entry_->modRoot.empty()) roots.push_back(entry_->modRoot);
     roots.push_back(a.base + "mods/");
     sc.files.setRoots(roots);
+    sc.files.setSharedRoots(a.library.sharedAssetRootsFor(*entry_));  // what this mod lacks, from the other mods
 
     // Charts from older engines name no stage: the original game picks it from the song.
     auto baseStageAvailable = [&](const std::string& st) {
