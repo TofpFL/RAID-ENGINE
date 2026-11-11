@@ -58,7 +58,7 @@ bool Replay::load(const std::string& path) {
         else if (k == "keys") keys = std::atoi(v.c_str());
         else if (k == "score") score = std::atoll(v.c_str());
         else if (k == "acc") acc = std::atof(v.c_str());
-        else if (k == "misses") misses = std::atoi(v.c_str());
+        else if (k == "misses") misses = std::atoll(v.c_str());
         else if (k == "events") { count = size_t(std::atoll(v.c_str())); break; }
     }
     events.reserve(count);

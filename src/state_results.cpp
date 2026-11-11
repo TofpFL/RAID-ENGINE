@@ -13,6 +13,16 @@ using gfx::FontId;
 using gfx::fade;
 
 namespace {
+// Text that shrinks (centred on its line) to fit maxW pixels: big numbers from spam charts.
+void fitText(FontId f, const std::string& s, float x, float y, float size, float maxW, Color c, Align a, float outline) {
+    const float w = gfx::measure(f, s, size).x;
+    if (w > maxW) {
+        const float ns = size * maxW / w;
+        y += (size - ns) * 0.5f;
+        size = ns;
+    }
+    gfx::text(f, s, x, y, size, c, a, outline);
+}
 const Color kGold{255, 214, 120, 255};
 const Color kIvory{246, 236, 214, 255};
 
@@ -90,24 +100,32 @@ public:
                   kIvory, Align::Left, 1.5f);
         const float shown = saturate(t * 1.5f);
         gfx::text(FontId::Ui, "SCORE", x, 150, 22, fade(kGold, 0.8f));
-        gfx::text(FontId::Ui, fmtThousands((long long)(double(r_.score) * shown)), x, 170, 56, WHITE, Align::Left, 2.0f);
+        fitText(FontId::Ui, fmtThousands(shown >= 1 ? r_.score : (long long)(double(r_.score) * shown)), x, 170, 56, 360, WHITE,
+                Align::Left, 2.0f);
         gfx::text(FontId::Ui, "ACCURACY", x + 380, 150, 22, fade(kGold, 0.8f));
         gfx::text(FontId::Ui, TextFormat("%.2f%%", r_.acc * 100.0 * shown), x + 380, 170, 56, WHITE, Align::Left, 2.0f);
         static const char* names[4] = {"DIVINE", "GRACE", "MORTAL", "SINFUL"};
         for (int i = 0; i < 4; ++i) {
             gfx::text(FontId::Ui, names[i], x, 250.0f + i * 38, 30, kRatingCols[i], Align::Left, 1.5f);
-            gfx::text(FontId::Ui, std::to_string(r_.counts[size_t(i)]), x + 220, 250.0f + i * 38, 30, WHITE, Align::Right, 1.5f);
+            fitText(FontId::Ui, fmtThousands(r_.counts[size_t(i)]), x + 350, 250.0f + i * 38, 30, 350 - 130, WHITE, Align::Right, 1.5f);
         }
         gfx::text(FontId::Ui, "MISSES", x + 380, 250, 30, Color{255, 90, 100, 255}, Align::Left, 1.5f);
-        gfx::text(FontId::Ui, std::to_string(r_.misses), x + 640, 250, 30, WHITE, Align::Right, 1.5f);
+        fitText(FontId::Ui, fmtThousands(r_.misses), x + 640, 250, 30, 260 - 110, WHITE, Align::Right, 1.5f);
         gfx::text(FontId::Ui, "MAX COMBO", x + 380, 288, 30, kGold, Align::Left, 1.5f);
-        gfx::text(FontId::Ui, std::to_string(r_.maxCombo), x + 640, 288, 30, WHITE, Align::Right, 1.5f);
+        fitText(FontId::Ui, fmtThousands(r_.maxCombo), x + 640, 288, 30, 260 - 160, WHITE, Align::Right, 1.5f);
         gfx::text(FontId::Ui, "TIMING", x + 380, 326, 30, kIvory, Align::Left, 1.5f);
         gfx::text(FontId::Ui, TextFormat("%+.1f / %.1f ms", mean_, sd_), x + 640, 326, 30, WHITE, Align::Right, 1.5f);
-        long long hit = 0;
-        for (int c : r_.counts) hit += c;
-        gfx::text(FontId::Ui, "NOTES", x + 380, 364, 30, kIvory, Align::Left, 1.5f);
-        gfx::text(FontId::Ui, fmtThousands(hit) + " / " + fmtThousands(r_.totalNotes), x + 640, 364, 30, WHITE, Align::Right, 1.5f);
+        // Notes hit / notes in the chart; "Both sides" (Options, Note counter) adds the opponent's.
+        long long hit = 0, total = r_.totalNotes;
+        for (long long c : r_.counts) hit += c;
+        const bool both = app().settings.noteCounter == 2;
+        if (both) {
+            hit += r_.opponentHits;
+            total += r_.opponentNotes;
+        }
+        gfx::text(FontId::Ui, both ? "NOTES (BOTH)" : "NOTES", x + 380, 364, both ? 22 : 30, kIvory, Align::Left, 1.5f);
+        fitText(FontId::Ui, fmtThousands(hit) + " / " + fmtThousands(total), x + 640, 364, 30, 260 - (both ? 125 : 95), WHITE,
+                Align::Right, 1.5f);
         // timing graph
         const Rectangle g{x, 420, 680, 190};
         DrawRectangleRounded({g.x - 8, g.y - 8, g.width + 16, g.height + 16}, 0.06f, 8, Color{8, 4, 14, 200});

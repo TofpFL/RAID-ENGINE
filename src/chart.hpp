@@ -75,13 +75,15 @@ struct Chart {
 // Parses an FNF-family chart: legacy/Psych 0.x ("song.notes[].sectionNotes"),
 // Psych 1.0 ("format": "psych_v1"), or V-Slice ("notes": {diff: [...]}) when
 // metadataJson (the -metadata.json text) is given.
+// extraKeys = false plays every chart with 4 keys (lane = value % 4), like
+// Psych and JS Engine; the chart editor always keeps the chart's own keys.
 bool parseChart(std::string_view json, const std::string& difficulty, Chart& out, std::string& err,
-                std::string_view vsliceMetadata = {});
+                std::string_view vsliceMetadata = {}, bool extraKeys = true);
 
 bool readTextFile(const std::string& path, std::string& out);
 
 struct StreamedNotes;
 bool parseChartStreamed(std::string_view skeleton, const StreamedNotes& notes, const std::string& difficulty, Chart& out,
-                        std::string& err);
+                        std::string& err, bool extraKeys = true);
 
 }  // namespace gh

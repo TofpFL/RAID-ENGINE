@@ -26,7 +26,7 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
             maxSus_[s][l] = 0;
         }
     for (bool& h : held_) h = false;
-    totalPlayerNotes = 0;
+    totalPlayerNotes = totalOpponentNotes = 0;
     for (size_t i = 0; i < chart.notes.size(); ++i) {
         const Note& n = chart.notes[i];
         if (n.lane >= keys_) continue;
@@ -40,7 +40,7 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
         ln.stack = std::max<uint16_t>(1, n.stack);
         lanes_[n.side][n.lane].push_back(ln);
         maxSus_[n.side][n.lane] = std::max(maxSus_[n.side][n.lane], n.length);
-        if (n.side == 1 && n.kind == kNormal) totalPlayerNotes += ln.stack;
+        if (n.kind == kNormal) (n.side == 1 ? totalPlayerNotes : totalOpponentNotes) += ln.stack;
     }
     events.clear();
     score = 0;
@@ -52,7 +52,9 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
     health = 1.0;
     dead = false;
     hitErrors.clear();
-    hitErrors.reserve(totalPlayerNotes);
+    hitErrors.reserve(size_t(std::min<uint64_t>(totalPlayerNotes, kMaxHitErrors)));
+    errStride_ = 1;
+    errTick_ = 0;
     lastMs_ = -1e18;
     accSum_ = 0;
 }
@@ -80,14 +82,25 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
 
     // A stack of notes is one press but every note in it counts.
     const RatingInfo& info = kRatings[r];
-    const int k = n.stack * mult_[1];
+    const long long k = (long long)n.stack * mult_[1];
     score += (long long)info.score * k;
     combo += k;
     maxCombo = std::max(maxCombo, combo);
     counts[r] += k;
     accSum_ += info.accuracy * k;
     addHealth(info.health);
-    hitErrors.push_back({float(n.t), float(err)});
+    // Timing errors for the results graph: past kMaxHitErrors hits only every
+    // other one is kept (then every fourth...), so memory stays bounded.
+    if (++errTick_ >= errStride_) {
+        errTick_ = 0;
+        hitErrors.push_back({float(n.t), float(err)});
+        if (hitErrors.size() >= kMaxHitErrors) {
+            size_t w = 0;
+            for (size_t i = 0; i < hitErrors.size(); i += 2) hitErrors[w++] = hitErrors[i];
+            hitErrors.resize(w);
+            errStride_ *= 2;
+        }
+    }
     GameEvent e{};
     e.type = GameEvent::PlayerHit;
     e.lane = uint8_t(lane);
@@ -279,14 +292,14 @@ void Session::rewindTo(double songMs) {
     lastMs_ = -1e18;
 }
 
-int Session::judged() const {
-    int n = 0;
-    for (int c : counts) n += c;
+long long Session::judged() const {
+    long long n = 0;
+    for (long long c : counts) n += c;
     return n;
 }
 
 double Session::accuracy() const {
-    const int total = judged() + misses;
+    const long long total = judged() + misses;
     return total > 0 ? accSum_ / double(total) : 1.0;
 }
 

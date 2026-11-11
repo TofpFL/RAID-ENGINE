@@ -21,7 +21,7 @@ struct Replay {
     int keys = 4;
     long long score = 0;
     double acc = 0;
-    int misses = 0;
+    long long misses = 0;
     std::vector<ReplayEvent> events;
 
     bool save(const std::string& path) const;

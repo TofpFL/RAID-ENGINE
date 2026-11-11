@@ -38,7 +38,7 @@ int singDir(int keys, int lane) {
 Color rgbColor(uint32_t rgb) { return Color{(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8), (unsigned char)rgb, 255}; }
 
 // Psych Engine's rating names and full-combo labels (its interface style).
-std::string psychRatingName(double acc, int judged) {
+std::string psychRatingName(double acc, long long judged) {
     if (judged == 0) return "?";
     static const std::pair<double, const char*> names[] = {{0.2, "You Suck!"}, {0.4, "Shit"}, {0.5, "Bad"}, {0.6, "Bruh"},
                                                            {0.69, "Meh"}, {0.7, "Nice"}, {0.8, "Good"}, {0.9, "Great"},
@@ -90,7 +90,9 @@ void PlayState::enter() {
     }
     const SongEntry copy = *entry_;
     const std::string diff = req_.diff;
-    job_ = std::async(std::launch::async, [copy, diff, mirror] { return app().library.prepare(copy, diff, mirror); });
+    const bool extraKeys = app().settings.extraKeys;
+    job_ = std::async(std::launch::async,
+                      [copy, diff, mirror, extraKeys] { return app().library.prepare(copy, diff, mirror, extraKeys); });
     loadStart_ = a.now;
 }
 
@@ -166,6 +168,13 @@ void PlayState::update(double dt) {
     session_.update(songMs_);
     handleNoteEvents();
     processChartEvents();
+    if (a.settings.noteCounter > 0) {  // notes per second, counted like the note counter
+        const long long hits = session_.judged() + (a.settings.noteCounter == 2 ? session_.opponentHits : 0);
+        npsWindow_.emplace_back(now, hits);
+        while (npsWindow_.size() > 1 && now - npsWindow_.front().first > 1.0) npsWindow_.pop_front();
+        nps_ = hits - npsWindow_.front().second;
+        maxNps_ = std::max(maxNps_, nps_);
+    }
 
     // Psych order: onBeatHit, then onStepHit, then onSectionHit.
     const double beatF = chart_.beatAt(songMs_);
@@ -200,8 +209,10 @@ void PlayState::update(double dt) {
         const bool focusLeft = (focus == 1) == playerLeft_;
         camFocus_.x = approach(camFocus_.x, focusLeft ? 540.0f : 740.0f, 2.4f, float(dt));
         camFocus_.y = approach(camFocus_.y, 370.0f, 2.4f, float(dt));
-        camZoom_ = approach(camZoom_, 1.0f, 4.0f, float(dt));
-        hudZoom_ = approach(hudZoom_, 1.0f, 5.0f, float(dt));
+        if (zoomingOn_) {  // zoom events stay until the first note is hit
+            camZoom_ = approach(camZoom_, 1.0f, 4.0f, float(dt));
+            hudZoom_ = approach(hudZoom_, 1.0f, 5.0f, float(dt));
+        }
     } else {
         psychHoldRefresh();
         psychUpdate(dt);
@@ -431,6 +442,9 @@ void PlayState::restart() {
     healthShown_ = 1.0f;
     camFocus_ = {640, 370};
     camZoom_ = hudZoom_ = 1.0f;
+    zoomingOn_ = false;
+    npsWindow_.clear();
+    nps_ = maxNps_ = 0;
     speedMult_ = 1.0;
     speedTweenDur_ = 0;
     left_.singUntil = right_.singUntil = -10;
@@ -601,6 +615,7 @@ void PlayState::handleNoteEvents() {
     evs.swap(session_.events);
     for (const GameEvent& ev : evs) {
         const int dir = singDir(chart_.keys, ev.lane);
+        if (ev.type == GameEvent::PlayerHit || ev.type == GameEvent::OpponentHit) zoomingOn_ = true;
         switch (ev.type) {
             case GameEvent::PlayerHit: {
                 confirm_[1][ev.lane] = 1.0f;
@@ -673,7 +688,7 @@ void PlayState::onBeat(int b) {
         psychBeat(b);
         return;
     }
-    if (b >= 0 && b % 4 == 0 && a.settings.camZoom) {
+    if (b >= 0 && b % 4 == 0 && a.settings.camZoom && zoomingOn_) {
         camZoom_ += 0.015f;
         hudZoom_ += 0.03f;
     }
@@ -709,8 +724,8 @@ void PlayState::onSection(int s) {
 void PlayState::pause() {
     App& a = app();
     const long presses = std::count_if(record_.events.begin(), record_.events.end(), [](const ReplayEvent& e) { return e.down; });
-    platform::log(TextFormat("paused at %.1f s: %ld presses, %d hits, %d misses", songMs_ / 1000.0, presses,
-                             session_.counts[0] + session_.counts[1] + session_.counts[2] + session_.counts[3], session_.misses));
+    platform::log(TextFormat("paused at %.1f s: %ld presses, %lld hits, %lld misses", songMs_ / 1000.0, presses,
+                             session_.judged(), session_.misses));
     phase_ = Phase::Paused;
     pauseSel_ = 0;
     a.mixer.pause();
@@ -804,6 +819,8 @@ void PlayState::finish() {
     r.maxCombo = session_.maxCombo;
     r.counts = session_.counts;
     r.totalNotes = (long long)session_.totalPlayerNotes;
+    r.opponentHits = session_.opponentHits;
+    r.opponentNotes = (long long)session_.totalOpponentNotes;
     r.rank = session_.rank();
     r.clear = session_.clearLabel();
     r.errors = session_.hitErrors;
@@ -847,8 +864,8 @@ void PlayState::finish() {
         }
     }
     if (a.autoRun.enabled)
-        std::printf("[auto] %s (%s): score %lld, accuracy %.2f%%, misses %d, max combo %d, notes %zu%s\n", r.title.c_str(),
-                    r.diff.c_str(), r.score, r.acc * 100.0, r.misses, r.maxCombo, session_.totalPlayerNotes,
+        std::printf("[auto] %s (%s): score %lld, accuracy %.2f%%, misses %lld, max combo %lld, notes %llu%s\n", r.title.c_str(),
+                    r.diff.c_str(), r.score, r.acc * 100.0, r.misses, r.maxCombo, (unsigned long long)session_.totalPlayerNotes,
                     psych_ ? " [psych scene]" : "");
     a.change(makeResults(r));
 }
@@ -1027,7 +1044,7 @@ void PlayState::drawHud() {
     }
     // score line
     if (hudShown("scoreTxt")) {
-        std::string line = "Score " + fmtThousands(session_.score) + "   |   Misses " + std::to_string(session_.misses) +
+        std::string line = "Score " + fmtThousands(session_.score) + "   |   Misses " + fmtThousands(session_.misses) +
                            "   |   " + TextFormat("%.2f%%", session_.accuracy() * 100.0) + " (" +
                            (ratingNameOverride_.empty() ? session_.rank() : ratingNameOverride_) + ")";
         const std::string cl = ratingFcOverride_.empty() ? session_.clearLabel() : ratingFcOverride_;
@@ -1044,15 +1061,44 @@ void PlayState::drawHud() {
             auto it = scene_->hud.find("scoreTxt");
             if (it != scene_->hud.end() && !it->second->text.text.empty()) line = it->second->text.text;
         }
+        // Long numbers (spam charts) shrink the line to fit instead of running off screen.
+        constexpr float kMaxLineW = gfx::W - 40.0f;
         if (const Font* f = ui.active() ? ui.font() : nullptr) {
-            const Vector2 sz = MeasureTextEx(*f, line.c_str(), 20, 0);
+            float size = 20;
+            Vector2 sz = MeasureTextEx(*f, line.c_str(), size, 0);
+            if (sz.x > kMaxLineW) {
+                size *= kMaxLineW / sz.x;
+                sz = MeasureTextEx(*f, line.c_str(), size, 0);
+            }
             const Vector2 at{gfx::W / 2 - sz.x * 0.5f, by + 36};
             for (const Vector2 o : {Vector2{-1.25f, 0}, Vector2{1.25f, 0}, Vector2{0, -1.25f}, Vector2{0, 1.25f}})
-                DrawTextEx(*f, line.c_str(), {at.x + o.x, at.y + o.y}, 20, 0, BLACK);
-            DrawTextEx(*f, line.c_str(), at, 20, 0, WHITE);
+                DrawTextEx(*f, line.c_str(), {at.x + o.x, at.y + o.y}, size, 0, BLACK);
+            DrawTextEx(*f, line.c_str(), at, size, 0, WHITE);
         } else {
-            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, 24, WHITE, Align::Center, 2.0f);
+            float size = 24;
+            const float w = gfx::measure(FontId::Ui, line, size).x;
+            if (w > kMaxLineW) size *= kMaxLineW / w;
+            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, size, WHITE, Align::Center, 2.0f);
         }
+    }
+    // Note counter (Options, Note counter): notes hit so far out of the chart's
+    // total, for your side, or both sides added up the way H-Slice shows them
+    // ("opponent + yours = both").
+    if (s.noteCounter > 0 && hudShown("scoreTxt")) {
+        std::string line;
+        if (s.noteCounter == 2) {
+            const long long opp = session_.opponentHits, mine = session_.judged();
+            line = "Notes " + fmtThousands(opp) + " + " + fmtThousands(mine) + " = " + fmtThousands(opp + mine) + " / " +
+                   fmtThousands((long long)(session_.totalPlayerNotes + session_.totalOpponentNotes));
+        } else {
+            line = "Notes " + fmtThousands(session_.judged()) + " / " + fmtThousands((long long)session_.totalPlayerNotes);
+        }
+        line += "   |   NPS " + fmtThousands(nps_) + " (max " + fmtThousands(maxNps_) + ")";
+        if (cfg_.practice && !replaying_) line += "   |   PRACTICE MODE";
+        float size = 18;
+        const float w = gfx::measure(FontId::Ui, line, size).x;
+        if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
+        gfx::text(FontId::Ui, line, gfx::W / 2, by + 60, size, fade(kIvory, 0.9f), Align::Center, 1.5f);
     }
     if ((cfg_.botplay || replaying_) && hudShown("botplayTxt"))
         gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
@@ -1065,7 +1111,8 @@ void PlayState::drawHud() {
             DrawRectangleRec({c.x - half, gfx::H * 0.55f, half * 2 - 4, gfx::H * 0.45f}, fade(col, touchDown_[l] ? 0.28f : 0.09f));
         }
     }
-    if (cfg_.practice && !replaying_) gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
+    if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && hudShown("scoreTxt")))
+        gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
     if (rate_ != 1.0) gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
 
     // song progress

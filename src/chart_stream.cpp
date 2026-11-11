@@ -476,18 +476,18 @@ bool streamChartSkeleton(const std::string& path, std::string& skeleton, Streame
 }
 
 bool loadChartFile(const std::string& path, const std::string& difficulty, Chart& out, std::string& err,
-                   std::string_view vsliceMetadata, size_t streamThreshold) {
+                   std::string_view vsliceMetadata, size_t streamThreshold, bool extraKeys) {
     const uint64_t size = fileSize(path);
     if (size == 0 && !fileExistsAt(path)) { err = "cannot read " + path; return false; }
     if (!vsliceMetadata.empty() || size < (streamThreshold ? streamThreshold : kStreamThreshold)) {
         std::string text;
         if (!readTextFile(path, text)) { err = "cannot read " + path; return false; }
-        return parseChart(text, difficulty, out, err, vsliceMetadata);
+        return parseChart(text, difficulty, out, err, vsliceMetadata, extraKeys);
     }
     std::string skeleton;
     StreamedNotes sn;
     if (!streamChartSkeleton(path, skeleton, sn, err)) return false;
-    return parseChartStreamed(skeleton, sn, difficulty, out, err);
+    return parseChartStreamed(skeleton, sn, difficulty, out, err, extraKeys);
 }
 
 bool fileExistsAt(const std::string& path) {

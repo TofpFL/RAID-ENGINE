@@ -27,6 +27,7 @@ struct Row {
     float mn = 0, mx = 1, step = 0.1f;
     int* i = nullptr;
     std::vector<int> choices;
+    std::vector<std::string> names;  // shown for each choice (default: frames per second)
     std::function<std::string(float)> fmt;
     std::function<void()> action;
     int lane = 0;
@@ -51,6 +52,8 @@ public:
             {Row::Bool, "Opponent strums", "Light up the opponent's receptors when they sing.", &s.opponentStrums},
             {Row::Bool, "Note splashes", "Bursts of light on DIVINE hits.", &s.noteSplashes},
             {Row::Bool, "Touch controls", "Tap the lanes on a touchscreen (a mouse click counts as a tap).", &s.touchControls},
+            {Row::Bool, "Extra keys", "Charts made for 5 to 9 keys keep them. OFF: every chart has 4 keys, like Psych and JS Engine.",
+             &s.extraKeys},
             {Row::Header, "CONTROLS  (4 KEYS)", ""},
             {Row::Key, "Left lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
             {Row::Key, "Down lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
@@ -68,6 +71,8 @@ public:
             {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
             {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on weak devices.", &s.shaders},
             {Row::Header, "INTERFACE", ""},
+            {Row::Choice, "Note counter", "Notes hit so far, under the score: your side only, or both sides added up.", nullptr,
+             nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
             {Row::Bool, "Psych Engine interface", "Notes, ratings, countdown and sounds from your own Psych / JS Engine copy.",
              &s.psychUi},
             {Row::Action, "Psych Engine folder...", ""},
@@ -220,7 +225,14 @@ public:
             switch (r.kind) {
                 case Row::Bool: val = (r.label == "Fullscreen" ? a.settings.fullscreen : *r.b) ? "ON" : "OFF"; break;
                 case Row::Number: val = r.fmt(*r.f); break;
-                case Row::Choice: val = *r.i == 0 ? std::string("Unlimited") : std::string(TextFormat("%d FPS", *r.i)); break;
+                case Row::Choice:
+                    if (!r.names.empty()) {
+                        for (size_t k = 0; k < r.choices.size() && k < r.names.size(); ++k)
+                            if (r.choices[k] == *r.i) val = r.names[k];
+                    } else {
+                        val = *r.i == 0 ? std::string("Unlimited") : std::string(TextFormat("%d FPS", *r.i));
+                    }
+                    break;
                 case Row::Action: val = ">"; break;
                 case Row::Key: {
                     for (int k = 0; k < 2; ++k) {

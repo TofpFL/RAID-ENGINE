@@ -37,7 +37,7 @@ bool streamChartSkeleton(const std::string& path, std::string& skeleton, Streame
 
 // Loads any chart file: small ones are parsed whole, big ones are streamed.
 bool loadChartFile(const std::string& path, const std::string& difficulty, Chart& out, std::string& err,
-                   std::string_view vsliceMetadata = {}, size_t streamThreshold = 0);
+                   std::string_view vsliceMetadata = {}, size_t streamThreshold = 0, bool extraKeys = true);
 
 // Quick look at a chart's song name, opponent and stage without parsing it
 // (reads only the start and end of the file).

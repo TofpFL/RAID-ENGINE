@@ -648,7 +648,7 @@ static PcmPtr loadOrNull(const std::string& path) {
     return p;
 }
 
-Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirror) {
+Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys) {
     Prepared p;
     if (e.builtin && e.def) {
         BuiltinAudio a = builtinAudio(*e.def);
@@ -685,7 +685,7 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
         std::string meta;
         if (!e.metaPath.empty()) readTextFile(e.metaPath, meta);
         std::string err;
-        if (!loadChartFile(e.chartPaths[idx], diff, p.chart, err, meta)) { p.error = err; return p; }
+        if (!loadChartFile(e.chartPaths[idx], diff, p.chart, err, meta, 0, extraKeys)) { p.error = err; return p; }
         if (p.chart.title.empty()) p.chart.title = e.title;
         p.chart.difficulty = diff;
         // Psych keeps events in a separate events.json next to the charts.

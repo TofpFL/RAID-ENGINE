@@ -9,6 +9,7 @@
 
 #include "chart.hpp"
 #include "chart_stream.hpp"
+#include "common.hpp"
 #include "composer.hpp"
 #include "json.hpp"
 #include "session.hpp"
@@ -128,6 +129,28 @@ static void testPsychV1AndExtraKeys() {
     CHECK(parseChart(chartWith(5, eight), "Hard", c, err) && c.keys == 8);
     CHECK(parseChart(chartWith(5, six), "Hard", c, err) && c.keys == 6);  // Extra Keys 6K, both sides
 
+    // "options": {"mania": 3} (Andromeda / Dave & Bambi forks) is 9 keys only
+    // when the notes use 9 lanes: Eons keeps it with notes on lanes 0-3 only and
+    // plays with 4 keys in Psych and JS Engine.
+    auto optionsChart = [](const std::vector<int>& lanes) {
+        std::string j = R"({"song": {"song": "O", "bpm": 150, "notes": [{"mustHitSection": true, "sectionNotes": [)";
+        for (size_t i = 0; i < lanes.size(); ++i)
+            j += (i ? "," : "") + std::string("[") + std::to_string(i * 10) + "," + std::to_string(lanes[i]) + ",0]";
+        return j + R"(]}], "options": {"mania": 3, "crits": false, "allowBot": true}}})";
+    };
+    std::vector<int> eons, both, dnb9;
+    for (int i = 0; i < 60; ++i) {
+        eons.push_back(i % 4);
+        both.push_back(i % 8);
+        dnb9.push_back(i % 18);
+    }
+    CHECK(parseChart(optionsChart(eons), "Hard", c, err) && c.keys == 4);
+    CHECK(c.playerNotes == 60 && c.opponentNotes == 0);
+    CHECK(parseChart(optionsChart(both), "Hard", c, err) && c.keys == 4);
+    CHECK(parseChart(optionsChart(dnb9), "Hard", c, err) && c.keys == 9);
+    // A song-level "mania" whose readings all fit worse than 4 keys: 4 keys.
+    CHECK(parseChart(chartWith(2, both), "Hard", c, err) && c.keys == 4);
+
     // Stacked notes (same lane within 1 ms) are one note that counts as all of them.
     const char* stacked = R"({"song": {"song": "S", "bpm": 100, "notes": [{"mustHitSection": true,
       "sectionNotes": [[100, 0, 0], [100.4, 0, 0], [100, 1, 0], [100.2, 0, 0]]}]}})";
@@ -145,6 +168,30 @@ static void testPsychV1AndExtraKeys() {
     s.init(c, SessionConfig{});
     s.update(1000);  // nothing pressed: every stacked note is a miss
     CHECK(s.misses == 4 && s.judged() == 0);
+
+    // No 32-bit limits: a full stack (65535 notes) hit with JS Engine's note
+    // multiplier at 100000 counts 6.5 billion notes in one hit.
+    Chart big;
+    big.keys = 4;
+    Note bn;
+    bn.time = 500;
+    bn.lane = 0;
+    bn.side = 1;
+    bn.stack = kMaxStack;
+    big.notes.push_back(bn);
+    bn.side = 0;
+    big.notes.push_back(bn);
+    big.finalize(120);
+    s.init(big, bot);
+    s.setNoteMultiplier(1, 100000);
+    s.setNoteMultiplier(0, 100000);
+    s.update(600);
+    const long long expect = 65535LL * 100000LL;
+    CHECK(s.judged() == expect && s.combo == expect && s.maxCombo == expect);
+    CHECK(s.score == expect * ratingInfo(kDivine).score);
+    CHECK(s.opponentHits == expect);
+    CHECK(s.totalPlayerNotes == 65535 && s.totalOpponentNotes == 65535);
+    CHECK(fmtThousands(expect) == "6,553,500,000");
 }
 
 static void testVSlice() {
@@ -308,6 +355,21 @@ static void testComposer(bool audio, const char* wavDir) {
 }
 
 // Parses real chart files and plays them with the bot: gh_tests --chart a.json b.json ...
+// --keys <charts...>: the key count and note totals of each chart (no gameplay).
+static int printKeys(int argc, char** argv, int first) {
+    for (int i = first; i < argc; ++i) {
+        Chart c;
+        std::string err;
+        if (!loadChartFile(argv[i], "Hard", c, err)) {
+            std::printf("FAILED  %s: %s\n", argv[i], err.c_str());
+            continue;
+        }
+        std::printf("%dK  P%llu O%llu  %s\n", c.keys, (unsigned long long)c.playerNotes, (unsigned long long)c.opponentNotes,
+                    argv[i]);
+    }
+    return 0;
+}
+
 static int benchCharts(int argc, char** argv, int first) {
     int bad = 0;
     for (int i = first; i < argc; ++i) {
@@ -347,6 +409,8 @@ int main(int argc, char** argv) {
     const char* wav = nullptr;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--chart")) return benchCharts(argc, argv, i + 1);
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--keys")) return printKeys(argc, argv, i + 1);
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--psych-corpus")) return runPsychCorpus(argv[i + 1]);
     for (int i = 1; i < argc; ++i) {

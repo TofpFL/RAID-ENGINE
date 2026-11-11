@@ -56,7 +56,8 @@ public:
     const std::string& installReport() const { return installReport_; }
 
     // Heavy work (decoding, composing, parsing). Thread-safe.
-    Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror);
+    // extraKeys = false: every chart gets 4 keys (Options, Extra keys).
+    Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys = true);
     PcmPtr preview(const SongEntry& e);  // instrumental only, for menus
 
     // Menu music (composed once).

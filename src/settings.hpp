@@ -21,6 +21,8 @@ struct Settings {
     bool lowDetail = false;
     bool vsync = false;
     bool shaders = true;       // mod shaders and screen effects
+    bool extraKeys = true;     // OFF: every chart has 4 keys, like Psych and JS Engine
+    int noteCounter = 1;       // HUD note counter: 0 off, 1 your side, 2 both sides
     bool psychUi = false;      // "Psych Engine" interface (needs psychFolder)
     std::string psychFolder;   // a Psych Engine / JS Engine copy to take that interface from
     bool fullscreen = false;
@@ -44,7 +46,7 @@ const char* keyName(int code);
 struct ScoreEntry {
     long long score = 0;
     double acc = 0;
-    int misses = 0;
+    long long misses = 0;
     std::string rank, clear;
 };
 
