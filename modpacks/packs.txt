@@ -20,3 +20,28 @@ m-r-vs-dave-bambi-fantrack-reupload
 pulseforge-created
 charts feitos no flp
 Hellbreaker Remake FLP
+
+# Mods from the owner's "Drive LMAC" Google Drive folder (not in the PulseForge repository):
+# zips built with build_packs.py --local, copied from their Drive links.
+drive lmac-manny-edition-v3 GodsHand-mod-lmac-manny-edition-v3.zip=1e-HGCMDVVGF5G_nIs8edEcMyONu9EzT2
+drive lmac-orien-sprites GodsHand-mod-lmac-orien-sprites.zip=16a5g2glIrAyRYyepwOEa0uXayFfWRxyt
+drive lmac-batata-new GodsHand-mod-lmac-batata-new.zip=1PbfScbqm0k2drw-rSyMbBIDUOENfuzx6
+drive lmac-denpaex-reconstructed GodsHand-mod-lmac-denpaex-reconstructed.zip=1BnEjV6xPecHZJJvlfFBh-ShgvzzDUI9l
+drive lmac-charts-extra GodsHand-mod-lmac-charts-extra.zip=16vvrTcZuxTtXu9sbzv2d_ll_ajCBAI3l
+drive drive-2026-08-22-dek-v2-finale GodsHand-mod-drive-2026-08-22-dek-v2-finale.zip=19Lce-P-l_cVRZ9-tBzxY_FYbUhMOcYnF
+drive drive-pack-christmasred-edition GodsHand-mod-drive-pack-christmasred-edition.zip=1Ws9FDN704pt5-1PJnymHxAEQC7sl-yiX
+drive drive-pack-hortas-edition-v3-16d89 GodsHand-mod-drive-pack-hortas-edition-v3-16d89.zip=1Bq_PvCzfivbVACAKpKptKaeFkubdnfPv
+drive drive-pack-h-slice-js-0-2-4-windows GodsHand-mod-drive-pack-h-slice-js-0-2-4-windows.zip=1sPBF_nxxHjzacgrlaOaZ2rHmByryb_zs
+drive drive-pack-h-slice-0-2-3-windows GodsHand-mod-drive-pack-h-slice-0-2-3-windows.zip=1O26cQonv0_ahYj8ba9d2y0lNhXpbP40f
+drive drive-pack-screboot-demo GodsHand-mod-drive-pack-screboot-demo.zip=1n1U_0tz11Ta661BIIFqtD3cIQn6qbdwA
+drive drive-2026-08-22-vs-yerep-v2 GodsHand-mod-drive-2026-08-22-vs-yerep-v2.zip=1VGECS7TBlvfGWJJ0j4DtN4DU2VeWIxgo
+drive drive-pack-fnf-js-engine-windows GodsHand-mod-drive-pack-fnf-js-engine-windows.zip=1RQ_VnwG95erwCjs51WBdx3qZdzz9q_8A
+drive drive-library-2026-04-30 GodsHand-mod-drive-library-2026-04-30.zip=1_sqOEuAajQqoZcnKnWAHbjmVAEvTPxZP
+drive drive-pack-vs-dinnerbambi-9e405 GodsHand-mod-drive-pack-vs-dinnerbambi-9e405.zip=1-kGKUIxGueucUlad57LaHZYg9L-MB0Qj
+drive drive-2026-08-22-dek-v2-dev-unverified GodsHand-mod-drive-2026-08-22-dek-v2-dev-unverified.zip=1h1oTZ99j6sTi0VAvU_MBnnMboc8AUPiF
+drive drive-2026-08-22-dek-v2-demo GodsHand-mod-drive-2026-08-22-dek-v2-demo.zip=13r8BSL4plUvFZSAkjSxlfeAPDqJCf62j
+drive drive-2026-08-22-ez-edition GodsHand-mod-drive-2026-08-22-ez-edition.zip=1z40MhbrJ7SH_fnaBL_p8Q821G9Oa4MDY
+drive drive-pack-denpaex GodsHand-mod-drive-pack-denpaex.zip=1MMdFT9vkVfOaiFEyjanp3ftzpoz2ErRI
+drive drive-2026-08-22-vs-everamii GodsHand-mod-drive-2026-08-22-vs-everamii.zip=1CPcue8m8ImrSkUY3qVQ2c3-IuP_LEdr6
+drive drive-2026-08-22-dek-v1 GodsHand-mod-drive-2026-08-22-dek-v1.zip=18-_Lf5zusabVz0excbLgF_1tVzwfap1C
+drive pulseforge-complete-menu-music GodsHand-mod-pulseforge-complete-menu-music.zip=1sLrwhA_j-UHQIwFD8R8fKCCYPjOSrqvr
