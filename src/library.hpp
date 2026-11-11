@@ -12,31 +12,9 @@
 #include "audio.hpp"
 #include "chart.hpp"
 #include "composer.hpp"
+#include "song_scan.hpp"
 
 namespace gh {
-
-struct SongEntry {
-    std::string id;        // stable key for scores
-    std::string title;
-    std::string subtitle;  // blurb or source pack
-    bool builtin = false;
-    const SongDef* def = nullptr;
-    std::vector<std::string> diffs;
-    std::vector<std::string> chartPaths;  // parallel to diffs (custom songs)
-    std::string metaPath;                 // V-Slice metadata
-    std::string inst, voices, voicesP, voicesO;
-    uint32_t color = 0xB48CDC;
-    std::string opponent;  // built-in character id, "" for custom
-    // Psych content: the mod folder (or the song folder for songs/), the
-    // chart folder and the song's folder name (data/<songKey>/).
-    std::string modRoot, dataDir, songKey;
-    // Every folder the scene looks in for images, characters, stages and
-    // sounds: the content root plus, for full game builds, assets/shared,
-    // assets/week1 and so on.
-    std::vector<std::string> assetRoots;
-    bool autoChart = false;  // no chart: generated from the audio
-    bool noAudio = false;    // chart found but no audio for it anywhere
-};
 
 struct Prepared {
     bool ok = false;
@@ -54,6 +32,11 @@ public:
     int customCount() const { return customCount_; }
     const std::string& report() const { return report_; }
     const std::string& installReport() const { return installReport_; }
+    // Every folder of the enabled mods that holds assets (images/, characters/,
+    // stages/, sounds/, music/, videos/, shaders/, fonts/), its own mod's
+    // first: a song looks there for what its own folders do not have, since
+    // mods reuse each other's assets.
+    std::vector<std::string> sharedAssetRootsFor(const SongEntry& e) const { return sharedRootsFor(assets_, e); }
 
     // Heavy work (decoding, composing, parsing). Thread-safe.
     // extraKeys = false: every chart gets 4 keys (Options, Extra keys).
@@ -70,11 +53,9 @@ private:
         PcmPtr inst, vp, vo;
     };
     BuiltinAudio builtinAudio(const SongDef& def);
-    void scanSongFolder(const std::string& dir, const std::string& audioDir, const std::string& source,
-                        const std::string& modRoot);
-    void scanMods(const std::string& modsDir);
 
     std::vector<SongEntry> songs_;
+    SongScan assets_;  // the asset folders of the scan (its songs moved to songs_)
     int customCount_ = 0;
     std::string report_, installReport_;
     std::mutex mtx_;

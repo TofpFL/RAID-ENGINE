@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.2.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +97,7 @@ add_library(gh_core STATIC
   src/composer.cpp
   src/psych.cpp
   src/scene.cpp
+  src/song_scan.cpp
   src/lua_host.cpp
   src/replay.cpp
   src/mod_install.cpp
@@ -111,7 +112,7 @@ else()
 endif()
 
 if(GH_BUILD_TESTS)
-  add_executable(gh_tests tests/tests.cpp tests/psych_tests.cpp)
+  add_executable(gh_tests tests/tests.cpp tests/psych_tests.cpp tests/scan_tests.cpp)
   target_link_libraries(gh_tests PRIVATE gh_core)
   enable_testing()
   add_test(NAME core COMMAND gh_tests)
@@ -216,6 +217,15 @@ if(GH_BUILD_GAME)
     target_link_options(godshand PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,-z,max-page-size=16384)
   else()
     add_executable(godshand WIN32 ${GH_GAME_SOURCES})
+  endif()
+  if(WIN32)
+    # UTF-8 as the process code page (Windows 10 1903+): files and folders
+    # named in any script (mods with Chinese, Japanese... names) open.
+    if(MSVC)
+      target_sources(godshand PRIVATE src/windows/godshand.manifest)
+    else()
+      target_sources(godshand PRIVATE src/windows/godshand.rc)
+    endif()
   endif()
   target_link_libraries(godshand PRIVATE gh_core raylib)
   target_compile_definitions(godshand PRIVATE GH_VERSION="${PROJECT_VERSION}")

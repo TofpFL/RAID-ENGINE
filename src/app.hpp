@@ -67,6 +67,7 @@ class App {
 public:
     std::string base;  // folder with assets/, songs/, mods/ (ends with '/')
     bool listSongs = false;
+    bool checkCharts = false;  // --check-charts with --list-songs
     Settings settings;
     Scores scores;
     Library library;

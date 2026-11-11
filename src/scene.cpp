@@ -103,6 +103,19 @@ void Files::setRoots(std::vector<std::string> roots) {
         if (std::find(roots_.begin(), roots_.end(), r) == roots_.end()) roots_.push_back(r);
     }
     dirCache_.clear();
+    sharedFound_.clear();
+}
+
+void Files::setSharedRoots(std::vector<std::string> roots) {
+    shared_.clear();
+    sharedFound_.clear();
+    for (std::string& r : roots) {
+        if (r.empty()) continue;
+        if (r.back() != '/' && r.back() != '\\') r += '/';
+        if (std::find(roots_.begin(), roots_.end(), r) == roots_.end() &&
+            std::find(shared_.begin(), shared_.end(), r) == shared_.end())
+            shared_.push_back(r);
+    }
 }
 
 const std::vector<std::string>& Files::dirEntries(const std::string& dir) const {
@@ -147,7 +160,15 @@ std::string Files::find(const std::string& relIn) const {
         std::string f = resolveIn(r, rel);
         if (!f.empty()) return f;
     }
-    return "";
+    if (shared_.empty()) return "";
+    // Hundreds of folders when many mods are installed: each answer is kept.
+    auto it = sharedFound_.find(rel);
+    if (it != sharedFound_.end()) return it->second;
+    std::string found;
+    for (const std::string& r : shared_)
+        if (!(found = resolveIn(r, rel)).empty()) break;
+    sharedFound_.emplace(rel, found);
+    return found;
 }
 
 std::vector<std::string> Files::list(const std::string& relDir, const std::string& ext) const {

@@ -8,6 +8,7 @@
 #include <thread>
 #include <typeinfo>
 
+#include "chart_stream.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
 #include "platform.hpp"
@@ -138,11 +139,13 @@ int App::run(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') autoRun.diff = next();
         } else if (!std::strcmp(a, "--editor-export")) autoRun.editorExport = next();
         else if (!std::strcmp(a, "--list-songs")) listSongs = true;
+        else if (!std::strcmp(a, "--check-charts")) checkCharts = true;
         else if (!std::strcmp(a, "--touch")) touchMode = true;
         else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
     if (listSongs) {
         // Prints what the song library finds (no window): --list-songs [--base dir]
+        // [--check-charts: load every chart and print its keys and notes, or why it fails]
         if (base.empty()) base = std::string(GetWorkingDirectory()) + "/";
         if (base.back() != '/') base += '/';
         SetTraceLogLevel(LOG_WARNING);
@@ -151,8 +154,23 @@ int App::run(int argc, char** argv) {
             if (e.builtin) continue;
             std::printf("%s\n  title: %s | %s%s\n  audio: %s\n", e.id.c_str(), e.title.c_str(), e.subtitle.c_str(),
                         e.autoChart ? " | AutoChart" : "", e.inst.empty() ? "(none)" : e.inst.c_str());
-            for (size_t i = 0; i < e.diffs.size(); ++i)
-                std::printf("  [%s] %s\n", e.diffs[i].c_str(), i < e.chartPaths.size() ? e.chartPaths[i].c_str() : "");
+            if (!e.voices.empty() || !e.voicesP.empty() || !e.voicesO.empty())
+                std::printf("  voices: %s\n", (e.voices.empty() ? e.voicesP + " " + e.voicesO : e.voices).c_str());
+            std::string meta;
+            if (checkCharts && !e.metaPath.empty()) readTextFile(e.metaPath, meta);
+            for (size_t i = 0; i < e.diffs.size(); ++i) {
+                const std::string path = i < e.chartPaths.size() ? e.chartPaths[i] : "";
+                std::printf("  [%s] %s", e.diffs[i].c_str(), path.c_str());
+                if (checkCharts && !path.empty()) {
+                    Chart c;
+                    std::string err;
+                    if (loadChartFile(path, e.diffs[i], c, err, meta, 0, true))
+                        std::printf("  -> ok %dK, %llu notes", c.keys, (unsigned long long)(c.playerNotes + c.opponentNotes));
+                    else
+                        std::printf("  -> ERROR %s", err.c_str());
+                }
+                std::printf("\n");
+            }
             if (e.assetRoots.size() > 1)
                 for (const std::string& r : e.assetRoots) std::printf("  root %s\n", r.c_str());
         }

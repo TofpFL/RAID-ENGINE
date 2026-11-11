@@ -383,6 +383,22 @@ private:
         }
         if (c == '[') {
             r_.get();
+            if (pulseForge_ && depth == 1 && key == "notes") {
+                const size_t k = out_.rangeStart.size();
+                out_.rangeStart.push_back(uint32_t(out_.notes.size()));
+                std::vector<double> lastT(64, -1e300);
+                for (;;) {
+                    r_.skipWs();
+                    if (r_.peek() == ']') { r_.get(); break; }
+                    if (!pulseForgeNote(lastT)) return false;
+                    r_.skipWs();
+                    const int sep = r_.get();
+                    if (sep == ']') break;
+                    if (sep != ',') return fail("expected , or ] in notes");
+                }
+                out += "[{\"__gh_stream\":" + std::to_string(k) + "}]";
+                return true;
+            }
             if (key == "sectionNotes") {
                 // Marker object first, then any kept (non-note) elements.
                 const size_t k = out_.rangeStart.size();
@@ -420,7 +436,13 @@ private:
             out += ']';
             return true;
         }
-        if (c == '"') return string(out, nullptr);
+        if (c == '"') {
+            if (depth != 1 || key != "format") return string(out, nullptr);
+            std::string text;
+            if (!string(out, &text)) return false;
+            pulseForge_ = text == "pulseforge-chart" || text == "pulseforge-editor-chart";
+            return true;
+        }
         if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) return number(out);
         if (std::isalpha(c)) {
             std::string w;
@@ -432,9 +454,51 @@ private:
         return fail("unexpected character");
     }
 
+    // {"time": ms, "duration": ms, "lane": n, "owner": "player", "kind": "normal", ...}
+    bool pulseForgeNote(std::vector<double>& lastT) {
+        if (r_.get() != '{') return fail("expected a note object");
+        double time = std::nan(""), duration = 0, lane = -1;
+        std::string owner, kind;
+        r_.skipWs();
+        if (r_.peek() == '}') { r_.get(); return true; }
+        for (;;) {
+            r_.skipWs();
+            std::string raw, k;
+            if (!string(raw, &k)) return false;
+            r_.skipWs();
+            if (r_.get() != ':') return fail("expected :");
+            r_.skipWs();
+            if (k == "time" || k == "duration" || k == "lane") {
+                double v = 0;
+                if (!fastNumber(v)) return false;
+                (k == "time" ? time : k == "duration" ? duration : lane) = v;
+            } else if ((k == "owner" || k == "kind") && r_.peek() == '"') {
+                std::string text;
+                raw.clear();
+                if (!string(raw, &text)) return false;
+                (k == "owner" ? owner : kind) = std::move(text);
+            } else {
+                std::string skip;
+                if (!value(skip, k, 64)) return false;
+            }
+            r_.skipWs();
+            const int sep = r_.get();
+            if (sep == '}') break;
+            if (sep != ',') return fail("expected , or } in a note");
+        }
+        if (!std::isfinite(time) || !(lane >= 0) || lane >= 20) return true;
+        const int who = owner == "opponent" || owner == "dad" || owner == "enemy" ? 1
+                        : owner == "girlfriend" || owner == "gf"                 ? 2
+                                                                                 : 0;
+        const bool typed = !kind.empty() && kind != "normal";
+        addStreamed(time, double(int(lane) + 20 * who), duration, typed, kind, false, lastT);
+        return true;
+    }
+
     Reader& r_;
     StreamedNotes& out_;
     std::string err_;
+    bool pulseForge_ = false;
 };
 
 }  // namespace
@@ -550,6 +614,16 @@ ChartPeek peekChart(const std::string& path) {
         if (v.empty()) v = findStringField(tail, key);
         return v;
     };
+    pk.pulseForge = head.find("\"pulseforge-chart\"") != std::string::npos ||
+                    head.find("\"pulseforge-editor-chart\"") != std::string::npos;
+    if (pk.pulseForge) {
+        pk.song = field("title");
+        pk.difficulty = field("difficulty");
+        pk.player2 = field("opponent");
+        pk.stage = field("stage");
+        pk.isChart = true;
+        return pk;
+    }
     pk.song = field("song");
     if (pk.song.empty()) pk.song = field("songName");
     pk.player2 = field("player2");

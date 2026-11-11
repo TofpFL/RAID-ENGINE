@@ -18,6 +18,7 @@ using namespace gh;
 
 int g_fail = 0, g_pass = 0;
 void runPsychTests();
+void runScanTests();
 void runExtraTests(bool audio);
 int runPsychCorpus(const char* dir);
 #define CHECK(cond)                                                              \
@@ -423,6 +424,7 @@ int main(int argc, char** argv) {
     testVSlice();
     testSession();
     runPsychTests();
+    runScanTests();
     runExtraTests(audio);
     testComposer(audio, wav);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

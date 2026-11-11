@@ -32,7 +32,9 @@ struct StreamedNotes {
 };
 
 // Reads the file, sending every sectionNotes array to `notes` and the rest of
-// the JSON to `skeleton` (with {"__gh_stream": k} where array k was).
+// the JSON to `skeleton` (with {"__gh_stream": k} where array k was). In a
+// PulseForge chart the top-level "notes" list is streamed the same way, each
+// note stored as lane + 20 * owner (0 player, 1 opponent, 2 girlfriend).
 bool streamChartSkeleton(const std::string& path, std::string& skeleton, StreamedNotes& notes, std::string& err);
 
 // Loads any chart file: small ones are parsed whole, big ones are streamed.
@@ -43,7 +45,9 @@ bool loadChartFile(const std::string& path, const std::string& difficulty, Chart
 // (reads only the start and end of the file).
 struct ChartPeek {
     std::string song, player2, stage;
+    std::string difficulty;   // PulseForge charts name theirs
     bool isChart = false;
+    bool pulseForge = false;  // "pulseforge-chart" or "pulseforge-editor-chart"
 };
 ChartPeek peekChart(const std::string& path);
 

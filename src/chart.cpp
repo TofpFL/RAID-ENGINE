@@ -261,13 +261,18 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
     const bool v1 = doc.strOr(doc.get(s, "format"), "").find("psych_v1") != std::string_view::npos;
 
     const json::Value* sections = doc.get(s, "notes");
-    if (!sections || sections->type != Type::Array) { err = "chart has no 'notes' section array"; return false; }
+    // A lone section ({"mustHitSection", "sectionNotes"}: a fragment recovered
+    // from a bigger chart) plays as a chart of one section.
+    const bool lone = (!sections || sections->type != Type::Array) && doc.get(s, "sectionNotes");
+    if (!lone && (!sections || sections->type != Type::Array)) { err = "chart has no 'notes' section array"; return false; }
+    const size_t sectionCount = lone ? 1 : doc.size(*sections);
+    auto sectionAt = [&](size_t i) -> const json::Value& { return lone ? s : doc.at(*sections, i); };
 
     // Pass 1: how often each noteData value is used.
     std::array<uint64_t, 64> dataCount{};
     if (sn) dataCount = sn->dataCount;
-    for (size_t i = 0; i < doc.size(*sections); ++i) {
-        const json::Value* sv = doc.get(doc.at(*sections, i), "sectionNotes");
+    for (size_t i = 0; i < sectionCount; ++i) {
+        const json::Value* sv = doc.get(sectionAt(i), "sectionNotes");
         if (!sv || sv->type != Type::Array) continue;
         for (size_t j = 0; j < doc.size(*sv); ++j) {
             const json::Value& n = doc.at(*sv, j);
@@ -318,8 +323,8 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
         if (gfSec && di < keys) n.flags |= kFlagGF;
         out.notes.push_back(n);
     };
-    for (size_t i = 0; i < doc.size(*sections); ++i) {
-        const json::Value& sec = doc.at(*sections, i);
+    for (size_t i = 0; i < sectionCount; ++i) {
+        const json::Value& sec = sectionAt(i);
         if (sec.type != Type::Object) continue;
         const bool must = json::Document::boolean(doc.get(sec, "mustHitSection"), true);
         if (json::Document::boolean(doc.get(sec, "changeBPM"), false)) {
@@ -472,6 +477,164 @@ static bool parseVSlice(const json::Document& doc, std::string_view metaText, co
     return true;
 }
 
+// ------------------------------------------------------------ PulseForge ---
+// "format": "pulseforge-chart" (exported charts) or "pulseforge-editor-chart"
+// (the chart editor's projects and autosaves): notes with their time in ms,
+// lane and owner, a list of tempos, and the scene in "song" or "metadata".
+
+static bool isPulseForge(const json::Document& doc) {
+    const std::string_view f = doc.strOr(doc.get(doc.root(), "format"), "");
+    return f == "pulseforge-chart" || f == "pulseforge-editor-chart";
+}
+
+static std::string valueText(const json::Document& d, const json::Value* v) {
+    if (!v) return "";
+    if (v->type == json::Type::String) return std::string(d.str(*v));
+    if (v->type == json::Type::Bool) return v->b ? "true" : "false";
+    if (v->type == json::Type::Number) {
+        char buf[40];
+        std::snprintf(buf, sizeof buf, "%.10g", v->num);
+        return buf;
+    }
+    return "";
+}
+
+static int pulseForgeOwner(std::string_view o) {
+    if (o == "opponent" || o == "dad" || o == "enemy") return 1;
+    if (o == "girlfriend" || o == "gf") return 2;
+    return 0;
+}
+
+// Events as PulseForge reads them: {"time"/"t", "name", "value1", "value2"}
+// or "values", grouped {"time", "events": [[name, v1, v2]...]}, or Psych's
+// [time, [[name, v1, v2]...]].
+static void readPulseForgeEvents(const json::Document& d, const json::Value& arr, std::vector<psych::ChartEvent>& out) {
+    using json::Type;
+    auto triples = [&](double t, const json::Value& list) {
+        for (size_t j = 0; j < d.size(list); ++j) {
+            const json::Value& x = d.at(list, j);
+            if (x.type != Type::Array || d.size(x) == 0) continue;
+            psych::ChartEvent ev;
+            ev.timeMs = t;
+            ev.name = valueText(d, &d.at(x, 0));
+            if (d.size(x) > 1) ev.v1 = valueText(d, &d.at(x, 1));
+            if (d.size(x) > 2) ev.v2 = valueText(d, &d.at(x, 2));
+            if (!ev.name.empty()) out.push_back(std::move(ev));
+        }
+    };
+    for (size_t i = 0; i < d.size(arr); ++i) {
+        const json::Value& e = d.at(arr, i);
+        if (e.type == Type::Array) {
+            if (d.size(e) >= 2 && d.at(e, 1).type == Type::Array) triples(json::Document::num(&d.at(e, 0), 0), d.at(e, 1));
+            continue;
+        }
+        if (e.type != Type::Object) continue;
+        const double t = json::Document::num(d.get(e, "time"), json::Document::num(d.get(e, "t"), json::Document::num(d.get(e, "timeMs"), 0)));
+        if (const json::Value* list = d.get(e, "events"); list && list->type == Type::Array) {
+            triples(t, *list);
+            continue;
+        }
+        psych::ChartEvent ev;
+        ev.timeMs = t;
+        ev.name = valueText(d, d.get(e, "name"));
+        if (ev.name.empty()) ev.name = valueText(d, d.get(e, "event"));
+        if (ev.name.empty()) ev.name = valueText(d, d.get(e, "e"));
+        ev.v1 = valueText(d, d.get(e, "value1"));
+        ev.v2 = valueText(d, d.get(e, "value2"));
+        const json::Value* vals = d.get(e, "values");
+        if (!vals) vals = d.get(e, "v");
+        if (vals && vals->type == Type::Array) {
+            if (d.size(*vals) > 0) ev.v1 = valueText(d, &d.at(*vals, 0));
+            if (d.size(*vals) > 1) ev.v2 = valueText(d, &d.at(*vals, 1));
+        } else if (vals && ev.v1.empty()) {
+            ev.v1 = valueText(d, vals);
+        }
+        if (!ev.name.empty()) out.push_back(std::move(ev));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const psych::ChartEvent& a, const psych::ChartEvent& b) { return a.timeMs < b.timeMs; });
+}
+
+static bool parsePulseForge(const json::Document& doc, Chart& out, std::string& err, const StreamedNotes* sn, bool extraKeys) {
+    using json::Type;
+    const json::Value& root = doc.root();
+    const json::Value* meta = doc.get(root, "metadata");
+    if (!meta || meta->type != Type::Object) meta = doc.get(root, "song");
+    const json::Value& m = meta && meta->type == Type::Object ? *meta : root;
+    out.title = std::string(doc.strOr(doc.get(m, "title"), ""));
+    out.player = std::string(doc.strOr(doc.get(m, "player"), ""));
+    out.opponent = std::string(doc.strOr(doc.get(m, "opponent"), ""));
+    out.gf = std::string(doc.strOr(doc.get(m, "girlfriend"), ""));
+    out.stage = std::string(doc.strOr(doc.get(m, "stage"), ""));
+    const int keys = int(json::Document::num(doc.get(root, "keyCount"), json::Document::num(doc.get(m, "keyCount"), 4)));
+    out.keys = extraKeys && keys >= 1 && keys <= 9 ? keys : 4;
+    const double speed = json::Document::num(doc.get(root, "scrollSpeed"), json::Document::num(doc.get(m, "scrollSpeed"), 1.0));
+    out.speed = clampv(speed > 0 && std::isfinite(speed) ? speed : 1.0, 0.1, 20.0);
+    double bpm = 0;
+    if (const json::Value* tv = doc.get(root, "tempos"); tv && tv->type == Type::Array)
+        for (size_t i = 0; i < doc.size(*tv); ++i) {
+            const json::Value& t = doc.at(*tv, i);
+            const double b = json::Document::num(doc.get(t, "bpm"), 0), at = json::Document::num(doc.get(t, "time"), 0);
+            if (!(b > 0) || !std::isfinite(b) || !std::isfinite(at)) continue;
+            if (out.tempo.empty()) bpm = b;
+            out.tempo.push_back({std::max(0.0, at), b, 0});
+        }
+    if (!(bpm > 0)) bpm = 120;
+
+    const json::Value* notes = doc.get(root, "notes");
+    if (!notes || notes->type != Type::Array) { err = "PulseForge chart has no notes"; return false; }
+    std::vector<uint16_t> streamTypes{0};  // StreamedNotes type index -> chart type index
+    if (sn)
+        for (const std::string& t : sn->types) {
+            Note probe;
+            applyNoteType(t, probe, out);
+            streamTypes.push_back(probe.type);
+        }
+    auto add = [&](double t, double len, int lane, int owner, uint16_t stack) -> Note* {
+        if (!std::isfinite(t) || lane < 0) return nullptr;
+        Note n;
+        n.time = t;
+        n.length = std::isfinite(len) && len > 0 ? len : 0;
+        n.lane = uint8_t(lane % out.keys);
+        n.side = owner == 0 ? 1 : 0;
+        n.stack = std::max<uint16_t>(1, stack);
+        if (owner == 2) n.flags |= kFlagGF;
+        out.notes.push_back(n);
+        return &out.notes.back();
+    };
+    uint64_t raw = 0;
+    for (size_t i = 0; i < doc.size(*notes); ++i) {
+        const json::Value& nv = doc.at(*notes, i);
+        if (nv.type != Type::Object) continue;
+        if (sn) {
+            const double k = json::Document::num(doc.get(nv, "__gh_stream"), -1);
+            if (k >= 0 && size_t(k) + 1 < sn->rangeStart.size()) {
+                for (uint32_t q = sn->rangeStart[size_t(k)]; q < sn->rangeStart[size_t(k) + 1]; ++q) {
+                    const StreamedNote& r = sn->notes[q];
+                    if (Note* n = add(r.time, r.length, r.noteData() % 20, r.noteData() / 20, r.stack); n && r.type) {
+                        const uint16_t ct = r.type < streamTypes.size() ? streamTypes[r.type] : 0;
+                        const std::string typeName = ct ? out.noteTypes[ct] : std::string();
+                        if (ct) applyNoteType(typeName, *n, out);
+                    }
+                }
+                continue;
+            }
+        }
+        ++raw;
+        const std::string_view kind = doc.strOr(doc.get(nv, "kind"), "");
+        Note* n = add(json::Document::num(doc.get(nv, "time"), std::numeric_limits<double>::quiet_NaN()),
+                      json::Document::num(doc.get(nv, "duration"), 0), int(json::Document::num(doc.get(nv, "lane"), -1)),
+                      pulseForgeOwner(doc.strOr(doc.get(nv, "owner"), "player")), 1);
+        if (n && !kind.empty() && kind != "normal") applyNoteType(kind, *n, out);
+    }
+    out.rawNoteCount = sn ? sn->rawCount : raw;
+    if (const json::Value* ev = doc.get(root, "events"); ev && ev->type == Type::Array) readPulseForgeEvents(doc, *ev, out.events);
+    out.finalize(bpm);
+    // Sustains shorter than a step are taps, as in the other formats.
+    for (Note& n : out.notes)
+        if (n.length > 0 && n.length < out.stepMs(n.time) * 0.999) n.length = 0;
+    return true;
+}
+
 bool parseChart(std::string_view text, const std::string& difficulty, Chart& out, std::string& err,
                 std::string_view vsliceMetadata, bool extraKeys) {
     out = Chart();
@@ -479,6 +642,7 @@ bool parseChart(std::string_view text, const std::string& difficulty, Chart& out
     json::Document doc;
     std::string e;
     if (!doc.parse(text, &e)) { err = "invalid JSON: " + e; return false; }
+    if (isPulseForge(doc)) return parsePulseForge(doc, out, err, nullptr, extraKeys);
     const json::Value* notes = doc.get(doc.root(), "notes");
     const bool ok = (!vsliceMetadata.empty() || (notes && notes->type == json::Type::Object))
                         ? parseVSlice(doc, vsliceMetadata, difficulty, out, err)
@@ -494,6 +658,7 @@ bool parseChartStreamed(std::string_view skeleton, const StreamedNotes& notes, c
     json::Document doc;
     std::string e;
     if (!doc.parse(skeleton, &e)) { err = "invalid JSON: " + e; return false; }
+    if (isPulseForge(doc)) return parsePulseForge(doc, out, err, &notes, extraKeys);
     const bool ok = parsePsych(doc, out, err, &notes, extraKeys);
     if (ok) psych::parseEvents(doc, out.events);
     return ok;
