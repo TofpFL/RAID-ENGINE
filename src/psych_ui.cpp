@@ -316,10 +316,12 @@ bool PsychUi::rating(int which, Vector2 c, float scale, float alpha) const {
     return true;
 }
 
-bool PsychUi::combo(int value, Vector2 c, float scale, float alpha) const {
+bool PsychUi::combo(long long value, Vector2 c, float scale, float alpha) const {
     if (!active_ || !nums_[0].id) return false;
-    std::string digits = std::to_string(std::max(0, value));
+    std::string digits = std::to_string(std::max(0LL, value));
     while (digits.size() < 3) digits = "0" + digits;  // Psych shows at least three digits
+    // Many digits (spam charts) shrink to stay within 900 pixels.
+    if (43.0f * scale / 0.5f * float(digits.size()) > 900.0f) scale = 900.0f * 0.5f / (43.0f * float(digits.size()));
     const float step = 43.0f * scale / 0.5f;
     float x = c.x - step * float(digits.size() - 1) * 0.5f;
     for (char d : digits) {

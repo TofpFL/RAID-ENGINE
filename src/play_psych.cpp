@@ -660,8 +660,10 @@ void PlayState::psychNoteHit(const GameEvent& ev, bool opponent) {
     }
     holdRefresh_[side][ev.lane] = app().now;
     const std::string& type = chart_.noteTypes[ev.noteType < chart_.noteTypes.size() ? ev.noteType : 0];
+    // A note hit on either side starts the camera bops and lets zoom events
+    // ease back (Psych / JS Engine: camZooming; Tutorial keeps its own zoom).
+    if (toLower(entry_->songKey) != "tutorial") sc.camZooming = true;
     if (opponent) {
-        if (toLower(entry_->songKey) != "tutorial") sc.camZooming = true;
         app().mixer.setTrackVolume(Mixer::kVoiceOpponent, 1.0f);
         scripts_->call("opponentNoteHit", {Value(double(ev.id)), Value(double(ev.lane)), Value(type), Value(false)});
     } else {
@@ -762,18 +764,19 @@ void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
     App& a = app();
     const std::string& n = e.name;
     if (n == "Add Camera Zoom") {
-        // Works whatever "Camera zoom on beat" says: that option only stops the beat bops.
-        const double gz = numOr(e.v1, 0.015), hz = numOr(e.v2, 0.03);
-        if (psych_) {
-            if (scene_->camGame.zoom < 1.35f) {
-                scene_->camGame.zoom += float(gz);
-                scene_->camHud.zoom += float(hz);
-            }
-            scene_->camZooming = true;
-        } else {
-            camZoom_ += float(gz);
-            hudZoom_ += float(hz);
-        }
+        // Adds to the zoom like Psych / JS Engine: before the first note is hit
+        // (camZooming off) nothing eases it back, so the zoom stays and every
+        // further event adds to it (Eons pulls the camera back at 0 s and moves
+        // it in a little at each bar of the intro). Works whatever "Camera zoom
+        // on beat" says: that option only stops the beat bops.
+        // Each camera stops growing at 1.35 (Psych checks the game camera, JS
+        // Engine the HUD; checking each keeps the HUD on screen while the
+        // camera keeps adding up).
+        const float gz = float(numOr(e.v1, 0.015)), hz = float(numOr(e.v2, 0.03));
+        float& game = psych_ ? scene_->camGame.zoom : camZoom_;
+        float& hud = psych_ ? scene_->camHud.zoom : hudZoom_;
+        if (game < 1.35f || gz < 0) game = std::max(0.05f, game + gz);
+        if (hud < 1.35f || hz < 0) hud = std::max(0.05f, hud + hz);
         return;
     }
     if (n == "Change Scroll Speed") {
@@ -876,9 +879,13 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
         return v1.empty() || toLower(v1) == "default" ? base : numOr(v1, base);
     };
     if (n == "Set Camera Zoom" || n == "Set Cam Zoom") {
+        // JS Engine: the camera is the default zoom plus what zoom events added.
+        // While camZooming is on it eases to the new default; before that it
+        // moves at once and keeps what the events added.
         if (sc) {
-            sc->defaultCamZoom = zoomValue();
-            sc->camZooming = true;  // the camera eases to it
+            const double z = zoomValue();
+            if (!sc->camZooming) sc->camGame.zoom = std::max(0.05f, sc->camGame.zoom + float(z - sc->defaultCamZoom));
+            sc->defaultCamZoom = z;
         }
         return true;
     }
@@ -937,7 +944,7 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
         return true;
     }
     if (n == "Change Note Multiplier") {
-        const int m = std::max(1, int(std::lround(numOr(v1, 1))));
+        const long long m = std::max(1LL, std::llround(clampv(numOr(v1, 1), 1.0, 1e15)));
         if (v2.empty() || v2 == "1") session_.setNoteMultiplier(playerLeft_ ? 1 : 0, m);
         if (v2.empty() || v2 == "2") session_.setNoteMultiplier(playerLeft_ ? 0 : 1, m);
         return true;
@@ -1700,8 +1707,8 @@ bool PlayState::setGameProp(std::string_view path, const Value& v) {
     const double d = scene::toNum(v);
     if (path == "health") { session_.setHealth(clampv(d, 0.0, 2.0)); return true; }
     if (path == "songScore") { session_.score = (long long)d; return true; }
-    if (path == "songMisses") { session_.misses = int(d); return true; }
-    if (path == "combo") { session_.combo = int(d); return true; }
+    if (path == "songMisses") { session_.misses = (long long)d; return true; }
+    if (path == "combo") { session_.combo = (long long)d; return true; }
     if (path == "songHits") return true;
     if (path == "ratingName") { ratingNameOverride_ = scene::toStr(v); return true; }
     if (path == "ratingFC") { ratingFcOverride_ = scene::toStr(v); return true; }

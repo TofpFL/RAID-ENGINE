@@ -155,7 +155,7 @@ private:
         std::string text, timing;
         Color c;
         double t0;
-        int combo;
+        long long combo;
     };
     struct DebugLine {
         std::string text;
@@ -204,6 +204,9 @@ private:
     int heldCount_[9] = {};
     std::vector<int> keyLane_ = std::vector<int>(Input::kMaxCodes, -1);
     std::vector<Popup> popups_;
+    // Notes per second for the note counter (JS Engine / H-Slice): hits in the last second.
+    std::deque<std::pair<double, long long>> npsWindow_;
+    long long nps_ = 0, maxNps_ = 0;
     gfx::Particles fx_;
     int pauseSel_ = 0, deadSel_ = 0;
     double deadAt_ = 0, loadStart_ = 0, lastHitsound_ = 0, lastMissSfx_ = 0, waitStart_ = 0, endWaitStart_ = 0;
@@ -246,6 +249,7 @@ private:
     double speedTweenFrom_ = 1, speedTweenTo_ = 1, speedTweenT_ = 0, speedTweenDur_ = 0;
     double mustHitSectionFlag_ = 1;
     bool camZoomOnBeat_ = true, cameraZoomsSet_ = false, inCutscene_ = false;
+    bool zoomingOn_ = false;  // built-in camera: bops and zoom easing start at the first note hit
     int bopEvery_ = 4;
     // JS Engine events
     bool camTwist_ = false, twisted_ = false;
@@ -267,7 +271,7 @@ private:
     bool prevKeys_[9] = {};
     bool keyNow_[9] = {};
     bool prevMouse_[3] = {}, mouseNow_[3] = {};
-    int lastCombo_ = 0;
+    long long lastCombo_ = 0;
     bool backdrop_ = false;
     std::map<std::string, scene::CharacterPtr> charCache_;  // "slot:name" (Change Character)
     // Replays and touch input

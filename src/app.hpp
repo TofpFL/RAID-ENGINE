@@ -40,7 +40,8 @@ struct PlayRequest {
     std::string replayPath;  // watch this replay instead of playing
     std::vector<std::string> storyQueue;  // songs still to play after this one
     long long storyScore = 0;
-    int storyMisses = 0, storySongs = 0;
+    long long storyMisses = 0;
+    int storySongs = 0;
     double storyAccSum = 0;
 };
 
@@ -49,9 +50,10 @@ struct ResultData {
     std::string title, diff;
     long long score = 0;
     double acc = 0;
-    int misses = 0, maxCombo = 0;
-    std::array<int, kRatingCount> counts{};
+    long long misses = 0, maxCombo = 0;
+    std::array<long long, kRatingCount> counts{};
     long long totalNotes = 0;  // player notes in the chart, stacked ones included
+    long long opponentHits = 0, opponentNotes = 0;  // the opponent's side, for the "both sides" note count
     std::string rank, clear;
     std::vector<Session::HitError> errors;
     double lengthMs = 1;

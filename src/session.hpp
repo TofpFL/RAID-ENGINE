@@ -76,7 +76,7 @@ public:
     // Lanes the bot plays for the player (JS Engine bot energy), one bit per lane.
     void setAutoLanes(unsigned mask) { autoLanes_ = mask; }
     // Each player/opponent hit counts this many notes (JS Engine "Change Note Multiplier").
-    void setNoteMultiplier(int side, int m) { mult_[side & 1] = std::max(1, m); }
+    void setNoteMultiplier(int side, long long m) { mult_[side & 1] = std::max(1LL, m); }
     void setPractice(bool b) { cfg_.practice = b; }
     bool botplay() const { return cfg_.botplay; }
     bool keyHeld(int lane) const { return held_[lane]; }
@@ -84,20 +84,21 @@ public:
     std::vector<GameEvent> events;  // consumed (cleared) by the caller
 
     // Stats. Every note of the file counts, stacked ones included.
+    // 64-bit everywhere: spam charts pass two billion notes.
     long long score = 0;
-    int combo = 0, maxCombo = 0, misses = 0;
-    std::array<int, kRatingCount> counts{};
+    long long combo = 0, maxCombo = 0, misses = 0;
+    std::array<long long, kRatingCount> counts{};
     long long opponentHits = 0;
     double health = 1.0;  // 0..2
     void setHealth(double v) { health = 0; addHealth(v); }
     bool dead = false;
-    int judged() const;
+    long long judged() const;
     double accuracy() const;   // 0..1 (1 when nothing judged)
     std::string rank() const;  // S+, S, A, B, C, D
     std::string clearLabel() const;
     struct HitError { float t, err; };
     std::vector<HitError> hitErrors;
-    size_t totalPlayerNotes = 0;
+    uint64_t totalPlayerNotes = 0, totalOpponentNotes = 0;  // every note of the file, stacked ones included
     bool allResolved() const;
 
 private:
@@ -115,7 +116,9 @@ private:
     double lastMs_ = -1e18;
     double accSum_ = 0;
     unsigned autoLanes_ = 0;
-    int mult_[2] = {1, 1};
+    long long mult_[2] = {1, 1};
+    static constexpr size_t kMaxHitErrors = size_t(1) << 21;
+    uint64_t errStride_ = 1, errTick_ = 0;
 };
 
 }  // namespace gh

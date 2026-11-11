@@ -200,39 +200,51 @@ static double keyMisfit(const std::array<uint64_t, 64>& dataCount, uint64_t tota
 // Key count of a legacy/Psych chart. Only an explicit count makes it an
 // extra-key chart: Psych and JS Engine play every other chart with 4 keys
 // (lane = noteData % 4), whatever values its notes use.
-static int keysFromMetadata(const json::Document& doc, const json::Value& s, const std::array<uint64_t, 64>& dataCount) {
+static int keysFromMetadata(const json::Document& doc, const json::Value& s, const std::array<uint64_t, 64>& dataCount,
+                            bool extraKeys) {
+    if (!extraKeys) return 4;  // the player turned extra keys off
     int keys = int(json::Document::num(doc.get(s, "keyCount"), 0));  // Leather Engine
     if (keys >= 1 && keys <= 9) return keys;
     // "mania" numbers key counts differently from fork to fork: Dave & Bambi /
-    // Kade forks (in "options": 0=4K 1=6K 2=7K 3=9K), Psych Extra Keys
+    // Kade / Andromeda forks ("options": 0=4K 1=6K 2=7K 3=9K), Psych Extra Keys
     // (keys = mania + 1) and Shaggy-style multi-key (4, 6, 9, 5, 7, 8, 1, 2, 3).
+    // Psych and JS Engine ignore all of them and play 4 keys, so charts made
+    // there often keep a "mania" their notes do not use (Eons: options.mania 3,
+    // notes on lanes 0-3 only). Every reading, 4 keys included, is checked
+    // against the notes and the best fit wins.
     static const int dnb[] = {4, 6, 7, 9};
     static const int shaggy[] = {4, 6, 9, 5, 7, 8, 1, 2, 3};
     const json::Value* opts = doc.get(s, "options");
     const double om = opts ? json::Document::num(doc.get(*opts, "mania"), -1) : -1;
     const double sm = json::Document::num(doc.get(s, "mania"), -1);
-    if (om >= 0 && om <= 3) return dnb[int(om)];
-    if (sm >= 0 && sm <= 8) {
-        // The reading the notes fit best (Extra Keys first on a tie).
-        uint64_t total = 0;
-        for (uint64_t c : dataCount) total += c;
+    const bool songMania = sm >= 0 && sm <= 8, optMania = om >= 0 && om <= 3;
+    if (!songMania && !optMania) return 4;
+    // On a tie the first candidate wins: a song-level "mania" (Extra Keys,
+    // Kade, Shaggy) before 4 keys; 4 keys before an "options" one.
+    std::vector<int> candidates;
+    if (songMania) {
         const int m = int(sm);
-        int best = 0;
-        double bestCost = 0;
-        for (int k : {m + 1, m <= 3 ? dnb[m] : 0, shaggy[m]}) {
-            if (k < 1 || k > 9) continue;
-            const double cost = keyMisfit(dataCount, total, k);
-            if (best == 0 || cost < bestCost - 1e-9) {
-                best = k;
-                bestCost = cost;
-            }
-        }
-        return best;
+        candidates = {m + 1, m <= 3 ? dnb[m] : 0, shaggy[m]};
     }
-    return 4;
+    candidates.push_back(4);
+    if (optMania) candidates.push_back(dnb[int(om)]);
+    uint64_t total = 0;
+    for (uint64_t c : dataCount) total += c;
+    int best = 0;
+    double bestCost = 0;
+    for (int k : candidates) {
+        if (k < 1 || k > 9) continue;
+        const double cost = keyMisfit(dataCount, total, k);
+        if (best == 0 || cost < bestCost - 1e-9) {
+            best = k;
+            bestCost = cost;
+        }
+    }
+    return best;
 }
 
-static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, const StreamedNotes* sn = nullptr) {
+static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, const StreamedNotes* sn = nullptr,
+                       bool extraKeys = true) {
     using json::Type;
     const json::Value& root = doc.root();
     const json::Value* songV = doc.get(root, "song");
@@ -264,7 +276,7 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
             if (d >= 0 && d < 64) ++dataCount[size_t(d)];
         }
     }
-    out.keys = keysFromMetadata(doc, s, dataCount);
+    out.keys = keysFromMetadata(doc, s, dataCount, extraKeys);
     const int keys = out.keys;
 
     double secStart = 0, curBpm = bpm;
@@ -461,7 +473,7 @@ static bool parseVSlice(const json::Document& doc, std::string_view metaText, co
 }
 
 bool parseChart(std::string_view text, const std::string& difficulty, Chart& out, std::string& err,
-                std::string_view vsliceMetadata) {
+                std::string_view vsliceMetadata, bool extraKeys) {
     out = Chart();
     out.difficulty = difficulty;
     json::Document doc;
@@ -470,19 +482,19 @@ bool parseChart(std::string_view text, const std::string& difficulty, Chart& out
     const json::Value* notes = doc.get(doc.root(), "notes");
     const bool ok = (!vsliceMetadata.empty() || (notes && notes->type == json::Type::Object))
                         ? parseVSlice(doc, vsliceMetadata, difficulty, out, err)
-                        : parsePsych(doc, out, err);
+                        : parsePsych(doc, out, err, nullptr, extraKeys);
     if (ok) psych::parseEvents(doc, out.events);
     return ok;
 }
 
 bool parseChartStreamed(std::string_view skeleton, const StreamedNotes& notes, const std::string& difficulty, Chart& out,
-                        std::string& err) {
+                        std::string& err, bool extraKeys) {
     out = Chart();
     out.difficulty = difficulty;
     json::Document doc;
     std::string e;
     if (!doc.parse(skeleton, &e)) { err = "invalid JSON: " + e; return false; }
-    const bool ok = parsePsych(doc, out, err, &notes);
+    const bool ok = parsePsych(doc, out, err, &notes, extraKeys);
     if (ok) psych::parseEvents(doc, out.events);
     return ok;
 }

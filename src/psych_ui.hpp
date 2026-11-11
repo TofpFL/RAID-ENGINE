@@ -32,7 +32,7 @@ public:
     bool strum(int dir, Vector2 c, float size, int state, float alpha, float angle, double t) const;  // 0 idle, 1 pressed, 2 hit
     bool hold(int dir, float x, float y0, float y1, float width, float alpha) const;
     bool rating(int which, Vector2 c, float scale, float alpha) const;  // 0 sick .. 3 shit
-    bool combo(int value, Vector2 c, float scale, float alpha) const;
+    bool combo(long long value, Vector2 c, float scale, float alpha) const;
     bool countdown(int i, Vector2 c, float alpha) const;  // 0 ready, 1 set, 2 go
     bool healthBar(Rectangle bar, Color left, Color right, float leftFrac, float alpha) const;
     const Font* font() const { return font_.texture.id ? &font_ : nullptr; }
