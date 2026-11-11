@@ -3,7 +3,13 @@
 ones to the "mods" release (run by .github/workflows/mod-packs.yml).
 
 Needs git, git-lfs and an authenticated gh. Run with --local <dir> to only
-pack a folder that is already on disk (used for testing)."""
+pack a folder that is already on disk (used for testing).
+
+Two kinds of packs:
+  <folder>                          mods/<folder> of the "source" repository (Git LFS)
+  drive <folder> <zip>=<id> ...     zips already built (by this script's --local mode) and
+                                    shared on Google Drive with a public link; they are
+                                    copied to the release as they are"""
 import os, re, shutil, subprocess, sys, zipfile
 
 LIMIT = int(os.environ.get('GH_PACK_LIMIT', 1_900_000_000))  # GitHub allows 2 GiB per release file
@@ -25,16 +31,29 @@ def slug(name):
 
 
 def read_list():
-    source, commit, folders = None, None, []
+    source, commit, folders, drive = None, None, [], {}
     for line in open(os.path.join(HERE, 'packs.txt'), encoding='utf-8'):
         line = line.strip()
         if not line or line.startswith('#'):
             continue
         if line.startswith('source '):
             _, source, commit = line.split()
+        elif line.startswith('drive '):
+            _, folder, *zips = line.split()
+            drive[folder] = [tuple(z.split('=', 1)) for z in zips]
+            folders.append(folder)
         else:
             folders.append(line)
-    return source, commit, folders
+    return source, commit, folders, drive
+
+
+def fetch_drive(file_id, out):
+    """Downloads a publicly shared Google Drive file (large files skip the virus-scan page)."""
+    url = 'https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t' % file_id
+    run('curl', '-sS', '-f', '-L', '--retry', '5', '--retry-all-errors', '-o', out, url)
+    with open(out, 'rb') as fh:
+        if fh.read(4) != b'PK\x03\x04':
+            raise SystemExit('not a zip (is the Drive file shared with "anyone with the link"?): ' + file_id)
 
 
 def pack(folder_path, folder_name, out_dir):
@@ -90,7 +109,7 @@ def main():
         for p in pack(sys.argv[2], os.path.basename(sys.argv[2].rstrip('/')), out):
             print(p, os.path.getsize(p))
         return
-    source, commit, folders = read_list()
+    source, commit, folders, drive = read_list()
     work = os.path.abspath('modpack-work')
     os.makedirs(work, exist_ok=True)
     if run('gh', 'release', 'view', TAG, check=False) != 0:
@@ -109,6 +128,25 @@ def main():
                 manifest[folder] = names.split()
     todo = [f for f in folders if not (f in manifest and all(n in have for n in manifest[f]))]
     print('packs to build:', todo or 'none', flush=True)
+
+    def write_manifest():
+        with open(os.path.join(work, 'mod-packs.txt'), 'w', encoding='utf-8') as m:
+            for f in folders:
+                if f in manifest:
+                    m.write(f + '\t' + ' '.join(manifest[f]) + '\n')
+        run('gh', 'release', 'upload', TAG, os.path.join(work, 'mod-packs.txt'), '--clobber')
+
+    for folder in [f for f in todo if f in drive]:
+        names = []
+        for name, file_id in drive[folder]:
+            out = os.path.join(work, name)
+            fetch_drive(file_id, out)
+            run('gh', 'release', 'upload', TAG, out, '--clobber')
+            os.remove(out)
+            names.append(name)
+        manifest[folder] = names
+        write_manifest()
+    todo = [f for f in todo if f not in drive]
     if todo:
         repo = os.path.join(work, 'src')
         env = dict(os.environ, GIT_LFS_SKIP_SMUDGE='1')
@@ -124,11 +162,7 @@ def main():
                 run('gh', 'release', 'upload', TAG, p, '--clobber')
                 os.remove(p)
             manifest[folder] = [os.path.basename(p) for p in parts]
-            with open(os.path.join(work, 'mod-packs.txt'), 'w', encoding='utf-8') as m:
-                for f in folders:
-                    if f in manifest:
-                        m.write(f + '\t' + ' '.join(manifest[f]) + '\n')
-            run('gh', 'release', 'upload', TAG, os.path.join(work, 'mod-packs.txt'), '--clobber')
+            write_manifest()
             # Free the disk before the next mod.
             shutil.rmtree(os.path.join(repo, 'mods', folder), ignore_errors=True)
             shutil.rmtree(os.path.join(repo, '.git', 'lfs', 'objects'), ignore_errors=True)

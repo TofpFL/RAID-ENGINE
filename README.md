@@ -34,7 +34,7 @@ spam charts of any size, has a chart editor, charts any song by itself, records 
 - Os scripts correm isolados (sem `io` nem `os`; `require` só lê módulos do próprio mod, `saveFile` só escreve dentro de `mods/`) e param se entrarem em ciclo infinito.
 
 ### Os teus mods
-Os mods do PulseForge estão publicados como **pacotes** no release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) (14 pacotes, 1,25 GB). No jogo: **Freeplay → `M`** descarrega um pacote ou todos (usa o `curl` do sistema) e instala-os. Também podes descarregar os `.zip` à mão e pô-los em `mods/`.
+Os mods do PulseForge estão publicados como **pacotes** no release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) (36 pacotes, 10,3 GB: os 14 do repositório do PulseForge e 22 vindos da pasta "Drive LMAC" do Google Drive, entre eles hortas edition v3, christmasred edition, Dek v1 / v2, vs Yerep v2, vs Everamii, EZ edition, vs dinnerbambi, SC:Reboot demo, DenpaEx e manny edition v3). No jogo: **Freeplay → `M`** descarrega um pacote ou todos (usa o `curl` do sistema) e instala-os. Também podes descarregar os `.zip` à mão e pô-los em `mods/`.
 
 ### Também
 - **Editor de charts** (Freeplay → `7`), ao estilo do Psych/JS Engine: separadores **Song** (nome, personagens, cenário, BPM, velocidade, teclas), **Section** (lado da câmara, *GF section*, *alt animation*, duração em batidas, BPM; copiar, colar, limpar, trocar lados, espelhar, copiar de uma secção anterior), **Note** (tipo, tempo, *hold*, notas empilhadas; ferramentas de spam: empilhar e preencher a secção em escada, aleatório, zigue-zague...), **Events** (pista de eventos à esquerda, vários eventos no mesmo tempo, lista com os do Psych, do JS Engine e os `custom_events` do mod, com a explicação dos valores) e **Charting** (velocidade de reprodução, volumes, *hitsounds*, metrónomo). Seleção com SHIFT+arrastar, desfazer/refazer. Guarda em JSON do Psych (o original fica como `.bak`); `ENTER` guarda e joga.
@@ -86,7 +86,7 @@ Android: com o Android SDK (`platforms;android-34`, `build-tools;34.0.0`, `ndk;2
 `ANDROID_SDK=/caminho/android-sdk android/build_apk.sh` cria `build/GodsHand-android.apk`.
 
 ### Porquê assim
-O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, conteúdo em LFS no próprio repositório) e ficou difícil de manter. Aqui o núcleo pequeno e testado do God's Hand fica como base e o que o PulseForge tinha de melhor foi reescrito por cima, com testes. O conteúdo dos mods vive fora do código: pacotes no release `mods`, gerados uma vez a partir do LFS do PulseForge pelo workflow *Mod packs*.
+O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, conteúdo em LFS no próprio repositório) e ficou difícil de manter. Aqui o núcleo pequeno e testado do God's Hand fica como base e o que o PulseForge tinha de melhor foi reescrito por cima, com testes. O conteúdo dos mods vive fora do código: pacotes no release `mods`, gerados uma vez a partir do LFS do PulseForge pelo workflow *Mod packs*, ou copiados de zips feitos com `modpacks/build_packs.py --local` e partilhados no Google Drive (linhas `drive` do `modpacks/packs.txt`).
 
 ---
 
