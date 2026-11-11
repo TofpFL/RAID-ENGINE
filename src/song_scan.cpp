@@ -702,6 +702,16 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
         const ModScan& m = mods[mi];
         const std::string source = m.display;
         const size_t modStart = songs.size();
+        // Telling identical chart files apart: by size, and only when two
+        // sizes match by the start and end of the files (read once).
+        std::map<std::string, std::string> signatureOf;
+        auto sameFile = [&](const std::string& a, const std::string& b) {
+            if (a == b) return true;
+            if (fileSize(a) != fileSize(b)) return false;
+            for (const std::string* p : {&a, &b})
+                if (!signatureOf.count(*p)) signatureOf[*p] = fileSignature(toPath(*p));
+            return signatureOf[a] == signatureOf[b];
+        };
         // ---- content roots (Psych mods, full game builds)
         std::set<std::string> charted;  // fuzzy keys with charts in this mod
         std::vector<std::pair<std::string, fs::path>> audioOnly;
@@ -797,7 +807,6 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
             std::string title, key;
             fs::path dir, root;
             std::vector<std::pair<std::string, std::string>> charts;  // label, path
-            std::set<std::string> signatures;
         };
         std::vector<Group> groups;
         for (const LooseDir& ld : m.loose) {
@@ -826,10 +835,12 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 for (Group& x : groups)
                     if (x.key == key) g = &x;
                 if (!g) {
-                    groups.push_back({title.empty() ? prettyName(stem) : title, key, ld.dir, ld.root, {}, {}});
+                    groups.push_back({title.empty() ? prettyName(stem) : title, key, ld.dir, ld.root, {}});
                     g = &groups.back();
                 }
-                if (!g->signatures.insert(fileSignature(f)).second) continue;  // the same chart in two folders
+                bool copy = false;  // the same chart in two folders
+                for (const auto& c : g->charts) copy = copy || sameFile(c.second, pathStr(f));
+                if (copy) continue;
                 // Label: the file name without the song name.
                 std::string label = stem;
                 const std::string sk = fuzzyKey(stem);
@@ -906,26 +917,36 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
         // folders) is offered once, by the entry that has them all.
         {
             const size_t n = songs.size() - modStart;
-            std::vector<std::set<std::string>> sigs(n);
+            std::vector<std::vector<std::string>> files(n);  // each entry's chart files, once each
             std::map<std::string, std::vector<size_t>> bySong;
             for (size_t i = 0; i < n; ++i) {
                 const SongEntry& e = songs[modStart + i];
                 if (e.autoChart) continue;
                 for (const std::string& p : e.chartPaths)
-                    if (!p.empty()) sigs[i].insert(fileSignature(toPath(p)));
-                bySong[groupKey(e.songKey)].push_back(i);
+                    if (!p.empty() && std::find(files[i].begin(), files[i].end(), p) == files[i].end()) files[i].push_back(p);
+                if (!files[i].empty()) bySong[groupKey(e.songKey)].push_back(i);
             }
+            // Every chart of a has an identical file among b's.
+            auto inside = [&](size_t a, size_t b) {
+                for (const std::string& pa : files[a]) {
+                    bool found = false;
+                    for (const std::string& pb : files[b]) found = found || sameFile(pa, pb);
+                    if (!found) return false;
+                }
+                return true;
+            };
             std::vector<bool> drop(n, false);
-            for (auto& [key, list] : bySong)
+            for (auto& [key, list] : bySong) {
+                if (list.size() < 2) continue;
                 for (size_t a : list)
                     for (size_t b : list) {
-                        if (a == b || drop[b] || sigs[a].empty()) continue;
-                        const bool inside = std::includes(sigs[b].begin(), sigs[b].end(), sigs[a].begin(), sigs[a].end());
-                        if (inside && (sigs[a].size() < sigs[b].size() || a > b)) {
+                        if (a == b || drop[b] || files[a].size() > files[b].size()) continue;
+                        if ((files[a].size() < files[b].size() || a > b) && inside(a, b)) {
                             drop[a] = true;
                             break;
                         }
                     }
+            }
             for (size_t i = n; i-- > 0;)
                 if (drop[i]) songs.erase(songs.begin() + std::ptrdiff_t(modStart + i));
         }
