@@ -12,6 +12,7 @@
 #include "chart.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
+#include "flp_import.hpp"
 
 namespace gh {
 
@@ -541,6 +542,14 @@ bool streamChartSkeleton(const std::string& path, std::string& skeleton, Streame
 
 bool loadChartFile(const std::string& path, const std::string& difficulty, Chart& out, std::string& err,
                    std::string_view vsliceMetadata, size_t streamThreshold, bool extraKeys) {
+    std::string flpFile;
+    int pattern = -1;
+    if (flpChartPath(path, flpFile, pattern)) {  // an FL Studio project, read as SNIFF does
+        FlpProject p;
+        if (!readFlpFile(flpFile, p, err) || !flpToChart(p, pattern, out, err)) return false;
+        out.difficulty = difficulty;
+        return true;
+    }
     const uint64_t size = fileSize(path);
     if (size == 0 && !fileExistsAt(path)) { err = "cannot read " + path; return false; }
     if (!vsliceMetadata.empty() || size < (streamThreshold ? streamThreshold : kStreamThreshold)) {

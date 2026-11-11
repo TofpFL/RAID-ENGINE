@@ -35,8 +35,20 @@ public:
     bool combo(long long value, Vector2 c, float scale, float alpha) const;
     bool countdown(int i, Vector2 c, float alpha) const;  // 0 ready, 1 set, 2 go
     bool healthBar(Rectangle bar, Color left, Color right, float leftFrac, float alpha) const;
+    // Psych's time bar (timeBar.png around a black bar and its white fill),
+    // centred on cx with its top at `top`; false when the interface is off.
+    bool timeBar(float cx, float top, float frac, float alpha) const;
+    // HUD text in vcr.ttf with Psych's black outline, centred on x when
+    // align is 0 (left at x: -1, right at x: 1). False without the font.
+    bool text(const std::string& s, float x, float y, float size, Color c, int align = 0, float border = 1.25f) const;
+    // Alphabet's bold letters (images/alphabet.png), the pause menu's font;
+    // `height` is a capital letter's height. Width of the drawn text, or -1
+    // without the alphabet.
+    float alphabet(const std::string& s, float x, float y, float height, float alpha) const;
+    bool hasAlphabet() const { return alphabet_.id != 0; }
     const Font* font() const { return font_.texture.id ? &font_ : nullptr; }
     const std::string& menuMusic() const { return menuMusic_; }
+    const std::string& pauseMusic() const { return pauseMusic_; }  // music/breakfast
     void applySounds() const;  // menu and gameplay sounds replace the game's own
 
 private:
@@ -55,10 +67,13 @@ private:
     Shader palette_{};
     int locR_ = -1, locG_ = -1, locB_ = -1;
     std::vector<std::pair<std::string, Frame>> atlas_;  // NOTE_assets frames by name
-    Texture2D ratings_[4]{}, nums_[10]{}, count_[3]{}, bar_{};
+    Texture2D ratings_[4]{}, nums_[10]{}, count_[3]{}, bar_{}, timeBar_{};
     Font font_{};
+    Texture2D alphabet_{};
+    std::vector<std::pair<std::string, Frame>> letters_;  // alphabet frames ("A bold0000"...)
+    const Frame* letter(char c) const;
     std::vector<std::pair<int, std::string>> sounds_;  // Sfx id -> file
-    std::string menuMusic_;
+    std::string menuMusic_, pauseMusic_;
 };
 
 PsychUi& psychUi();

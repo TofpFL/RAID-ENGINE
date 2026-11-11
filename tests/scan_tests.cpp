@@ -12,6 +12,7 @@
 #include "chart.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
+#include "flp_import.hpp"
 #include "scene.hpp"
 #include "song_scan.hpp"
 
@@ -337,9 +338,161 @@ void testModLayouts() {
     fs::remove_all(base);
 }
 
+// A small FL Studio project: an FPC channel with a chart in pattern 1
+// ("hard"), one note in pattern 2 ("easy"), a melody in pattern 3, and a
+// second channel whose notes are not the chart's.
+std::string makeFlp() {
+    std::string ev;
+    auto byte = [&](uint8_t id, uint8_t v) { ev += char(id); ev += char(v); };
+    auto word = [&](uint8_t id, uint16_t v) { ev += char(id); ev += char(v & 255); ev += char(v >> 8); };
+    auto dword = [&](uint8_t id, uint32_t v) {
+        ev += char(id);
+        for (int i = 0; i < 4; ++i) ev += char((v >> (8 * i)) & 255);
+    };
+    auto array = [&](uint8_t id, const std::string& data) {
+        ev += char(id);
+        size_t n = data.size();
+        do {
+            uint8_t c = uint8_t(n & 0x7F);
+            n >>= 7;
+            if (n) c |= 0x80;
+            ev += char(c);
+        } while (n);
+        ev += data;
+    };
+    auto utf16 = [](const std::string& a) {
+        std::string w;
+        for (char c : a) { w += c; w += char(0); }
+        return w + std::string(2, '\0');
+    };
+    struct N { uint32_t t; uint16_t ch; uint32_t dur, pitch; uint8_t vel; };
+    auto notes = [](const std::vector<N>& v) {
+        std::string d;
+        for (const N& n : v) {
+            std::string r(24, '\0');
+            for (int i = 0; i < 4; ++i) r[size_t(i)] = char((n.t >> (8 * i)) & 255);
+            r[6] = char(n.ch & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(8 + i)] = char((n.dur >> (8 * i)) & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(12 + i)] = char((n.pitch >> (8 * i)) & 255);
+            r[21] = char(n.vel);
+            d += r;
+        }
+        return d;
+    };
+    array(0xC7, "20.8.4.2576");
+    dword(0x9C, 150000);  // 150 BPM
+    array(0xC2, utf16("Forge Test"));
+    word(0x40, 0);
+    array(0xC9, utf16("FPC"));
+    word(0x40, 1);
+    array(0xC9, utf16("3x Osc"));
+    byte(0x1C, 3);
+    word(0x41, 1);
+    array(0xC1, utf16("hard"));
+    word(0x41, 2);
+    array(0xC1, utf16("easy"));
+    word(0x41, 1);
+    array(0xE0, notes({{0, 0, 24, 54, 100},     // camera on the opponent
+                       {0, 0, 24, 60, 100},     // opponent left
+                       {96, 0, 24, 61, 100},    // opponent down, one beat in
+                       {384, 0, 24, 53, 100},   // section 1: camera on the player
+                       {384, 0, 96, 48, 100},   // player left, held a beat
+                       {480, 0, 48, 51, 50},    // player right, soft: a hold
+                       {768, 0, 24, 58, 100},   // section 2: the player's alt animation
+                       {768, 0, 24, 49, 100},   // player down
+                       {100, 1, 24, 60, 100}}));  // another channel: not the chart
+    word(0x41, 2);
+    array(0xE0, notes({{0, 0, 24, 50, 100}}));
+    word(0x41, 3);
+    array(0xE0, notes({{0, 0, 96, 65, 100}, {96, 0, 96, 67, 100}, {192, 0, 96, 69, 100}, {288, 0, 96, 60, 100},
+                       {384, 0, 96, 72, 100}, {480, 0, 96, 71, 100}, {576, 0, 96, 64, 100}}));
+    std::string f = "FLhd";
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
+    u32(6);
+    f += std::string("\0\0\x02\0", 4);
+    f += char(96);
+    f += char(0);
+    f += "FLdt";
+    u32(uint32_t(ev.size()));
+    return f + ev;
+}
+
+void testFlStudio() {
+    FlpProject p;
+    std::string err;
+    SCHECK(readFlp(makeFlp(), p, err));
+    SCHECK(p.ppqn == 96 && std::fabs(p.bpm - 150) < 1e-9 && p.title == "Forge Test" && p.chartChannel == 0);
+    SCHECK(p.patterns.size() == 3 && p.patterns[0].name == "hard" && p.patterns[1].name == "easy");
+    SCHECK(flpChartPatterns(p, true) == std::vector<int>({1, 2}));         // the melody is no chart
+    SCHECK(flpChartPatterns(p, false) == std::vector<int>({1, 2, 3}));
+    SCHECK(flpPatternLabel(p, 1) == "Hard" && flpPatternLabel(p, 3) == "Pattern 3");
+
+    Chart c;
+    SCHECK(flpToChart(p, 1, c, err));
+    SCHECK(c.keys == 4 && c.notes.size() == 5 && c.playerNotes == 3 && c.opponentNotes == 2);
+    if (c.notes.size() == 5) {
+        // 96 ticks per beat at 150 BPM: 400 ms a beat.
+        SCHECK(c.notes[0].side == 0 && c.notes[0].lane == 0 && std::fabs(c.notes[0].time) < 1e-6 && c.notes[0].length == 0);
+        SCHECK(c.notes[1].side == 0 && c.notes[1].lane == 1 && std::fabs(c.notes[1].time - 400) < 1e-6);
+        SCHECK(c.notes[2].side == 1 && c.notes[2].lane == 0 && std::fabs(c.notes[2].time - 1600) < 1e-6 &&
+               std::fabs(c.notes[2].length - 300) < 1e-6);  // (96 - 24) ticks
+        SCHECK(c.notes[3].side == 1 && c.notes[3].lane == 3 && std::fabs(c.notes[3].length - 100) < 1e-6);  // soft: (48 - 24) ticks
+        SCHECK(c.notes[4].side == 1 && c.notes[4].lane == 1 && (c.notes[4].flags & kFlagAlt) && std::fabs(c.notes[4].time - 3200) < 1e-6);
+    }
+    SCHECK(c.sections.size() == 3 && !c.sections[0].mustHit && c.sections[1].mustHit && c.sections[2].mustHit);
+    SCHECK(c.focusAt(100) == 0 && c.focusAt(2000) == 1);
+    SCHECK(std::fabs(c.bpmAt(0) - 150) < 1e-9 && c.title == "Forge Test");
+
+    std::string file;
+    int pat = 0;
+    SCHECK(flpChartPath("a b/song.flp#2", file, pat) && file == "a b/song.flp" && pat == 2);
+    SCHECK(flpChartPath("song.FSC", file, pat) && pat == -1);
+    SCHECK(!flpChartPath("song.json", file, pat));
+
+    // Through the chart loader and the song scan.
+    const fs::path base = fs::temp_directory_path() / "gh_flp_scan";
+    fs::remove_all(base);
+    put(base / "mods" / "flpack" / "Forge Test.flp", makeFlp());
+    Chart loaded;
+    SCHECK(loadChartFile(str(base / "mods" / "flpack" / "Forge Test.flp") + "#2", "Easy", loaded, err) && loaded.notes.size() == 1);
+    SongScan s;
+    scanModsDir(str(base / "mods"), s);
+    const SongEntry* e = byTitle(s, "Forge Test");
+    SCHECK(e && e->diffs.size() == 2 && e->diffs[0] == "Easy (FL Studio)" && e->diffs[1] == "Hard (FL Studio)");
+    fs::remove_all(base);
+}
+
 }  // namespace
 
+// gh_tests --flp a.flp ...: what an FL Studio file holds, as SNIFF sees it.
+int printFlp(int argc, char** argv, int first) {
+    for (int i = first; i < argc; ++i) {
+        FlpProject p;
+        std::string err;
+        if (!readFlpFile(argv[i], p, err)) {
+            std::printf("%s: %s\n", argv[i], err.c_str());
+            continue;
+        }
+        std::printf("%s: ppqn %d, bpm %.3f, title '%s', chart channel %d, %zu patterns\n", argv[i], p.ppqn, p.bpm,
+                    p.title.c_str(), p.chartChannel, p.patterns.size());
+        for (const FlpPattern& pat : p.patterns) {
+            size_t chart = 0, onChannel = 0;
+            for (const FlpNote& n : pat.notes) {
+                onChannel += n.channel == p.chartChannel;
+                chart += n.channel == p.chartChannel && ((n.pitch >= 48 && n.pitch <= 51) || (n.pitch >= 60 && n.pitch <= 63));
+            }
+            std::printf("  pattern %d '%s': %zu notes, %zu on the chart channel, %zu in the chart lanes\n", pat.number,
+                        pat.name.c_str(), pat.notes.size(), onChannel, chart);
+        }
+        Chart c;
+        if (flpToChart(p, -1, c, err)) std::printf("  chart: %zu notes, %.1f s\n", c.notes.size(), c.lengthMs / 1000.0);
+        else std::printf("  no chart: %s\n", err.c_str());
+    }
+    return 0;
+}
+
 void runScanTests() {
+    testFlStudio();
     testPulseForgeCharts();
     testAudioSeconds();
     testModLayouts();

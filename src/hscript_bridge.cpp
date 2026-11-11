@@ -119,7 +119,7 @@ scene::ShaderPtr shaderFromSource(Interp& ip, const std::string& name) {
         const std::string frag = sc.files.find("shaders/" + name + ".frag");
         const std::string vert = sc.files.find("shaders/" + name + ".vert");
         if (frag.empty() && vert.empty()) {
-            ip.game.debugPrint("shader not found: " + name, 0xFFFFD040);
+            ip.game.debugNotice("shader not found: " + name, false, false);
             return nullptr;
         }
         if (!frag.empty()) scene::readFile(frag, src.frag);
@@ -1280,7 +1280,7 @@ Value construct(Interp& ip, const std::string& cls, std::vector<Value>& a) {
         const std::string name = arg(a, 2).isNull() ? std::string("bf") : arg(a, 2).str();
         const bool player = cls == "Boyfriend" || arg(a, 3).truthy();
         if (!ip.game.makeExtraCharacter(tag, name, player, float(arg(a, 0).num()), float(arg(a, 1).num()))) {
-            ip.game.debugPrint("HScript: character " + name + " could not be made", 0xFFFFD040);
+            ip.game.debugNotice("HScript: character " + name + " could not be made", false, false);
             return Value();
         }
         return hv("sprite", tag);
@@ -1310,7 +1310,7 @@ Value construct(Interp& ip, const std::string& cls, std::vector<Value>& a) {
     if (cls == "Map" || cls == "StringMap" || cls == "IntMap" || cls == "ObjectMap" || cls == "EnumValueMap") return Value::mapOf();
     if (cls == "Array") return Value::array();
     if (cls == "FlxTypedGroup" || cls == "FlxGroup" || cls == "FlxSpriteGroup") return Value::array();
-    ip.game.debugPrint("HScript: class " + cls + " is not available here", 0xFFFFD040);
+    ip.game.debugNotice("HScript: class " + cls + " is not available here", false, false);
     return Value();
 }
 

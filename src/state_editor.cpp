@@ -15,6 +15,7 @@
 
 #include "app.hpp"
 #include "chart_stream.hpp"
+#include "flp_import.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
 #include "raylib.h"
@@ -293,6 +294,8 @@ public:
     }
 
     bool wantsMenuMusic() const override { return false; }
+    // - and = change the playback speed here; every key while typing.
+    bool keyReserved(int key) const override { return typing_ || key == KEY_MINUS || key == KEY_EQUAL; }
     TouchLayout touchLayout() const override {
         TouchLayout t;
         t.pad = false;
@@ -321,6 +324,15 @@ public:
             return;
         }
         (void)dt;
+        // SNIFF in the editor: an FL Studio project or score dropped on the window.
+        if (IsFileDropped()) {
+            FilePathList dropped = LoadDroppedFiles();
+            for (unsigned i = 0; i < dropped.count; ++i) {
+                const std::string f = dropped.paths[i];
+                if (endsWithI(f, ".flp") || endsWithI(f, ".fsc")) importFlp(f);
+            }
+            UnloadDroppedFiles(dropped);
+        }
         ui_.in = &in;
         ui_.mouse = gfx::toCanvas(GetMousePosition());
         ui_.click = in.mousePressed(MOUSE_BUTTON_LEFT) && !(a.touchMode && a.touch.covers(GetMousePosition()));
@@ -1110,11 +1122,36 @@ private:
 
     // Where this chart is written. Mod and custom charts are saved in place
     // (the original is kept once as .bak); generated charts get a new file.
+    // A chart file written in Psych's format (an FL Studio project, a
+    // PulseForge chart or a V-Slice chart is not overwritten).
+    static bool psychJsonFile(const std::string& path) {
+        std::string file;
+        int pattern = 0;
+        if (!endsWithI(path, ".json") || flpChartPath(path, file, pattern)) return false;
+        std::string head;
+        if (FILE* f = std::fopen(path.c_str(), "rb")) {
+            head.resize(4096);
+            head.resize(std::fread(head.data(), 1, head.size(), f));
+            std::fclose(f);
+        }
+        return head.find("\"pulseforge-") == std::string::npos;
+    }
+
     std::string savePath() {
         const SongEntry& e = *entry_;
+        const std::string key0 = songPathName(e.builtin ? title_ + " (edit)" : e.songKey);
         for (size_t i = 0; i < e.diffs.size(); ++i)
-            if (e.diffs[i] == diff_ && i < e.chartPaths.size() && !e.chartPaths[i].empty() && e.metaPath.empty())
-                return e.chartPaths[i];
+            if (e.diffs[i] == diff_ && i < e.chartPaths.size() && !e.chartPaths[i].empty() && e.metaPath.empty()) {
+                if (psychJsonFile(e.chartPaths[i])) return e.chartPaths[i];
+                // FL Studio / PulseForge: a Psych chart next to the original.
+                std::string file = e.chartPaths[i];
+                int pattern = 0;
+                flpChartPath(e.chartPaths[i], file, pattern);
+                std::string name = key0;
+                const std::string d = toLower(diff_);
+                if (d.rfind("normal", 0) != 0) name += "-" + songPathName(diff_);
+                return pathStr(toPath(file).parent_path() / toPath(name + ".json"));
+            }
         const std::string key = songPathName(e.builtin ? title_ + " (edit)" : e.songKey);
         const std::string file = key + (equalsI(diff_, "Normal") ? "" : "-" + toLower(diff_)) + ".json";
         if (e.builtin) return app().base + "songs/" + key + "/" + file;
@@ -1339,9 +1376,9 @@ private:
     void drawPanel() {
         if (ui_.click) ui_.focus.clear();  // a click anywhere ends typing; a text field takes it back
         DrawRectangleRounded({kPanelX - 8, 46, gfx::W - kPanelX, gfx::H - 54}, 0.03f, 6, kPanel);
-        static const char* tabs[] = {"Song", "Section", "Note", "Events", "Charting"};
-        const float tw = (gfx::W - kPanelX - 16) / 5.0f;
-        for (int i = 0; i < 5; ++i)
+        static const char* tabs[] = {"Song", "Section", "Note", "Events", "Charting", "EZ Spam"};
+        const float tw = (gfx::W - kPanelX - 16) / 6.0f;
+        for (int i = 0; i < 6; ++i)
             if (ui_.button({kPanelX + i * tw, 52, tw - 4, 30}, tabs[i], tab_ == i)) tab_ = i;
         const float x = kPanelX, w = gfx::W - kPanelX - 18;
         float y = 96;
@@ -1387,6 +1424,10 @@ private:
                     dirty_ = true;
                 }
                 y += 38;
+                gfx::text(FontId::Ui, "FL Studio (SNIFF): drop a .flp or .fsc here", x, y, 15, kDim);
+                y += 20;
+                gfx::text(FontId::Ui, "C3-D#3 player, C4-D#4 opponent, F3/F#3 camera", x, y, 15, kDim);
+                y += 24;
                 break;
             }
             case 1: {  // Section
@@ -1540,8 +1581,177 @@ private:
                 if (ui_.stepper(row(), "Zoom", z, 0.25, 0.25, 8, "%.2fx")) zoom_ = float(z);
                 break;
             }
+            case 5: {  // EZ Spam: JS Engine's quick spam, over any stretch of the song
+                static const std::vector<std::string> scopes = {"This section", "From here on", "Whole song", "Sections..."};
+                static const std::vector<std::string> patterns = {"One lane", "Stairs up", "Stairs down", "Random", "Zigzag",
+                                                                  "Chords", "Jacks"};
+                static const std::vector<std::string> sides = {"Opponent", "Player", "Both"};
+                ui_.choice(row(), "Where", scopes, ezScope_);
+                if (ezScope_ == 3) {
+                    if (ui_.stepper(half(0), "From", ezFrom_, 1, 0, 1e6, "%.0f")) ezTo_ = std::max(ezTo_, ezFrom_);
+                    if (ui_.stepper(half(1), "To", ezTo_, 1, 0, 1e6, "%.0f")) ezFrom_ = std::min(ezFrom_, ezTo_);
+                    y += 38;
+                }
+                ui_.stepper(row(), "Notes per beat", ezRate_, 1, 1, 1000, "%.0f");
+                ui_.choice(row(), "Pattern", patterns, ezPattern_);
+                if (ezPattern_ == 0) {
+                    double lane = fillLane_;
+                    if (ui_.stepper(row(), "Lane", lane, 1, 0, keys_ - 1, "%.0f")) fillLane_ = int(lane);
+                }
+                ui_.choice(row(), "Side", sides, ezSide_);
+                ui_.stepper(row(), "Hold (steps)", ezHold_, 1, 0, 64, "%.0f");
+                ui_.stepper(row(), "Stacked notes", ezStack_, 1, 1, 65535, "%.0f");
+                ui_.check(row(), "Replace the notes there", ezReplace_);
+                int s0 = 0, s1 = 0;
+                ezRange(s0, s1);
+                // Notes at each step: a chord fills every lane; each side doubles; stacked notes all count.
+                const double each = (ezPattern_ == 5 ? keys_ : 1) * (ezSide_ == 2 ? 2 : 1) * ezStack_;
+                const double beats = sectionBeatStart(s1 + 1) - sectionBeatStart(s0);
+                const double total = std::floor(beats * ezRate_ + 0.5) * each;
+                const double nps = ezRate_ * bpmAt(sectionStart(s0)) / 60.0 * each;
+                gfx::text(FontId::Ui,
+                          TextFormat("Sections %d-%d: %s notes, %s per second", s0, s1, fmtThousands((long long)total).c_str(),
+                                     fmtThousands((long long)nps).c_str()),
+                          x, y, 16, kDim);
+                y += 24;
+                if (ui_.button(row(), "Spam!")) ezSpam();
+                if (ui_.button(half(0), "Clear there")) ezClear();
+                if (ui_.button(half(1), "Thin out (1 in 2)")) ezThin();
+                y += 38;
+                break;
+            }
             default: break;
         }
+    }
+
+    // ------------------------------------------------- FL Studio (SNIFF) --
+    // The notes of an FL Studio pattern replace the chart's (undo brings them
+    // back): the pattern named like this difficulty, else the first with notes
+    // in SNIFF's lanes. Scores (.fsc) have no tempo: the chart's is kept.
+    void importFlp(const std::string& path) {
+        FlpProject p;
+        std::string err;
+        if (!readFlpFile(path, p, err)) { flash("FL Studio: " + err); return; }
+        int pattern = -1;
+        for (const FlpPattern& pat : p.patterns)
+            if (equalsI(pat.name, diff_)) pattern = pat.number;
+        Chart c;
+        if (!flpToChart(p, pattern, c, err, p.bpm > 0 ? 0.0 : bpmAt(0))) { flash("FL Studio: " + err); return; }
+        snapshot();
+        keys_ = 4;
+        sections_.clear();
+        for (const SectionInfo& si : c.sections) {
+            EdSection s;
+            s.mustHit = si.mustHit;
+            s.altAnim = si.alt;
+            s.beats = si.beats;
+            s.bpm = si.bpm;
+            sections_.push_back(s);
+        }
+        notes_.clear();
+        for (const Note& n : c.notes) {
+            EdNote e;
+            e.t = n.time;
+            e.col = n.side ? keys_ + n.lane : n.lane;
+            e.len = n.length;
+            if (n.side == 1 && (n.flags & kFlagAlt)) e.type = "Alt Animation";
+            e.stack = std::max<int>(1, n.stack);
+            notes_.push_back(e);
+        }
+        sortNotes();
+        rebuildStarts();
+        dirty_ = true;
+        flash(TextFormat("Imported %s notes from %s (%s, %.0f BPM)", fmtThousands((long long)c.notes.size()).c_str(),
+                         pathStr(toPath(path).filename()).c_str(), flpPatternLabel(p, pattern < 0 ? flpChartPatterns(p, false).front() : pattern).c_str(),
+                         c.bpmAt(0)));
+    }
+
+    // ---------------------------------------------------------- EZ Spam --
+    void ezRange(int& s0, int& s1) {
+        const int here = sectionAt(cur_);
+        const int last = std::max(here, sectionAt(std::max(songLength(), cur_)));
+        if (ezScope_ == 0) s0 = s1 = here;
+        else if (ezScope_ == 1) { s0 = here; s1 = last; }
+        else if (ezScope_ == 2) { s0 = 0; s1 = last; }
+        else { s0 = int(ezFrom_); s1 = std::max(s0, int(ezTo_)); }
+    }
+    bool ezSideOk(int col) const { return ezSide_ == 2 || (col >= keys_ ? 1 : 0) == ezSide_; }
+    void ezSpam() {
+        int s0 = 0, s1 = 0;
+        ezRange(s0, s1);
+        const double b0 = sectionBeatStart(s0), b1 = sectionBeatStart(s1 + 1);
+        const double t0 = msAtBeat(b0), t1 = msAtBeat(b1);
+        const double step = 1.0 / std::max(1.0, ezRate_);
+        if ((b1 - b0) / step * (ezSide_ == 2 ? 2 : 1) > 20e6) { flash("Too many notes at once: fewer per beat, or fewer sections"); return; }
+        snapshot();
+        if (ezReplace_)
+            notes_.erase(std::remove_if(notes_.begin(), notes_.end(),
+                                        [&](const EdNote& n) { return n.t >= t0 - 0.5 && n.t < t1 - 0.5 && ezSideOk(n.col); }),
+                         notes_.end());
+        std::mt19937 r(unsigned(s0 * 7919 + s1));
+        const std::string type = noteTypes_.empty() ? std::string() : noteTypes_[size_t(typeIdx_)];
+        const size_t before = notes_.size();
+        long k = 0;
+        for (double b = b0; b < b1 - 1e-9; b += step, ++k) {
+            const double t = msAtBeat(b);
+            const double len = ezHold_ > 0 ? ezHold_ * 15000.0 / bpmAt(t) : 0.0;
+            std::vector<int> lanes;
+            switch (ezPattern_) {
+                case 0: lanes = {fillLane_ % keys_}; break;
+                case 1: lanes = {int(k % keys_)}; break;
+                case 2: lanes = {int(keys_ - 1 - k % keys_)}; break;
+                case 3: lanes = {int(r() % unsigned(keys_))}; break;
+                case 4: lanes = {int((k % 2) ? keys_ - 1 - (k / 2) % keys_ : (k / 2) % keys_)}; break;
+                case 5: for (int l = 0; l < keys_; ++l) lanes.push_back(l); break;  // chords: every lane
+                default: lanes = {int(k % 2) * (keys_ - 1)}; break;                  // jacks: the two outer lanes
+            }
+            for (int sd = 0; sd < 2; ++sd) {
+                if (ezSide_ != 2 && ezSide_ != sd) continue;
+                for (int lane : lanes) {
+                    EdNote n;
+                    n.t = t;
+                    n.col = sd * keys_ + lane;
+                    n.len = len;
+                    n.type = type;
+                    n.stack = int(ezStack_);
+                    notes_.push_back(n);
+                }
+            }
+        }
+        sortNotes();
+        dirty_ = true;
+        flash(TextFormat("EZ Spam: %s notes in sections %d-%d", fmtThousands((long long)(notes_.size() - before)).c_str(), s0, s1));
+    }
+    void ezClear() {
+        int s0 = 0, s1 = 0;
+        ezRange(s0, s1);
+        const double t0 = sectionStart(s0), t1 = sectionStart(s1 + 1);
+        snapshot();
+        const size_t before = notes_.size();
+        notes_.erase(std::remove_if(notes_.begin(), notes_.end(),
+                                    [&](const EdNote& n) { return n.t >= t0 - 0.5 && n.t < t1 - 0.5 && ezSideOk(n.col); }),
+                     notes_.end());
+        dirty_ = true;
+        flash(TextFormat("Cleared %s notes", fmtThousands((long long)(before - notes_.size())).c_str()));
+    }
+    // Every other note of each lane goes (half the density, same pattern).
+    void ezThin() {
+        int s0 = 0, s1 = 0;
+        ezRange(s0, s1);
+        const double t0 = sectionStart(s0), t1 = sectionStart(s1 + 1);
+        snapshot();
+        std::vector<int> count(size_t(2 * keys_), 0);
+        const size_t before = notes_.size();
+        std::vector<EdNote> kept;
+        kept.reserve(notes_.size());
+        for (const EdNote& n : notes_) {
+            if (n.t >= t0 - 0.5 && n.t < t1 - 0.5 && ezSideOk(n.col) && n.col >= 0 && n.col < 2 * keys_ && (count[size_t(n.col)]++ % 2))
+                continue;
+            kept.push_back(n);
+        }
+        notes_.swap(kept);
+        dirty_ = true;
+        flash(TextFormat("Thinned out: %s notes removed", fmtThousands((long long)(before - notes_.size())).c_str()));
     }
 
     void drawEventHelp(const std::string& name, float& y) {
@@ -1587,6 +1797,9 @@ private:
     bool needsVoices_ = true, eventsSeparate_ = true, boxing_ = false;
     bool hitPlayer_ = true, hitOpponent_ = true, metronome_ = false, muteVoices_ = false;
     int keys_ = 4, snapIdx_ = 3, typeIdx_ = 0, tab_ = 2, eventIdx_ = 0, fillPattern_ = 1, fillSide_ = 1, fillLane_ = 0;
+    int ezScope_ = 0, ezPattern_ = 1, ezSide_ = 1;  // EZ Spam
+    double ezRate_ = 16, ezFrom_ = 0, ezTo_ = 0, ezHold_ = 0, ezStack_ = 1;
+    bool ezReplace_ = true;
     long selEvent_ = -1;
     double cur_ = 0, lastT_ = 0, speed_ = 1, flashAt_ = -10, escAt_ = -10;
     double playRate_ = 1, instVol_ = 1, voiceVol_ = 1, stackAmount_ = 10, copyBack_ = 1;

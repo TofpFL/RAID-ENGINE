@@ -147,6 +147,29 @@ int PsychUi::load(const std::string& folder, std::string& report) {
     }
     bar_ = loadTex(findAny(f, {"images/healthBar.png"}));
     if (bar_.id) ++found;
+    timeBar_ = loadTex(findAny(f, {"images/timeBar.png"}));
+    if (timeBar_.id) ++found;
+    // Alphabet: the bold letters of the pause menu and other menus.
+    const std::string abc = findAny(f, {"images/alphabet.png"});
+    if (!abc.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(abc.substr(0, abc.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            alphabet_ = loadTex(abc);
+            for (const psych::AtlasFrame& a : atlas.frames) {
+                Frame fr;
+                fr.src = {a.x, a.y, a.w, a.h};
+                fr.fx = a.fx;
+                fr.fy = a.fy;
+                fr.fw = a.fw > 0 ? a.fw : a.w;
+                fr.fh = a.fh > 0 ? a.fh : a.h;
+                fr.rotated = a.rotated;
+                letters_.push_back({a.name, fr});
+            }
+            if (alphabet_.id) ++found;
+        }
+    }
+    if (!alphabet_.id) missing.push_back("alphabet");
     const std::string ttf = findAny(f, {"fonts/vcr.ttf"});
     if (!ttf.empty()) {
         font_ = LoadFontEx(ttf.c_str(), 48, nullptr, 0);
@@ -175,6 +198,8 @@ int PsychUi::load(const std::string& folder, std::string& report) {
     if (sounds_.empty()) missing.push_back("sounds");
     menuMusic_ = findAny(f, {"music/freakyMenu.ogg", "music/freakyMenu.mp3"});
     if (!menuMusic_.empty()) ++found;
+    pauseMusic_ = findAny(f, {"music/breakfast.ogg", "music/breakfast.mp3"});
+    if (!pauseMusic_.empty()) ++found;
 
     report = std::to_string(found) + " pieces found";
     if (!missing.empty()) {
@@ -193,6 +218,10 @@ void PsychUi::unload() {
     for (Texture2D& t : nums_) unloadTex(t);
     for (Texture2D& t : count_) unloadTex(t);
     unloadTex(bar_);
+    unloadTex(timeBar_);
+    unloadTex(alphabet_);
+    letters_.clear();
+    pauseMusic_.clear();
     if (font_.texture.id && IsWindowReady()) UnloadFont(font_);
     font_ = Font{};
     atlas_.clear();
@@ -353,6 +382,87 @@ bool PsychUi::healthBar(Rectangle bar, Color left, Color right, float leftFrac, 
     DrawRectangleRec({bar.x, bar.y, split - bar.x, bar.height}, gfx::fade(left, alpha));
     DrawRectangleRec({split, bar.y, bar.x + bar.width - split, bar.height}, gfx::fade(right, alpha));
     return true;
+}
+
+bool PsychUi::timeBar(float cx, float top, float frac, float alpha) const {
+    if (!active_) return false;
+    // Psych: timeBar.png (400 x 19) with the bar 4 pixels in: black empty
+    // part, white filled part.
+    const float tw = timeBar_.id ? float(timeBar_.width) : 400.0f, th = timeBar_.id ? float(timeBar_.height) : 19.0f;
+    const Rectangle bar{cx - tw * 0.5f + 4, top + 4, tw - 8, th - 8};
+    if (timeBar_.id)
+        DrawTexturePro(timeBar_, {0, 0, tw, th}, {cx - tw * 0.5f, top, tw, th}, {0, 0}, 0, gfx::fade(WHITE, alpha));
+    else
+        DrawRectangleRec({cx - tw * 0.5f, top, tw, th}, gfx::fade(BLACK, alpha));
+    DrawRectangleRec(bar, gfx::fade(BLACK, alpha));
+    DrawRectangleRec({bar.x, bar.y, bar.width * std::clamp(frac, 0.0f, 1.0f), bar.height}, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::text(const std::string& s, float x, float y, float size, Color c, int align, float border) const {
+    if (!active_ || !font_.texture.id) return false;
+    const Vector2 sz = MeasureTextEx(font_, s.c_str(), size, 0);
+    const float left = align == 0 ? x - sz.x * 0.5f : align < 0 ? x : x - sz.x;
+    // FlxText's OUTLINE border: the text drawn around itself in black.
+    const Color edge{0, 0, 0, c.a};
+    if (border > 0)
+        for (const Vector2 o : {Vector2{-border, 0}, Vector2{border, 0}, Vector2{0, -border}, Vector2{0, border},
+                                Vector2{-border, -border}, Vector2{border, border}, Vector2{-border, border}, Vector2{border, -border}})
+            DrawTextEx(font_, s.c_str(), {left + o.x, y + o.y}, size, 0, edge);
+    DrawTextEx(font_, s.c_str(), {left, y}, size, 0, c);
+    return true;
+}
+
+// Alphabet's bold letters: "A bold0000" in the original game, "a bold
+// instance 10000" in Psych 0.7 and later; symbols go by the character itself
+// ("& bold") or by name ("question bold", "question mark bold"...).
+const PsychUi::Frame* PsychUi::letter(char c) const {
+    std::vector<std::string> wants;
+    if (std::isalpha((unsigned char)c)) {
+        wants = {std::string(1, char(std::toupper((unsigned char)c))) + " bold",
+                 std::string(1, char(std::tolower((unsigned char)c))) + " bold"};
+    } else if (std::isdigit((unsigned char)c)) {
+        wants = {std::string(1, c) + " bold"};
+    } else {
+        static const std::pair<char, std::vector<const char*>> names[] = {
+            {'?', {"question", "question mark"}}, {'!', {"exclamation", "exclamation point"}}, {'.', {"period"}},
+            {',', {"comma"}}, {'\'', {"apostrophe"}}, {'"', {"quote"}}, {'-', {"dash"}}, {'&', {"amp"}},
+            {'(', {"start parentheses"}}, {')', {"end parentheses"}}, {'/', {"forward slash"}}};
+        wants = {std::string(1, c) + " bold"};
+        for (const auto& [ch, list] : names)
+            if (ch == c)
+                for (const char* n : list) wants.push_back(std::string(n) + " bold");
+    }
+    for (const std::string& want : wants)
+        for (const auto& [name, fr] : letters_) {
+            if (name.size() <= want.size() || name.compare(0, want.size(), want) != 0) continue;
+            const std::string rest = name.substr(want.size());
+            const bool frameNo = std::all_of(rest.begin(), rest.end(), [](char d) { return std::isdigit((unsigned char)d); });
+            if (frameNo || rest.rfind(" instance", 0) == 0) return &fr;
+        }
+    return nullptr;
+}
+
+float PsychUi::alphabet(const std::string& s, float x, float y, float height, float alpha) const {
+    if (!active_ || !alphabet_.id) return -1;
+    const Frame* ref = letter('A');
+    const float scale = height / std::max(1.0f, ref ? ref->fh : 70.0f);
+    float pen = x;
+    for (char c : s) {
+        if (c == ' ') { pen += 40.0f * scale; continue; }
+        const Frame* f = letter(c);
+        if (!f) { pen += 40.0f * scale; continue; }
+        // Letters sit on a shared baseline: the bottom of their untrimmed box.
+        const float w = f->rotated ? f->src.height : f->src.width, h = f->rotated ? f->src.width : f->src.height;
+        const float dx = pen - f->fx * scale, dy = y + (height - f->fh * scale) - f->fy * scale;
+        if (f->rotated)
+            DrawTexturePro(alphabet_, f->src, {dx + w * scale * 0.5f, dy + h * scale * 0.5f, f->src.width * scale, f->src.height * scale},
+                           {f->src.width * scale * 0.5f, f->src.height * scale * 0.5f}, -90.0f, gfx::fade(WHITE, alpha));
+        else
+            DrawTexturePro(alphabet_, f->src, {dx, dy, w * scale, h * scale}, {0, 0}, 0, gfx::fade(WHITE, alpha));
+        pen += f->fw * scale;
+    }
+    return pen - x;
 }
 
 }  // namespace gh

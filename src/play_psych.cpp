@@ -162,7 +162,7 @@ CharacterPtr PlayState::makeCharacter(const std::string& name, bool isPlayer, in
     if (!path.empty()) {
         std::string text;
         ok = scene::readFile(path, text) && psych::parseCharacter(text, def, err);
-        if (!ok) debugPrint("character " + name + ": " + err, 0xFFFF6060);
+        if (!ok) debugNotice("character " + name + ": " + err, false, false);
     } else if (const char* base = basegame::characterJson(name)) {
         // Older engines hard-code the original characters; their images are in the mod.
         ok = psych::parseCharacter(base, def, err) && !def.images.empty() &&
@@ -173,7 +173,7 @@ CharacterPtr PlayState::makeCharacter(const std::string& name, bool isPlayer, in
         std::string keys;
         for (const std::string& im : def.images) keys += (keys.empty() ? "" : ",") + im;
         g = sc.gfx.atlas(keys);
-        if (!g) debugPrint("character " + name + ": image not found (" + keys + ")", 0xFFFF6060);
+        if (!g) debugNotice("character " + name + ": image not found (" + keys + ")", false, false);
     }
     if (ok && g) {
         c->def = def;
@@ -440,7 +440,7 @@ bool PlayState::setupPsych() {
     if (!stageJson.empty()) {
         std::string text, err;
         if (!scene::readFile(stageJson, text) || !psych::parseStage(text, sc.stage, err))
-            debugPrint("stage " + stageName + ": " + err, 0xFFFF6060);
+            debugNotice("stage " + stageName + ": " + err, false, false);
     } else if (const char* bs = basegame::stageJson(stageName); bs && baseStageAvailable(stageName)) {
         std::string err;
         psych::parseStage(bs, sc.stage, err);
@@ -574,7 +574,7 @@ bool PlayState::setupPsych() {
     if (!sc.gfx.missing.empty()) {
         std::string list;
         for (size_t i = 0; i < sc.gfx.missing.size() && i < 4; ++i) list += (i ? ", " : "") + sc.gfx.missing[i];
-        debugPrint(std::to_string(sc.gfx.missing.size()) + " image(s) missing: " + list, 0xFFFFD040);
+        debugNotice(std::to_string(sc.gfx.missing.size()) + " image(s) missing: " + list, false, false);
     }
     return true;
 }
@@ -1305,7 +1305,7 @@ void PlayState::psychDraw() {
     pass(scene::Cam::Hud, sc.camHud, true);
     pass(scene::Cam::Other, sc.camOther, false);
     gfx::endCanvas();
-    for (const std::string& e : renderer_.errors) debugPrint(e, 0xFFFF6060);
+    for (const std::string& e : renderer_.errors) debugNotice(e, true, false);
     renderer_.errors.clear();
     drawCutscene();
 }
@@ -1353,7 +1353,7 @@ void PlayState::playSound(const std::string& file, double volume, const std::str
         if (path.empty() && endsWithI(file, ext)) path = scene_->files.find(file);
         if (!path.empty()) break;
     }
-    if (path.empty()) { debugPrint("sound not found: " + file, 0xFFFFD040); return; }
+    if (path.empty()) { debugNotice("sound not found: " + file, false, false); return; }
     auto bytes = std::make_shared<std::vector<unsigned char>>();
     {
         std::string data;
@@ -1433,12 +1433,12 @@ bool PlayState::openVideo(VideoSlot& v) {
     }
     v.waiting = false;
     if (!src.error.empty()) {
-        debugPrint(src.error, 0xFFFFD040);
+        debugNotice(src.error, false, false);
         return false;
     }
     v.player = std::make_unique<VideoPlayer>();
     if (!v.player->open(src.playable, v.loop)) {
-        debugPrint("cannot play video " + v.name, 0xFFFFD040);
+        debugNotice("cannot play video " + v.name, false, false);
         v.player.reset();
         return false;
     }
@@ -1779,6 +1779,18 @@ void PlayState::triggerEvent(const std::string& name, const std::string& v1, con
     e.v2 = v2;
     handleBuiltinEvent(e);
     if (scripts_) scripts_->call("onEvent", {Value(name), Value(v1), Value(v2), Value(songMs_)});
+}
+
+// Options > DEBUG: each kind is shown always (0), only for scripts that set
+// luaDebugMode as in Psych (1), or never (2).
+void PlayState::debugNotice(const std::string& text, bool error, bool debugMode) {
+    const Settings& s = app().settings;
+    const int mode = error ? s.luaErrors : s.luaWarnings;
+    if (mode == 2 || (mode == 1 && !debugMode)) {
+        if (app().autoRun.enabled) std::printf("[lua, hidden] %s\n", text.c_str());
+        return;
+    }
+    debugPrint(text, error ? 0xFFFF4050 : 0xFFFFD040);
 }
 
 void PlayState::debugPrint(const std::string& text, uint32_t argb) {
@@ -2130,7 +2142,7 @@ bool PlayState::loadSong(const std::string& name, int difficulty) {
         a.change(makePlay(r));
         return true;
     }
-    debugPrint("loadSong: no song " + name + " in this mod", 0xFFFFD040);
+    debugNotice("loadSong: no song " + name + " in this mod", false, false);
     return false;
 }
 

@@ -71,13 +71,54 @@ double App::menuBeat() {
 }
 
 void App::applyVolumes() {
-    platform::rememberVolume(settings.masterVol);
-    if (!platform::inBackground()) SetMasterVolume(settings.masterVol);
+    platform::rememberVolume(effectiveVolume());
+    if (!platform::inBackground()) SetMasterVolume(effectiveVolume());
     mixer.setVolume(settings.musicVol);
     sfxSetVolume(settings.sfxVol);
 }
 
 void App::saveSettings() { settings.save(base + "settings.cfg"); }
+
+void App::volumeKeys() {
+    if (platform::kAndroid) return;  // phones have their own volume buttons
+    auto hit = [&](std::initializer_list<int> keys) {
+        for (int k : keys)
+            if (input.pressed(k) && !state_->keyReserved(k)) return true;
+        return false;
+    };
+    int step = 0;
+    bool mute = false;
+    if (hit({KEY_EQUAL, KEY_KP_ADD})) step = 1;
+    else if (hit({KEY_MINUS, KEY_KP_SUBTRACT})) step = -1;
+    else if (hit({KEY_ZERO, KEY_KP_0})) mute = true;
+    if (!step && !mute) return;
+    if (mute) {
+        settings.muted = !settings.muted;
+    } else {
+        settings.muted = false;
+        settings.masterVol = clampv(float(std::round(settings.masterVol * 10.0f + float(step)) / 10.0f), 0.0f, 1.0f);
+    }
+    applyVolumes();
+    saveSettings();
+    volumeShownAt_ = now;
+    if (!settings.muted) sfxPlay(Sfx::Scroll);
+}
+
+// Flixel's sound tray: ten bars at the top of the screen for a moment.
+void App::drawVolumeTray() {
+    const double t = now - volumeShownAt_;
+    if (t < 0 || t > 1.8) return;
+    const float slide = t < 1.5 ? 0.0f : float((t - 1.5) / 0.3);  // slides back up
+    const float w = 200, h = 64, x = gfx::W / 2 - w / 2, y = 6 - slide * (h + 10);
+    DrawRectangleRounded({x, y, w, h}, 0.2f, 6, Color{0, 0, 0, 200});
+    const int level = settings.muted ? 0 : int(std::lround(settings.masterVol * 10));
+    for (int i = 0; i < 10; ++i) {
+        const float bh = 6 + i * 2.6f, bx = x + 22 + i * 16.5f, by = y + 38 - bh;
+        DrawRectangleRec({bx, by, 12, bh}, i < level ? WHITE : Color{255, 255, 255, 60});
+    }
+    gfx::text(gfx::FontId::Ui, settings.muted ? "MUTED" : TextFormat("VOLUME %d%%", level * 10), gfx::W / 2, y + 42, 18,
+              WHITE, gfx::Align::Center, 1.0f);
+}
 
 void App::applyPsychUi() {
     PsychUi& ui = psychUi();
@@ -298,6 +339,7 @@ void App::frame() {
     if (touchMode) touch.setLayout(input, state_->touchLayout(), now);
     if (input.pressed(KEY_F11) || (input.pressed(KEY_ENTER) && (input.isDown(KEY_LEFT_ALT) || input.isDown(KEY_RIGHT_ALT))))
         toggleFullscreen();
+    volumeKeys();
 
     if (!menuPcm_ && menuJob_.valid() &&
         menuJob_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -327,6 +369,7 @@ void App::frame() {
     gfx::beginCanvas();
     if (fade_ > 0) DrawRectangleRec({-10, -10, gfx::W + 20, gfx::H + 20}, gfx::fade(BLACK, fade_));
     if (settings.showFps) gfx::text(gfx::FontId::Ui, TextFormat("%d FPS", int(fps + 0.5f)), 8, 4, 20, WHITE, gfx::Align::Left, 1.5f);
+    drawVolumeTray();
     gfx::endCanvas();
     gfx::drawLetterbox();
     if (touchMode) touch.draw();

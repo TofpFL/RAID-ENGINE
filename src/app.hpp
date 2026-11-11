@@ -27,6 +27,9 @@ public:
     virtual TouchLayout touchLayout() const { return {}; }
     // The app came back from the background (Android).
     virtual void onResume() {}
+    // This screen uses the key itself (a lane, typing, rebinding), so the
+    // game-wide volume keys leave it alone.
+    virtual bool keyReserved(int key) const { return false; }
 };
 
 struct Modifiers {
@@ -104,15 +107,24 @@ public:
     double menuBeat();
     double menuBpm() const { return menuBpm_; }
     void applyVolumes();
+    float effectiveVolume() const { return settings.muted ? 0.0f : settings.masterVol; }
     void saveSettings();
     void toggleFullscreen();
     // Loads (or drops) the "Psych Engine" interface from settings: textures,
     // sounds and menu music. `psychReport` says what was found.
     void applyPsychUi();
     std::string psychReport;
+    // Options opened from a song's pause menu: leaving them plays it again.
+    std::unique_ptr<PlayRequest> optionsReturn;
+    // Deaths on the song played last (Psych's "Blueballed" in the pause menu).
+    int blueballed = 0;
+    std::string blueballedSong;
 
 private:
     void frame();
+    void volumeKeys();       // - and = change the master volume, 0 mutes (as in Flixel)
+    void drawVolumeTray();
+    double volumeShownAt_ = -10;
     std::unique_ptr<State> state_, next_;
     float fade_ = 0;
     int fadeDir_ = 0;

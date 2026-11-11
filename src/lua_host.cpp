@@ -1,6 +1,7 @@
 #include "lua_host.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -39,6 +40,13 @@ struct ScriptHost::Script {
 };
 
 namespace {
+
+// When the game started (os.clock counts from here).
+std::chrono::steady_clock::time_point gameStart() {
+    static const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    return start;
+}
+const std::chrono::steady_clock::time_point kStartedAt = gameStart();
 
 constexpr const char* kCompat = R"LUA(
 unpack = unpack or table.unpack
@@ -131,8 +139,16 @@ int retBool(lua_State* L, bool b) {
     return 1;
 }
 
+// The script set luaDebugMode = true (Psych then shows its warnings and errors).
+bool luaDebugMode(lua_State* L) {
+    lua_getglobal(L, "luaDebugMode");
+    const bool on = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return on;
+}
+
 void warn(lua_State* L, const std::string& msg) {
-    G(L).debugPrint(S(L).name + ": " + msg, 0xFFFFD040);
+    G(L).debugNotice(S(L).name + ": " + msg, false, luaDebugMode(L));
 }
 
 std::string cleanTag(std::string tag) {
@@ -1757,12 +1773,12 @@ int l_runHaxeCode(lua_State* L) {
     hx::Value result;
     std::string err;
     if (!ip.run(str(L, 1), S(L).name + " (runHaxeCode)", result, err)) {
-        H(L).reportError(err);
+        H(L).reportError(err, luaDebugMode(L));
         lua_pushnil(L);
         return 1;
     }
     if (!lua_isnoneornil(L, 3) && !str(L, 3).empty()) {
-        if (!ip.call(str(L, 3), hxArgs(L, 4), result, err)) H(L).reportError(err);
+        if (!ip.call(str(L, 3), hxArgs(L, 4), result, err)) H(L).reportError(err, luaDebugMode(L));
     }
     pushHx(L, result);
     return 1;
@@ -1773,7 +1789,7 @@ int l_runHaxeFunction(lua_State* L) {
     hx::Value result;
     std::string err;
     bool found = false;
-    if (!ip.call(str(L, 1), hxArgs(L, 2), result, err, &found)) H(L).reportError(err);
+    if (!ip.call(str(L, 1), hxArgs(L, 2), result, err, &found)) H(L).reportError(err, luaDebugMode(L));
     else if (!found) warn(L, "runHaxeFunction: no function " + str(L, 1));
     pushHx(L, result);
     return 1;
@@ -1789,9 +1805,9 @@ int l_hxCallback(lua_State* L) {
     try {
         r = it->second.owner->callValue(it->second.fn, args);
     } catch (std::exception& e) {
-        H(L).reportError(name + ": " + e.what());
+        H(L).reportError(name + ": " + e.what(), luaDebugMode(L));
     } catch (...) {
-        H(L).reportError(name + ": uncaught throw");
+        H(L).reportError(name + ": uncaught throw", luaDebugMode(L));
     }
     pushHx(L, r);
     return 1;
@@ -1821,7 +1837,7 @@ int bridgeCall(lua_State* L, const std::string& root, const std::string& objPath
         if (target.t != hx::T::Host) { lua_pushnil(L); return 1; }
         pushHx(L, hx::hostCall(ip, *target.host, method, args));
     } catch (std::exception& e) {
-        H(L).reportError(S(L).name + ": " + e.what());
+        H(L).reportError(S(L).name + ": " + e.what(), luaDebugMode(L));
         lua_pushnil(L);
     }
     return 1;
@@ -2198,7 +2214,7 @@ void reportScriptError(ScriptHost::Script& s, const std::string& msg) {
     }
     s.lastErr = msg;
     s.lastErrAt = t;
-    h.reportError(msg);
+    h.reportError(msg, s.L && luaDebugMode(s.L));
 }
 
 bool callOne(ScriptHost::Script& s, const char* fn, const std::vector<Value>& args, Value* result, std::string* err) {
@@ -2251,9 +2267,9 @@ void ScriptHost::setHxGlobal(const std::string& name, const hx::Value& v) {
         if (s->hx) s->hx->setGlobal(name, v);
 }
 
-void ScriptHost::reportError(const std::string& msg) {
+void ScriptHost::reportError(const std::string& msg, bool debugMode) {
     errors.push_back(msg);
-    game.debugPrint(msg, 0xFFFF4050);
+    game.debugNotice(msg, true, debugMode);
 }
 
 bool ScriptHost::loadHx(const std::string& path, const std::string& code, bool callCreate) {
@@ -2269,7 +2285,7 @@ bool ScriptHost::loadHx(const std::string& path, const std::string& code, bool c
     hx::Value result;
     std::string err;
     if (!raw->ip->run(code, raw->name, result, err)) {
-        reportError(err);
+        reportError(err, true);  // a script that does not load at all: shown as in Psych
         raw->closed = true;
         return false;
     }
@@ -2347,7 +2363,14 @@ bool ScriptHost::loadString(const std::string& path, const std::string& code, bo
         lua_setglobal(L, banned);
     }
     lua_newtable(L);
-    lua_pushcfunction(L, [](lua_State* L2) { lua_pushnumber(L2, lua_Number(std::clock()) / CLOCKS_PER_SEC); return 1; });
+    // os.clock: seconds since the game started, as on Windows (where Psych
+    // mods are made). The C clock() of Linux and Android counts CPU time, so
+    // shaders animated with setShaderFloat(..., 'iTime', os.clock()) ran
+    // faster or slower with the CPU load.
+    lua_pushcfunction(L, [](lua_State* L2) {
+        lua_pushnumber(L2, std::chrono::duration<double>(std::chrono::steady_clock::now() - gameStart()).count());
+        return 1;
+    });
     lua_setfield(L, -2, "clock");
     lua_pushcfunction(L, [](lua_State* L2) { lua_pushinteger(L2, lua_Integer(std::time(nullptr))); return 1; });
     lua_setfield(L, -2, "time");
@@ -2396,7 +2419,7 @@ bool ScriptHost::loadString(const std::string& path, const std::string& code, bo
         std::string msg = lua_tostring(L, -1) ? lua_tostring(L, -1) : "error";
         const size_t tb = msg.find("\nstack traceback:");
         if (tb != std::string::npos) msg.resize(tb);
-        reportScriptError(*raw, raw->name + ": " + msg);
+        reportError(raw->name + ": " + msg, true);  // does not load at all: Psych shows it whatever luaDebugMode says
         raw->closed = true;
         lua_settop(L, 0);
         return false;
