@@ -9,8 +9,9 @@ Two kinds of packs:
   <folder>                          mods/<folder> of the "source" repository (Git LFS)
   drive <folder> <zip>=<id> ...     zips already built (by this script's --local mode) and
                                     shared on Google Drive with a public link; they are
-                                    copied to the release as they are"""
-import os, re, shutil, subprocess, sys, zipfile
+                                    copied to the release as they are (quote a folder
+                                    name with spaces: drive "My Mod" ...)"""
+import os, re, shlex, shutil, subprocess, sys, zipfile
 
 LIMIT = int(os.environ.get('GH_PACK_LIMIT', 1_900_000_000))  # GitHub allows 2 GiB per release file
 STORED = {'.png', '.jpg', '.jpeg', '.ogg', '.mp3', '.webm', '.mp4', '.zip', '.7z', '.flp', '.wav', '.ttf', '.otf'}
@@ -39,7 +40,7 @@ def read_list():
         if line.startswith('source '):
             _, source, commit = line.split()
         elif line.startswith('drive '):
-            _, folder, *zips = line.split()
+            _, folder, *zips = shlex.split(line)  # a folder name with spaces is quoted
             drive[folder] = [tuple(z.split('=', 1)) for z in zips]
             folders.append(folder)
         else:

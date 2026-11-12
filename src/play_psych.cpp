@@ -647,7 +647,8 @@ void PlayState::psychHoldRefresh() {
                 ch->holdTimer = 0;
             }
             const char* fn = side == 1 ? "goodNoteHit" : "opponentNoteHit";
-            scripts_->call(fn, {Value(double(n.id)), Value(double(l)), Value(chart_.noteTypes[n.type]), Value(true)});
+            if (app().settings.luaNoteCallbacks)
+                scripts_->call(fn, {Value(double(n.id)), Value(double(l)), Value(chart_.noteTypes[n.type]), Value(true)});
         }
 }
 
@@ -676,10 +677,12 @@ void PlayState::psychNoteHit(const GameEvent& ev, bool opponent) {
     if (toLower(entry_->songKey) != "tutorial") sc.camZooming = true;
     if (opponent) {
         app().mixer.setTrackVolume(Mixer::kVoiceOpponent, 1.0f);
-        scripts_->call("opponentNoteHit", {Value(double(ev.id)), Value(double(ev.lane)), Value(type), Value(false)});
+        if (app().settings.luaNoteCallbacks)
+            scripts_->call("opponentNoteHit", {Value(double(ev.id)), Value(double(ev.lane)), Value(type), Value(false)});
     } else {
         lastCombo_ = session_.combo;
-        scripts_->call("goodNoteHit", {Value(double(ev.id)), Value(double(ev.lane)), Value(type), Value(false)});
+        if (app().settings.luaNoteCallbacks)
+            scripts_->call("goodNoteHit", {Value(double(ev.id)), Value(double(ev.lane)), Value(type), Value(false)});
     }
 }
 
@@ -688,7 +691,7 @@ void PlayState::psychMiss(const GameEvent& ev, bool ghost) {
     Character* ch = (ev.flags & kFlagGF) && sc.gf ? sc.gf.get() : charForSide(1);
     if (ghost) {
         if (ch && ch->hasMiss) ch->playAnim(singAnim(ev.lane, 0) + "miss", true);
-        scripts_->call("noteMissPress", {Value(double(ev.lane))});
+        if (app().settings.luaNoteCallbacks) scripts_->call("noteMissPress", {Value(double(ev.lane))});
         return;
     }
     if (ev.type == GameEvent::PlayerMine) {
@@ -705,8 +708,9 @@ void PlayState::psychMiss(const GameEvent& ev, bool ghost) {
     }
     lastCombo_ = 0;
     const std::string& type = chart_.noteTypes[ev.noteType < chart_.noteTypes.size() ? ev.noteType : 0];
-    scripts_->call("noteMiss", {Value(double(ev.id)), Value(double(ev.lane)), Value(type),
-                                Value(ev.type == GameEvent::HoldDrop)});
+    if (app().settings.luaNoteCallbacks)
+        scripts_->call("noteMiss", {Value(double(ev.id)), Value(double(ev.lane)), Value(type),
+                                    Value(ev.type == GameEvent::HoldDrop)});
 }
 
 void PlayState::psychBeat(int b) {

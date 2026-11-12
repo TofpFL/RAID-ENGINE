@@ -10,16 +10,24 @@
 
 namespace gh {
 
-// 16-bit PCM at 44.1 kHz, mono or interleaved stereo.
+struct PcmStream;  // audio_decode.hpp
+
+// 16-bit PCM at 44.1 kHz, mono or interleaved stereo: all of it in `data`,
+// or (a song file) decoded in the background into `stream` while it plays.
 struct Pcm {
     std::vector<int16_t> data;
     int channels = 2;
-    size_t frames() const { return channels > 0 ? data.size() / size_t(channels) : 0; }
+    std::shared_ptr<PcmStream> stream;  // set: `data` stays empty
+    size_t streamFrames = 0;            // the stream's length
+    size_t frames() const { return stream ? streamFrames : (channels > 0 ? data.size() / size_t(channels) : 0); }
 };
 using PcmPtr = std::shared_ptr<const Pcm>;
 
-// Decodes ogg/mp3/wav/qoa through raylib and converts to 44.1 kHz stereo.
+// Decodes a whole ogg/mp3/wav (or qoa, through raylib) file to 44.1 kHz.
 bool loadAudioFile(const std::string& path, Pcm& out, std::string& err);
+// A song file: streamed (playable at once) when it is ogg/mp3/wav, else
+// decoded whole. `startFraction`: where playing will start. Null on failure.
+PcmPtr loadSongAudio(const std::string& path, double startFraction = 0.0);
 
 // The mixer feeds one raylib AudioStream from a callback and counts the exact
 // number of frames handed to the device; time() derives a smooth, monotonic
@@ -54,6 +62,9 @@ public:
     double rawTime() const;   // position of the last mixed frame
     double lengthSec() const;
     bool ended() const;
+    // A streamed track has not decoded the part being played yet (after a
+    // jump far ahead): the song clock waits for it.
+    bool waitingForAudio() const { return stalled_.load(); }
 
     void audioCallback(float* out, unsigned frames);  // audio thread
 
@@ -72,6 +83,8 @@ private:
     std::atomic<float> fadeTarget_{1.0f};
     std::atomic<float> fadeStep_{0.0f};
     std::atomic<bool> loop_{false};
+    std::atomic<bool> stalled_{false};
+    void hintStreams(double sec);  // tells streamed tracks where playing goes on
     std::atomic<double> loopStart_{0}, loopEnd_{0};
     float curVol_[kTrackCount] = {1, 1, 1};
     float fadeGain_ = 1.0f;

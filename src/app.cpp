@@ -124,8 +124,21 @@ void App::applyPsychUi() {
     PsychUi& ui = psychUi();
     ui.unload();
     psychReport.clear();
-    if (settings.psychUi && !settings.psychFolder.empty()) {
-        if (ui.load(settings.psychFolder, psychReport) > 0) ui.setActive(true);
+    psychFolderInUse.clear();
+    if (settings.psychUi) {
+        // No folder chosen (or it is gone): the most complete Psych Engine /
+        // JS Engine copy already on disk, such as an engine installed as a mod pack.
+        std::string folder = settings.psychFolder;
+        psychAutomatic = folder.empty() || !DirectoryExists(folder.c_str());
+        if (psychAutomatic) {
+            const std::vector<PsychFolder> found = findPsychFolders(base);
+            folder = found.empty() ? std::string() : found.front().path;
+            platform::log(found.empty() ? std::string("no Psych Engine copy found")
+                                        : "Psych Engine interface from " + folder + " (" + std::to_string(found.size()) + " copies found)");
+        }
+        psychFolderInUse = folder;
+        if (folder.empty()) psychReport = "no Psych Engine or JS Engine copy found among your mods";
+        else if (ui.load(folder, psychReport) > 0) ui.setActive(true);
         else psychReport = "nothing of the Psych Engine interface found there";
     }
     ui.applySounds();
@@ -182,6 +195,7 @@ int App::run(int argc, char** argv) {
         else if (!std::strcmp(a, "--list-songs")) listSongs = true;
         else if (!std::strcmp(a, "--check-charts")) checkCharts = true;
         else if (!std::strcmp(a, "--touch")) touchMode = true;
+        else if (!std::strcmp(a, "--perf")) perf = true;  // frame times on stdout every second
         else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
     if (listSongs) {
@@ -346,6 +360,7 @@ void App::frame() {
         menuPcm_ = menuJob_.get();
     if (state_->wantsMenuMusic() && !fadeDir_) startMenuMusic();
 
+    const double tUpdate = nowSec();
     if (fadeDir_ == 0) state_->update(dt);
     if (fadeDir_ > 0) {
         fade_ += float(dt / 0.22);
@@ -363,6 +378,7 @@ void App::frame() {
         if (fade_ <= 0.0f) { fade_ = 0; fadeDir_ = 0; }
     }
 
+    const double tDraw = nowSec();
     BeginDrawing();
     ClearBackground(BLACK);
     state_->draw();
@@ -385,6 +401,25 @@ void App::frame() {
         if (autoRun.quitAfter > 0 && t >= autoRun.quitAfter) quit = true;
     }
     SwapScreenBuffer();
+
+    // Frame timing: update, draw (including the buffer swap), worst frame of the last second.
+    const double tEnd = nowSec();
+    const float upd = float((tDraw - tUpdate) * 1000.0), drw = float((tEnd - tDraw) * 1000.0);
+    updateMs = updateMs * 0.9f + upd * 0.1f;
+    drawMs = drawMs * 0.9f + drw * 0.1f;
+    perfWorst_ = std::max(perfWorst_, float(dt * 1000.0));
+    perfUpd_ += upd;
+    perfDraw_ += drw;
+    ++perfFrames_;
+    if (now - perfSince_ >= 1.0) {
+        worstFrameMs = perfWorst_;
+        if (perf && perfFrames_ > 0)
+            std::printf("[perf] %d fps, update %.2f ms, draw %.2f ms, worst frame %.1f ms\n", perfFrames_,
+                        perfUpd_ / perfFrames_, perfDraw_ / perfFrames_, perfWorst_);
+        perfSince_ = now;
+        perfFrames_ = 0;
+        perfUpd_ = perfDraw_ = perfWorst_ = 0;
+    }
 }
 
 // ------------------------------------------------------- shared visuals --

@@ -78,4 +78,15 @@ private:
 
 PsychUi& psychUi();
 
+// Psych Engine / JS Engine copies already on the player's disk: engine builds
+// installed as mod packs (mods/), or unpacked in or next to the game's folder.
+// The most complete first (an engine's own build before a mod's reskin).
+// The game uses the best one when no folder was chosen.
+struct PsychFolder {
+    std::string path;
+    int score = 0;  // pieces of the interface found
+};
+std::vector<PsychFolder> findPsychFolders(const std::string& gameBase);
+int psychFolderScore(const std::string& folder);
+
 }  // namespace gh

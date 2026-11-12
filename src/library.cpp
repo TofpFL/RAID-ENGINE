@@ -94,12 +94,18 @@ Library::BuiltinAudio Library::builtinAudio(const SongDef& def) {
     return a;
 }
 
+// The whole track decoded (AutoChart reads all of it).
 static PcmPtr loadOrNull(const std::string& path) {
     if (path.empty()) return nullptr;
     auto p = std::make_shared<Pcm>();
     std::string err;
     if (!loadAudioFile(path, *p, err)) return nullptr;
     return p;
+}
+
+// A song's track: playable at once, decoded while it plays.
+static PcmPtr streamOrNull(const std::string& path, double startFraction = 0.0) {
+    return loadSongAudio(path, startFraction);
 }
 
 Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys) {
@@ -116,7 +122,8 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
             if (e.diffs[i] == diff) d = int(i);
         {
             std::lock_guard<std::mutex> lk(customMtx_);
-            if (customInstKey_ != e.id || !customInst_) {
+            // A streamed copy (the menu's preview) does not hold all the samples.
+            if (customInstKey_ != e.id || !customInst_ || customInst_->stream) {
                 customInstKey_ = e.id;
                 customInst_ = loadOrNull(e.inst);
             }
@@ -156,11 +163,11 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
             std::lock_guard<std::mutex> lk(customMtx_);
             if (customCacheKey_ != e.id) {
                 customCacheKey_ = e.id;
-                if (customInstKey_ != e.id) customInst_ = loadOrNull(e.inst);
+                if (customInstKey_ != e.id) customInst_ = streamOrNull(e.inst);
                 customInstKey_ = e.id;
-                customVoices_ = loadOrNull(e.voices);
-                customVp_ = loadOrNull(e.voicesP);
-                customVo_ = loadOrNull(e.voicesO);
+                customVoices_ = streamOrNull(e.voices);
+                customVp_ = streamOrNull(e.voicesP);
+                customVo_ = streamOrNull(e.voicesO);
             }
             p.inst = customInst_;
             if (customVp_ || customVo_) {
@@ -185,9 +192,10 @@ PcmPtr Library::preview(const SongEntry& e) {
     std::lock_guard<std::mutex> lk(customMtx_);
     if (customInstKey_ != e.id) {
         // Only the instrumental is needed for a preview; prepare() loads voices.
+        // The menu plays it from 30% in: decoded from there first.
         customInstKey_ = e.id;
         customCacheKey_.clear();
-        customInst_ = loadOrNull(e.inst);
+        customInst_ = streamOrNull(e.inst, 0.3);
     }
     return customInst_;
 }

@@ -110,6 +110,8 @@ private:
     const scene::Strum& strum(int side, int lane) const;
     void drawMine(Vector2 c, float size, float alpha, float rot);
     void drawLanes();
+    void adaptNoteGap();  // Note detail "Adaptive": see noteGap_
+    void drawDebugOverlay();  // F3: chart, clock, audio, notes, frame times (S2X's debug menu)
     void drawHud();
     void drawHudLayer();  // lanes, effects and HUD with the HUD camera
     void drawHudCentered();
@@ -217,6 +219,16 @@ private:
     // Notes per second for the note counter (JS Engine / H-Slice): hits in the last second.
     std::deque<std::pair<double, long long>> npsWindow_;
     long long nps_ = 0, maxNps_ = 0;
+    // Spam charts (S2X's adaptive note budget): notes of a lane closer than
+    // noteGap_ pixels are drawn once. 1 = every pixel; doubled while the frame
+    // rate stays under its target with thousands of notes on screen, halved
+    // again once the screen holds clearly fewer than when it had to grow.
+    float noteGap_ = 1.0f;
+    bool debugOverlay_ = false;
+    int drawnNotes_ = 0, candidateNotes_ = 0;  // last frame: notes drawn / that 1 px would draw
+    double drawnSum_ = 0, candidateSum_ = 0, gapTime_ = 0;
+    int gapFrames_ = 0;
+    double gapTooMuch_[6] = {};  // notes on screen with which gap 2^k was too slow
     gfx::Particles fx_;
     int pauseSel_ = 0, deadSel_ = 0;
     float pauseScroll_ = 0;  // the Psych pause menu's items glide to the selection

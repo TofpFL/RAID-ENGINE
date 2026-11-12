@@ -45,3 +45,15 @@ drive drive-pack-denpaex GodsHand-mod-drive-pack-denpaex.zip=1MMdFT9vkVfOaiFEyja
 drive drive-2026-08-22-vs-everamii GodsHand-mod-drive-2026-08-22-vs-everamii.zip=1CPcue8m8ImrSkUY3qVQ2c3-IuP_LEdr6
 drive drive-2026-08-22-dek-v1 GodsHand-mod-drive-2026-08-22-dek-v1.zip=18-_Lf5zusabVz0excbLgF_1tVzwfap1C
 drive pulseforge-complete-menu-music GodsHand-mod-pulseforge-complete-menu-music.zip=1sLrwhA_j-UHQIwFD8R8fKCCYPjOSrqvr
+
+# Mods for JS Engine (the owner's Mods-for-JS-Engine-main.zip; DorklySonicIdkAnymore is
+# already js-engine-dorklysonic): zips built with build_packs.py --local, copied from Drive.
+drive "BFBL Short Songs" GodsHand-mod-bfbl-short-songs.zip=1JizEO_jWRZN12wwilRM5Q_Xi03vJFTYE
+drive LONGSONG GodsHand-mod-longsong.zip=17Vg8x9GZrb1sGd6IqsxlRUCkBYKq9ZKK
+drive "Splitathon 2" GodsHand-mod-splitathon-2.zip=1oX9wkMExOd6_5_DpJWi6DYcVkILyqAIv
+drive "Taimuresu RECHARTED" GodsHand-mod-taimuresu-recharted.zip=1P1Ny3TUgcVVaBiAkrWUULsavt-0JoeZC
+drive "double kill thing YAY!!!" GodsHand-mod-double-kill-thing-yay.zip=1EcQAYC-yigH9HPVx3OkXP45z3TheD1RI
+drive "shaggy bleeds" GodsHand-mod-shaggy-bleeds.zip=1VJoa6q8zcpfi9VU4kEfnUpjRMQkTGjzm
+drive "the frame of wiring" GodsHand-mod-the-frame-of-wiring.zip=1JHGqqLDzx6yu7KHtjRuZeEuWVp3t7Ma6
+drive "JS Bambi Fansong Charts" GodsHand-mod-js-bambi-fansong-charts-part1.zip=120Bxl74Oed_aPNR-jWrOJ5utrfG4J7KN GodsHand-mod-js-bambi-fansong-charts-part2.zip=1AZ4OlmtCSBii_m5KM61kEnmY5GhnXBM6 GodsHand-mod-js-bambi-fansong-charts-part3.zip=1AAZWB1mxn-q9c0_K13Af5sDel3LiL7Pi
+drive funnysongs GodsHand-mod-funnysongs-part1.zip=1-pRiWC04hPtD7qK7kLzJugumM_nqP_oK GodsHand-mod-funnysongs-part2.zip=1rlrmEaGA8gy2wZvaYmbfEM9GWFk4I7ij

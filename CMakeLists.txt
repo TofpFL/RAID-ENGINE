@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.4.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -157,6 +157,14 @@ if(GH_BUILD_GAME)
     GIT_TAG 5.5
     GIT_SHALLOW TRUE)
   FetchContent_MakeAvailable(raylib)
+  # src/audio_decode.cpp calls the decoders raylib compiles in (stb_vorbis,
+  # dr_mp3, dr_wav): their headers are in raylib's external/ folder.
+  if(EXISTS ${raylib_SOURCE_DIR}/src/external/dr_mp3.h)
+    set(GH_RAYLIB_EXTERNAL ${raylib_SOURCE_DIR}/src/external)
+  else()
+    set(GH_RAYLIB_EXTERNAL ${raylib_SOURCE_DIR}/external)
+  endif()
+  set_source_files_properties(src/audio_decode.cpp PROPERTIES INCLUDE_DIRECTORIES ${GH_RAYLIB_EXTERNAL})
   # The main loop polls input ~1000 times per second and only renders at the
   # frame limit, so raylib must not swap/poll/sleep inside EndDrawing().
   target_compile_definitions(raylib PRIVATE SUPPORT_CUSTOM_FRAME_CONTROL=1)
@@ -189,6 +197,7 @@ if(GH_BUILD_GAME)
     src/main.cpp
     src/app.cpp
     src/audio.cpp
+    src/audio_decode.cpp
     src/input.cpp
     src/settings.cpp
     src/library.cpp
@@ -258,4 +267,11 @@ if(GH_BUILD_GAME)
     install(DIRECTORY assets songs DESTINATION .)
     install(FILES README.md LICENSE DESTINATION .)
   endif()
+endif()
+
+# Streamed song audio is tested with raylib's decoders when raylib is built.
+if(GH_BUILD_TESTS AND TARGET raylib)
+  target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio_decode.cpp)
+  target_link_libraries(gh_tests PRIVATE raylib)
+  target_compile_definitions(gh_tests PRIVATE GH_AUDIO_TESTS=1)
 endif()

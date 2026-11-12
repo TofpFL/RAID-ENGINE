@@ -39,6 +39,8 @@ bool Settings::load(const std::string& path) {
         else if (k == "lowDetail") lowDetail = b;
         else if (k == "vsync") vsync = b;
         else if (k == "shaders") shaders = b;
+        else if (k == "noteDetail") noteDetail = clampv(int(d), 0, 1);
+        else if (k == "luaNoteCallbacks") luaNoteCallbacks = b;
         else if (k == "extraKeys") extraKeys = b;
         else if (k == "noteCounter") noteCounter = clampv(int(d), 0, 2);
         else if (k == "luaErrors") luaErrors = clampv(int(d), 0, 2);
@@ -72,6 +74,7 @@ bool Settings::save(const std::string& path) const {
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
       << "\nshowFps=" << showFps << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter
+      << "\nnoteDetail=" << noteDetail << "\nluaNoteCallbacks=" << luaNoteCallbacks
       << "\nluaErrors=" << luaErrors << "\nluaWarnings=" << luaWarnings << "\nhitPopups=" << hitPopups
       << "\ntimeBar=" << timeBar << "\nhealthBarAlpha=" << healthBarAlpha
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls

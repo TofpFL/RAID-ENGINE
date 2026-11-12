@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "audio_decode.hpp"
 #include "common.hpp"
 #include "platform.hpp"
 #include "raylib.h"
@@ -13,7 +14,20 @@ namespace gh {
 
 // ------------------------------------------------------------- decoding --
 
+// Whole tracks decoded at once stay under this (an hour and a half of stereo).
+constexpr size_t kMaxWholeBytes = size_t(1) << 30;
+
 bool loadAudioFile(const std::string& path, Pcm& out, std::string& err) {
+    // Ogg Vorbis, MP3 and WAV: straight to 16-bit 44.1 kHz with no raylib
+    // copies (raylib's own 32-bit sizes overflow on songs of several hours).
+    if (decodeAudioFile(path, out, err, kMaxWholeBytes)) {
+        platform::log("decoded " + path);
+        return true;
+    }
+    if (!err.empty()) {
+        platform::log(err);
+        return false;
+    }
     Wave w = LoadWave(path.c_str());
     if (w.data == nullptr || w.frameCount == 0) {
         err = "could not decode audio: " + path;
@@ -30,6 +44,18 @@ bool loadAudioFile(const std::string& path, Pcm& out, std::string& err) {
     return true;
 }
 
+PcmPtr loadSongAudio(const std::string& path, double startFraction) {
+    if (path.empty()) return nullptr;
+    if (auto s = openAudioStream(path, startFraction)) {
+        platform::log("streaming " + path);
+        return s;
+    }
+    auto p = std::make_shared<Pcm>();
+    std::string err;
+    if (!loadAudioFile(path, *p, err)) return nullptr;
+    return p;
+}
+
 // ---------------------------------------------------------------- mixer --
 
 static Mixer* g_mixer = nullptr;
@@ -42,6 +68,7 @@ static void streamCallback(void* buffer, unsigned int frames) {
 
 bool Mixer::init() {
     g_mixer = this;
+    startAudioDecoders();
     for (auto& v : trackVol_) v.store(1.0f);
     audioOk_ = false;
     if (!IsAudioDeviceReady()) return false;
@@ -71,6 +98,14 @@ void Mixer::shutdown() {
         for (auto& t : tracks_) t.reset();
     }
     g_mixer = nullptr;
+    stopAudioDecoders();
+}
+
+void Mixer::hintStreams(double sec) {
+    // tracks_ is only replaced on the main thread, where this runs.
+    const size_t at = sec > 0 ? size_t(sec * kRate) : 0;
+    for (const PcmPtr& t : tracks_)
+        if (t && t->stream) t->stream->playPos.store(at, std::memory_order_relaxed);
 }
 
 void Mixer::setTracks(PcmPtr inst, PcmPtr vp, PcmPtr vo) {
@@ -87,14 +122,17 @@ void Mixer::setTracks(PcmPtr inst, PcmPtr vp, PcmPtr vo) {
     fadeTarget_ = 1.0f;
     fadeStep_ = 0.0f;
     haveLast_ = false;
+    stalled_ = false;
 }
 
 void Mixer::play(double fromSec) {
+    hintStreams(fromSec);
     pos_ = fromSec * kRate;
     fbStart_ = nowSec();
     fbStartPos_ = fromSec;
     paused_ = false;
     haveLast_ = false;
+    stalled_ = false;
     playing_ = true;
 }
 
@@ -121,6 +159,7 @@ void Mixer::stop() {
 }
 
 void Mixer::seek(double sec) {
+    hintStreams(sec);
     pos_ = sec * kRate;
     fbStart_ = nowSec();
     fbStartPos_ = sec;
@@ -196,6 +235,10 @@ double Mixer::estimate(double now) const {
 }
 
 double Mixer::time(double now) {
+    if (stalled_.load() && haveLast_ && playing_) {  // waiting for a streamed track: the clock holds
+        lastNow_ = now;
+        return lastValue_;
+    }
     const double m = estimate(now);
     if (!playing_ || !haveLast_) {
         haveLast_ = playing_.load();
@@ -248,35 +291,89 @@ void Mixer::audioCallback(float* out, unsigned frames) {
     const float vol = volume_.load();
     const float fTarget = fadeTarget_.load(), fStep = fadeStep_.load();
     float tv[kTrackCount];
-    const Pcm* tr[kTrackCount];
+    // A track's samples: all in `flat`, or in the blocks of a stream (the
+    // two blocks used last are remembered for this callback).
+    struct View {
+        const int16_t* flat = nullptr;
+        const PcmStream* s = nullptr;
+        size_t n = 0;
+        int ch = 2;
+        size_t b0 = ~size_t(0), b1 = ~size_t(0);
+        const int16_t *p0 = nullptr, *p1 = nullptr;
+        const int16_t* block(size_t b) {
+            if (b == b0) return p0;
+            if (b == b1) return p1;
+            const int16_t* p = s->get(b);
+            b1 = b0;
+            p1 = p0;
+            b0 = b;
+            p0 = p;
+            return p;
+        }
+    } v[kTrackCount];
+    bool any = false;
     for (int t = 0; t < kTrackCount; ++t) {
         tv[t] = trackVol_[t].load();
-        tr[t] = tracks_[t].get();
+        if (const Pcm* p = tracks_[t].get()) {
+            v[t].flat = p->data.data();
+            v[t].s = p->stream.get();
+            v[t].n = p->frames();
+            v[t].ch = p->channels;
+            any = any || v[t].s;
+        }
     }
-    for (unsigned f = 0; f < frames; ++f) {
+    constexpr size_t B = PcmStream::kBlockFrames;
+    if (any) audioReadBegin();  // blocks stay in memory until audioReadEnd()
+    // A streamed track must hold everything this callback plays; if not, the
+    // whole callback waits (silence, the position and clock held).
+    bool stalled = false;
+    if (any && pos + double(frames) * rate > 0) {
+        const double endPos = pos + double(frames) * rate + 2;
+        const size_t from = pos > 0 ? size_t(pos) : 0;
+        const bool wraps = loop && le > ls && endPos >= le;
+        for (const View& w : v) {
+            if (!w.s || stalled) continue;
+            const auto upTo = [&](double x) { return size_t(std::min(x, double(w.n))); };
+            stalled = wraps ? !w.s->ready(from, upTo(le + 2)) || !w.s->ready(size_t(ls), upTo(ls + (endPos - le) + 2))
+                            : !w.s->ready(from, upTo(endPos));
+        }
+    }
+    unsigned f = 0;
+    for (; f < frames && !stalled; ++f) {
         float l = 0, r = 0;
         for (int t = 0; t < kTrackCount; ++t) curVol_[t] += (tv[t] - curVol_[t]) * 0.004f;
         if (pos >= 0) {
             const size_t i = size_t(pos);
             const float fr = float(pos - double(i));
-            for (int t = 0; t < kTrackCount; ++t) {
-                const Pcm* p = tr[t];
-                if (!p || curVol_[t] < 1e-4f) continue;
-                const size_t n = p->frames();
-                if (i >= n) continue;
-                const int16_t* d = p->data.data();
-                const float g = curVol_[t] * (1.0f / 32768.0f);
-                if (p->channels == 2) {
-                    const size_t j = (i + 1 < n) ? i + 1 : i;
-                    l += (d[2 * i] + (d[2 * j] - d[2 * i]) * fr) * g;
-                    r += (d[2 * i + 1] + (d[2 * j + 1] - d[2 * i + 1]) * fr) * g;
+            for (int t = 0; t < kTrackCount && !stalled; ++t) {
+                View& w = v[t];
+                if (!w.n || curVol_[t] < 1e-4f || i >= w.n) continue;
+                const size_t j = (i + 1 < w.n) ? i + 1 : i;
+                const int16_t *a, *b;
+                if (w.s) {
+                    const int16_t* qa = w.block(i / B);
+                    const int16_t* qb = j / B == i / B ? qa : w.block(j / B);
+                    if (!qa || !qb) {  // not decoded yet: the song waits here
+                        stalled = true;
+                        break;
+                    }
+                    a = qa + (i % B) * size_t(w.ch);
+                    b = qb + (j % B) * size_t(w.ch);
                 } else {
-                    const size_t j = (i + 1 < n) ? i + 1 : i;
-                    const float s = (d[i] + (d[j] - d[i]) * fr) * g;
+                    a = w.flat + i * size_t(w.ch);
+                    b = w.flat + j * size_t(w.ch);
+                }
+                const float g = curVol_[t] * (1.0f / 32768.0f);
+                if (w.ch == 2) {
+                    l += (a[0] + (b[0] - a[0]) * fr) * g;
+                    r += (a[1] + (b[1] - a[1]) * fr) * g;
+                } else {
+                    const float s = (a[0] + (b[0] - a[0]) * fr) * g;
                     l += s;
                     r += s;
                 }
             }
+            if (stalled) break;
         }
         if (fadeGain_ < fTarget) fadeGain_ = std::min(fTarget, fadeGain_ + fStep);
         else if (fadeGain_ > fTarget) fadeGain_ = std::max(fTarget, fadeGain_ - fStep);
@@ -286,6 +383,14 @@ void Mixer::audioCallback(float* out, unsigned frames) {
         pos += rate;
         if (loop && le > ls && pos >= le) pos -= (le - ls);
     }
+    if (stalled) std::memset(out + 2 * size_t(f), 0, size_t(frames - f) * 2 * sizeof(float));
+    if (any) {
+        audioReadEnd();
+        const size_t at = pos > 0 ? size_t(pos) : 0;  // the decoders work from here
+        for (const View& w : v)
+            if (w.s) w.s->playPos.store(at, std::memory_order_relaxed);
+    }
+    stalled_.store(stalled);
     publish(pos);
 }
 

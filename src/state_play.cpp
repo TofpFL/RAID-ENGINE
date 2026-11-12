@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include "audio_decode.hpp"
 #include "common.hpp"
 #include "rlgl.h"
 
@@ -173,6 +174,7 @@ void PlayState::update(double dt) {
     session_.update(songMs_);
     handleNoteEvents();
     processChartEvents();
+    adaptNoteGap();
     if (a.settings.noteCounter > 0) {  // notes per second, counted like the note counter
         const long long hits = session_.judged() + (a.settings.noteCounter == 2 ? session_.opponentHits : 0);
         npsWindow_.emplace_back(now, hits);
@@ -296,6 +298,7 @@ void PlayState::draw() {
     if (phase_ == Phase::Paused) drawPause();
     if (phase_ == Phase::Dead) drawDead();
     drawDebugLog();
+    if (debugOverlay_) drawDebugOverlay();
     gfx::endCanvas();
 }
 
@@ -490,6 +493,11 @@ void PlayState::handleInput() {
             if (scripts_ && scripts_->callStops("onPause")) continue;
             pause();
             return;
+        }
+        // F3: the debug overlay (unless F3 is a lane).
+        if (e.down && e.code == KEY_F3 && !keyReserved(e.code)) {
+            debugOverlay_ = !debugOverlay_;
+            continue;
         }
         // 7: this song in the chart editor, as in Psych (unless 7 is a lane).
         if (e.down && (e.code == KEY_SEVEN || e.code == KEY_KP_7) && !keyReserved(e.code) && !replaying_ && !cutscene_) {
@@ -947,6 +955,34 @@ void PlayState::drawMine(Vector2 c, float size, float alpha, float rot) {
     DrawLineEx({c.x - r, c.y + r}, {c.x + r, c.y - r}, 3, fade(Color{255, 90, 100, 255}, alpha));
 }
 
+void PlayState::adaptNoteGap() {
+    App& a = app();
+    if (a.settings.noteDetail != 0) {
+        noteGap_ = 1.0f;
+        return;
+    }
+    drawnSum_ += drawnNotes_;
+    candidateSum_ += candidateNotes_;
+    gapTime_ += a.dt;
+    ++gapFrames_;
+    if (gapTime_ < 0.5) return;
+    const double fps = gapFrames_ / gapTime_;
+    const double drawn = drawnSum_ / gapFrames_, cand = candidateSum_ / gapFrames_;
+    drawnSum_ = candidateSum_ = gapTime_ = 0;
+    gapFrames_ = 0;
+    // Smooth play needs about 60 frames per second (a lower frame limit asks for less).
+    double target = 60;
+    if (!a.settings.vsync && a.settings.fpsCap > 0) target = std::min(target, double(a.settings.fpsCap));
+    int k = 0;  // noteGap_ = 2^k
+    while (k < 5 && float(1 << k) < noteGap_) ++k;
+    if (fps < target * 0.85 && drawn > 600 && k < 5) {
+        gapTooMuch_[k] = cand;  // this many notes were too many with this gap
+        noteGap_ = float(1 << (k + 1));
+    } else if (k > 0 && cand < gapTooMuch_[k - 1] * 0.6) {
+        noteGap_ = float(1 << (k - 1));  // clearly fewer notes now: try the finer gap again
+    }
+}
+
 void PlayState::drawLanes() {
     App& a = app();
     const Settings& s = a.settings;
@@ -955,6 +991,7 @@ void PlayState::drawLanes() {
     const float ns = noteSize();
     const double pxPerMs = 0.45 * scrollSpeed() / rate_;
     const double reach = (gfx::H * 1.5 + ns) / pxPerMs;
+    drawnNotes_ = candidateNotes_ = 0;
     for (int side = 0; side < 2; ++side) {
         for (int lane = 0; lane < K; ++lane) {
             const scene::Strum& st = strum(side, lane);
@@ -1025,9 +1062,11 @@ void PlayState::drawLanes() {
                 }
                 // Notes less than a pixel apart look the same drawn once, so a
                 // lane never draws more notes than it has pixels (spam charts
-                // stay smooth). Every note is still played and counted.
-                const float minGap = 1.0f;
-                float lastY = 1e9f;
+                // stay smooth); with Note detail "Adaptive" the gap grows
+                // while the frame rate is too low. Every note is still played
+                // and counted.
+                const float minGap = noteGap_;
+                float lastY = 1e9f, lastY1 = 1e9f;
                 for (auto it = hi; it != lo;) {
                     --it;
                     const LaneNote& n = *it;
@@ -1040,8 +1079,13 @@ void PlayState::drawLanes() {
                     if (y < -size || y > gfx::H + size) {
                         if (!rotated) continue;
                     }
+                    if (std::fabs(y - lastY1) >= 1.0f || n.len > 0) {
+                        ++candidateNotes_;  // what every pixel would draw
+                        lastY1 = y;
+                    }
                     if (std::fabs(y - lastY) < minGap && n.len <= 0) continue;
                     lastY = y;
+                    ++drawnNotes_;
                     const float al = (n.state == kMissed ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
                     if (al <= 0.002f) continue;
                     const Vector2 p{c.x + (nv ? nv->offsetX : 0.0f), y + (nv ? nv->offsetY : 0.0f)};
@@ -1311,6 +1355,52 @@ void PlayState::drawDead() {
                   Color{255, 40, 60, 255});
     gfx::text(FontId::Ui, a.touchMode ? "OK rise again      BACK leave" : "ENTER rise again      ESC leave", gfx::W / 2, 360, 34,
               fade(kIvory, al), Align::Center, 2.0f);
+}
+
+void PlayState::drawDebugOverlay() {
+    App& a = app();
+    std::vector<std::pair<std::string, std::string>> rows;
+    auto num = [](double v) {
+        std::string s = TextFormat("%.0f", v);
+        for (int i = int(s.size()) - 3; i > (s[0] == '-' ? 1 : 0); i -= 3) s.insert(size_t(i), ",");
+        return s;
+    };
+    rows.push_back({"CHART", chart_.title + " - " + chart_.difficulty + TextFormat("  |  %dK  |  speed %.2f  |  BPM %.1f", chart_.keys,
+                                                                                    scrollSpeed(), chart_.bpmAt(std::max(0.0, songMs_)))});
+    rows.push_back({"", "notes P " + num(double(chart_.playerNotes)) + "  O " + num(double(chart_.opponentNotes)) + "  (in the file " +
+                            num(double(chart_.rawNoteCount)) + ")  sections " + num(double(chart_.sections.size()))});
+    rows.push_back({"CLOCK", TextFormat("%.3f s / %.1f s  |  beat %.2f  |  step %d  |  section %d  |  rate %.2fx", songMs_ / 1000.0,
+                                        chart_.lengthMs / 1000.0, chart_.beatAt(songMs_), lastStep_, lastSection_, rate_)});
+    auto track = [](const char* name, const PcmPtr& p) -> std::string {
+        if (!p) return "";
+        if (!p->stream) return std::string(name) + TextFormat(" whole %.0f MB", double(p->data.size()) * 2 / 1048576.0);
+        const PcmStream& s = *p->stream;
+        const double mb = double(s.inMemory.load()) * PcmStream::kBlockFrames * s.channels * 2 / 1048576.0;
+        return std::string(name) + TextFormat(" %s %zu/%zu blocks (%.0f MB)", s.windowed ? "window" : "streamed", s.inMemory.load(), s.blocks, mb);
+    };
+    std::string audio = track("inst", prep_.inst);
+    for (const auto& [n, p] : {std::pair<const char*, const PcmPtr*>{"voices", &prep_.voiceP}, {"opponent", &prep_.voiceO}}) {
+        const std::string t = track(n, *p);
+        if (!t.empty()) audio += (audio.empty() ? "" : "  |  ") + t;
+    }
+    rows.push_back({"AUDIO", (audio.empty() ? std::string("none") : audio) + (a.mixer.waitingForAudio() ? "  |  WAITING" : "")});
+    rows.push_back({"NOTES", "drawn " + num(drawnNotes_) + " of " + num(candidateNotes_) +
+                                 TextFormat("  |  gap %.0f px (%s)", noteGap_, a.settings.noteDetail ? "Full" : "Adaptive")});
+    rows.push_back({"", "judged " + num(double(session_.judged())) + "  combo " + num(double(session_.combo)) + "  misses " +
+                            num(double(session_.misses)) + "  opponent " + num(double(session_.opponentHits)) + "  NPS " +
+                            num(double(nps_))});
+    rows.push_back({"FRAME", TextFormat("%d fps  |  update %.2f ms  |  draw %.2f ms  |  worst %.1f ms", int(a.fps + 0.5f), a.updateMs,
+                                        a.drawMs, a.worstFrameMs)});
+    if (scripts_) rows.push_back({"SCRIPTS", TextFormat("%zu loaded  |  note callbacks %s", scripts_->count(),
+                                                         a.settings.luaNoteCallbacks ? "on" : "off")});
+    const float x = 14, w = 900, lh = 19;
+    const float y0 = gfx::H - 16 - lh * float(rows.size());
+    DrawRectangleRec({x - 8, y0 - 8, w, lh * float(rows.size()) + 12}, fade(BLACK, 0.72f));
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const float y = y0 + lh * float(i);
+        if (!rows[i].first.empty()) gfx::text(FontId::Ui, rows[i].first, x, y, 16, Color{255, 210, 90, 255}, Align::Left, 1.0f);
+        gfx::text(FontId::Ui, rows[i].second, x + 74, y, 16, WHITE, Align::Left, 1.0f);
+    }
 }
 
 void PlayState::drawDebugLog() {

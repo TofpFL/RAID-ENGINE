@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <deque>
+#include <filesystem>
+#include <system_error>
 
 #include "audio.hpp"
 #include "common.hpp"
@@ -463,6 +466,129 @@ float PsychUi::alphabet(const std::string& s, float x, float y, float height, fl
         pen += f->fw * scale;
     }
     return pen - x;
+}
+
+// ------------------------------------------------- engine copies on disk --
+
+namespace {
+
+namespace fs = std::filesystem;
+
+fs::path u8path(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
+std::string u8str(const fs::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+
+// The same library folders PsychUi::load() looks in.
+scene::Files libraryRoots(const std::string& folder) {
+    std::string root = folder;
+    if (!root.empty() && root.back() != '/' && root.back() != '\\') root += '/';
+    std::vector<std::string> roots;
+    for (const char* sub : {"", "assets/", "assets/shared/", "assets/preload/", "assets/embed/", "shared/", "preload/"})
+        roots.push_back(root + sub);
+    scene::Files f;
+    f.setRoots(roots);
+    return f;
+}
+
+// A folder holding an engine build: its assets/ has a note skin.
+bool isEngineFolder(const fs::path& d) {
+    static const char* const kMarks[] = {
+        "assets/shared/images/NOTE_assets.png", "assets/shared/images/noteSkins/NOTE_assets.png",
+        "assets/shared/images/noteskins/NOTE_assets.png", "assets/images/NOTE_assets.png",
+        "assets/images/noteSkins/NOTE_assets.png", "assets/preload/images/NOTE_assets.png",
+    };
+    std::error_code ec;
+    for (const char* m : kMarks)
+        if (fs::is_regular_file(d / m, ec)) return true;
+    return false;
+}
+
+// Folders that hold a mod's or an engine's content, never another engine.
+bool skipWhenSearching(const std::string& name) {
+    static const char* const kSkip[] = {"assets", "images", "songs", "data", "music", "sounds", "characters", "stages",
+                                        "videos", "shaders", "scripts", "weeks", "fonts", "custom_events", "custom_notetypes",
+                                        "manifest", "plugins", "lime", "flixel", "openfl", "achievements", "replays"};
+    if (name.empty() || name[0] == '.') return true;
+    const std::string low = toLower(name);
+    for (const char* s : kSkip)
+        if (low == s) return true;
+    return false;
+}
+
+}  // namespace
+
+int psychFolderScore(const std::string& folder) {
+    const scene::Files f = libraryRoots(folder);
+    int score = 0;
+    if (!findAny(f, {"images/noteskins/NOTE_assets.png", "images/noteSkins/NOTE_assets.png", "images/NOTE_assets.png"}).empty())
+        score += 4;
+    for (const char* r : {"sick", "good", "bad", "shit"})
+        if (!findAny(f, {std::string("images/ratings/default/") + r + ".png", std::string("images/") + r + ".png"}).empty()) ++score;
+    if (!findAny(f, {"images/ratings/default/num0.png", "images/num0.png"}).empty()) ++score;
+    for (const char* c : {"ready", "set", "go"})
+        if (!f.find(std::string("images/") + c + ".png").empty()) ++score;
+    for (const char* rel : {"images/healthBar.png", "images/timeBar.png", "fonts/vcr.ttf", "music/freakyMenu.ogg", "music/breakfast.ogg",
+                            "sounds/scrollMenu.ogg", "sounds/confirmMenu.ogg", "sounds/cancelMenu.ogg"})
+        if (!f.find(rel).empty()) ++score;
+    if (!f.find("images/alphabet.png").empty()) score += 2;
+    return score;
+}
+
+std::vector<PsychFolder> findPsychFolders(const std::string& gameBase) {
+    std::vector<PsychFolder> out;
+    std::error_code ec;
+    const fs::path base = u8path(gameBase.empty() ? std::string("./") : gameBase);
+    struct Item {
+        fs::path dir;
+        int depth;
+    };
+    std::deque<Item> todo;
+    todo.push_back({base / "mods", 4});  // engine builds installed as mod packs
+    todo.push_back({base, 3});            // unpacked inside the game's folder
+#if !defined(__ANDROID__)
+    const fs::path game = fs::weakly_canonical(base, ec);
+    if (!ec && game.has_parent_path() && game.parent_path() != game.root_path()) todo.push_back({game.parent_path(), 2});  // or next to it
+#endif
+    std::vector<fs::path> seen;
+    int visited = 0;
+    while (!todo.empty() && visited < 6000) {
+        const Item it = todo.front();
+        todo.pop_front();
+        const fs::path canon = fs::weakly_canonical(it.dir, ec);
+        if (ec || std::find(seen.begin(), seen.end(), canon) != seen.end()) continue;
+        seen.push_back(canon);
+        ++visited;
+        if (isEngineFolder(it.dir)) {
+            const std::string p = u8str(it.dir);
+            const int sc = psychFolderScore(p);
+            if (sc >= 6) out.push_back({p, sc});
+            continue;
+        }
+        if (it.depth <= 0) continue;
+        for (fs::directory_iterator d(it.dir, fs::directory_options::skip_permission_denied, ec), end; !ec && d != end; d.increment(ec)) {
+            std::error_code e2;
+            if (!d->is_directory(e2)) continue;
+            const std::string name = u8str(d->path().filename());
+            if (skipWhenSearching(name)) continue;
+            todo.push_back({d->path(), it.depth - 1});
+        }
+    }
+    // Most complete first; an engine's own build (its name says engine,
+    // psych, slice...) before a mod built on one; then the shorter path.
+    auto engineName = [](const std::string& p) {
+        const std::string low = toLower(p);
+        for (const char* k : {"engine", "psych", "slice", "s2x"})
+            if (low.find(k) != std::string::npos) return 1;
+        return 0;
+    };
+    std::stable_sort(out.begin(), out.end(), [&](const PsychFolder& a, const PsychFolder& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (engineName(a.path) != engineName(b.path)) return engineName(a.path) > engineName(b.path);
+        return a.path.size() < b.path.size();
+    });
+    return out;
 }
 
 }  // namespace gh

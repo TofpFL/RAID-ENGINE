@@ -14,6 +14,7 @@
 #include <random>
 
 #include "app.hpp"
+#include "audio_decode.hpp"
 #include "chart_stream.hpp"
 #include "flp_import.hpp"
 #include "common.hpp"
@@ -92,22 +93,7 @@ struct EdSection {
     double bpm = 120, beats = 4;
 };
 
-bool writeWav(const std::string& path, const Pcm& p) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return false;
-    const uint32_t frames = uint32_t(p.frames()), ch = uint32_t(p.channels), bytes = frames * ch * 2;
-    auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
-    auto w16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
-    std::fwrite("RIFF", 1, 4, f);
-    w32(36 + bytes);
-    std::fwrite("WAVEfmt ", 1, 8, f);
-    w32(16); w16(1); w16(uint16_t(ch)); w32(Mixer::kRate); w32(Mixer::kRate * ch * 2); w16(uint16_t(ch * 2)); w16(16);
-    std::fwrite("data", 1, 4, f);
-    w32(bytes);
-    std::fwrite(p.data.data(), 2, p.data.size(), f);
-    std::fclose(f);
-    return true;
-}
+bool writeWav(const std::string& path, const Pcm& p) { return writeWavFile(path, p); }
 
 std::string jsonStr(const std::string& s) {
     std::string o = "\"";

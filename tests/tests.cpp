@@ -19,6 +19,9 @@ using namespace gh;
 int g_fail = 0, g_pass = 0;
 void runPsychTests();
 void runScanTests();
+#ifdef GH_AUDIO_TESTS
+void runAudioTests();
+#endif
 int printFlp(int argc, char** argv, int first);
 void runExtraTests(bool audio);
 int runPsychCorpus(const char* dir);
@@ -428,6 +431,9 @@ int main(int argc, char** argv) {
     testSession();
     runPsychTests();
     runScanTests();
+#ifdef GH_AUDIO_TESTS
+    runAudioTests();
+#endif
     runExtraTests(audio);
     testComposer(audio, wav);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

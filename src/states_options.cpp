@@ -6,6 +6,7 @@
 #include "common.hpp"
 #include "gfx.hpp"
 #include "platform.hpp"
+#include "psych_ui.hpp"
 #include "raylib.h"
 #include "synth.hpp"
 
@@ -70,12 +71,15 @@ public:
             {Row::Bool, "Flashing lights", "Screen flashes on some beats.", &s.flashing},
             {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
             {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on weak devices.", &s.shaders},
+            {Row::Choice, "Note detail", "Spam charts: Adaptive draws notes stacked a few pixels apart once while the frame rate is "
+             "under 60 (every note is still played). Full: every pixel.", nullptr, nullptr, 0, 0, 0, &s.noteDetail, {0, 1},
+             {"Adaptive", "Full"}},
             {Row::Header, "INTERFACE", ""},
             {Row::Choice, "Note counter", "Notes hit so far, under the score: your side only, or both sides added up.", nullptr,
              nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
             {Row::Bool, "Psych Engine interface", "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds, from your own copy.",
              &s.psychUi},
-            {Row::Action, "Psych Engine folder...", ""},
+            {Row::Action, "Psych Engine folder...", ""},  // BACKSPACE: back to the copy found automatically
             {Row::Bool, "Hit popups", "Rating pictures and combo numbers that pop up on each hit.", &s.hitPopups},
             {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
@@ -90,6 +94,8 @@ public:
              nullptr, nullptr, 0, 0, 0, &s.luaErrors, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
             {Row::Choice, "Lua warnings", "Missing images, sounds and objects that mods ask for. Psych: only with luaDebugMode.",
              nullptr, nullptr, 0, 0, 0, &s.luaWarnings, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
+            {Row::Bool, "Lua note callbacks", "Scripts hear every hit and miss (goodNoteHit, noteMiss...). OFF is faster on spam "
+             "charts, but mods that count notes or drain health with them stop doing it.", &s.luaNoteCallbacks},
         };
         for (Row& r : rows_) {
             if (r.label == "Scroll speed") r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
@@ -167,8 +173,8 @@ public:
                     else *r.b = !*r.b;
                     if (r.label == "VSync") platform::setVsync(a.settings.vsync);
                     if (r.label == "Psych Engine interface") {
-                        if (a.settings.psychUi && a.settings.psychFolder.empty()) chooseFolder();
-                        else a.applyPsychUi();
+                        a.applyPsychUi();  // no folder chosen: the best copy found among the mods
+                        if (a.settings.psychUi && a.settings.psychFolder.empty() && !psychUi().active()) chooseFolder();
                     }
                     changed = true;
                 }
@@ -192,6 +198,12 @@ public:
                 break;
             case Row::Action:
                 if (in.accept()) { sfxPlay(Sfx::Confirm); r.action(); }
+                else if (r.label == "Psych Engine folder..." && in.pressed(KEY_BACKSPACE) && !a.settings.psychFolder.empty()) {
+                    a.settings.psychFolder.clear();  // back to the copy found among the mods
+                    a.applyPsychUi();
+                    a.saveSettings();
+                    sfxPlay(Sfx::Cancel);
+                }
                 break;
             case Row::Key:
                 if (dir) { slot_ = 1 - slot_; sfxPlay(Sfx::Scroll); }
@@ -304,8 +316,12 @@ private:
         for (Row& r : rows_)
             if (r.label == "Psych Engine folder...") {
                 if (pickingFolder_) r.help = "Copying the interface files...";
-                else if (a.settings.psychFolder.empty()) r.help = "Not chosen yet. Pick the folder, or drop it on this window.";
-                else r.help = platform::displayPath(a.settings.psychFolder) + (a.psychReport.empty() ? "" : "  (" + a.psychReport + ")");
+                else if (a.settings.psychFolder.empty() && !a.psychFolderInUse.empty())
+                    r.help = "Found among your mods: " + platform::displayPath(a.psychFolderInUse) + ". Pick another folder, or drop one on this window.";
+                else if (a.settings.psychFolder.empty())
+                    r.help = "None found among your mods (engine packs such as JS Engine or H-Slice have one). Pick the folder, or drop it on this window.";
+                else r.help = platform::displayPath(a.settings.psychFolder) + (a.psychReport.empty() ? "" : "  (" + a.psychReport + ")") +
+                              "  BACKSPACE: the copy found among your mods.";
             }
     }
     bool pickingFolder_ = false;

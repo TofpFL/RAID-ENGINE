@@ -21,6 +21,11 @@ struct Settings {
     bool lowDetail = false;
     bool vsync = false;
     bool shaders = true;       // mod shaders and screen effects
+    // Spam charts: 0 adaptive (notes stacked closer than a few pixels are drawn
+    // once while the frame rate is under its target; all are still played),
+    // 1 full (every pixel).
+    int noteDetail = 0;
+    bool luaNoteCallbacks = true;  // goodNoteHit, opponentNoteHit, noteMiss... (OFF: faster spam charts)
     bool extraKeys = true;     // OFF: every chart has 4 keys, like Psych and JS Engine
     int noteCounter = 1;       // HUD note counter: 0 off, 1 your side, 2 both sides
     // Mod script errors and warnings on screen: 0 always, 1 only for scripts

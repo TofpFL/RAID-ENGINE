@@ -82,6 +82,9 @@ public:
     double now = 0, dt = 0, startTime = 0;
     float fps = 0;
     bool quit = false;
+    // Frame timing (ms, smoothed) for the debug overlay; --perf prints it every second.
+    bool perf = false;
+    float updateMs = 0, drawMs = 0, worstFrameMs = 0;
 
     // remembered menu positions
     int mainSel = 0, freeplaySel = 0, freeplayDiff = 1, storyDiff = 1;
@@ -114,6 +117,8 @@ public:
     // sounds and menu music. `psychReport` says what was found.
     void applyPsychUi();
     std::string psychReport;
+    std::string psychFolderInUse;  // the folder chosen, or the one found automatically
+    bool psychAutomatic = false;   // no folder chosen: the best copy found on disk
     // Options opened from a song's pause menu: leaving them plays it again.
     std::unique_ptr<PlayRequest> optionsReturn;
     // Deaths on the song played last (Psych's "Blueballed" in the pause menu).
@@ -125,6 +130,9 @@ private:
     void volumeKeys();       // - and = change the master volume, 0 mutes (as in Flixel)
     void drawVolumeTray();
     double volumeShownAt_ = -10;
+    double perfSince_ = 0;
+    int perfFrames_ = 0;
+    float perfUpd_ = 0, perfDraw_ = 0, perfWorst_ = 0;
     std::unique_ptr<State> state_, next_;
     float fade_ = 0;
     int fadeDir_ = 0;
