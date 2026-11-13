@@ -1,0 +1,12 @@
+build/
+dist/
+*.zip
+settings.cfg
+scores.cfg
+shot_*.png
+.vscode/
+.idea/
+.DS_Store
+third_party/
+
+build_game/

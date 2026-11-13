@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 deatuamae67-crypto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------------------------
+Features merged from PulseForge (Apache-2.0, same copyright holder) were
+re-implemented for this code base and are covered by the MIT license above.
+
+Third-party components keep their own licenses:
+- raylib (fetched at build time): zlib/libpng license
+- Lua 5.4 (fetched at build time): MIT license, Copyright (C) 1994-2024 Lua.org, PUC-Rio
+- miniz (fetched at build time): MIT license, Copyright 2013-2014 RAD Game Tools and Valve Software
+- pl_mpeg (fetched at build time): MIT license, Copyright Dominic Szablewski
+- The original game's character offsets and stage layouts used for older
+  builds (src/basegame.cpp) follow Friday Night Funkin' (Apache-2.0,
+  The Funkin' Crew); the images themselves come from the mods.
+- Mod packs on the "mods" release are the user's own content and are not
+  part of this repository.
+- assets/fonts/CinzelDecorative-Bold.ttf: SIL Open Font License 1.1 (see OFL-CinzelDecorative.txt)
+- assets/fonts/Rajdhani-Bold.ttf: SIL Open Font License 1.1 (see OFL-Rajdhani.txt)

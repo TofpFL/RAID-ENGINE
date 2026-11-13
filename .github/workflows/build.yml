@@ -1,0 +1,208 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish an official release with this tag (e.g. v1.0.0). Empty: only build."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  # A newer push cancels an older build of the same branch, but a manual
+  # release run and a push build never cancel each other (a merge followed by
+  # a release run left the merge commit with a cancelled, red build).
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Core tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DGH_BUILD_GAME=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run tests (charts, gameplay rules, composer and audio rendering)
+        run: ./build/gh_tests --audio
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-22.04, name: linux-x64 }
+          - { os: macos-15, name: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: tools/ci_apt_install.sh libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=OFF
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Package
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix dist/GodsHand
+          mkdir -p dist/GodsHand/mods
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a ../GodsHand-${{ matrix.name }}.zip GodsHand
+          else
+            zip -r ../GodsHand-${{ matrix.name }}.zip GodsHand
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GodsHand-${{ matrix.name }}
+          path: GodsHand-${{ matrix.name }}.zip
+
+  android:
+    name: Build android
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Android SDK packages
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018" > /dev/null
+          # Ninja: the runner's own, else the one in the SDK's CMake package (from
+          # Google's servers, so an Ubuntu mirror outage does not stop the build).
+          if ! command -v ninja > /dev/null; then
+            "$sdkmanager" "cmake;3.22.1" > /dev/null
+            mkdir -p "$RUNNER_TEMP/ninja"
+            ln -sf "$ANDROID_HOME/cmake/3.22.1/bin/ninja" "$RUNNER_TEMP/ninja/ninja"
+            echo "$RUNNER_TEMP/ninja" >> "$GITHUB_PATH"
+          fi
+      - name: Build APK
+        env:
+          # Optional: a private signing key (base64 keystore + password) instead of android/godshand.keystore.
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          GH_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export GH_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          fi
+          ANDROID_SDK="$ANDROID_HOME" android/build_apk.sh "$PWD/GodsHand-android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GodsHand-android
+          path: GodsHand-android.apk
+
+  android-test:
+    name: Test android (emulator)
+    needs: android
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: GodsHand-android
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Play through the game on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash android/emulator_test.sh GodsHand-android.apk android-shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-emulator-screenshots
+          path: android-shots
+
+  source:
+    name: Complete source package
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package the game with every library
+        run: tools/make_source_package.sh "$PWD/GodsHand-complete-source.zip"
+      - name: Check that it builds offline
+        run: |
+          tools/ci_apt_install.sh libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev
+          mkdir offline && cd offline && unzip -q ../GodsHand-complete-source.zip
+          cmake -S GodsHand-source -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+          cmake --build build --parallel
+          ./build/gh_tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GodsHand-complete-source
+          path: GodsHand-complete-source.zip
+
+  release:
+    name: Publish downloads
+    needs: [tests, build, android, android-test, source]
+    # Publish whatever platforms built, so one unavailable runner does not hold
+    # back the other downloads. A run cancelled by a newer push publishes
+    # nothing: the newer run does.
+    if: ${{ !cancelled() && (github.event_name == 'push' || inputs.release != '') && needs.tests.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release }}
+        run: |
+          shopt -s nullglob
+          files=(artifacts/*.zip artifacts/*.apk)
+          if [ ${#files[@]} -eq 0 ]; then echo "No packages were built."; exit 1; fi
+          ls -la artifacts
+          cat > notes.md <<'EOF'
+          | Download | System | How to play |
+          |---|---|---|
+          | `GodsHand-windows-x64.zip` | Windows 10/11 | Extract, run `godshand.exe` |
+          | `GodsHand-linux-x64.zip` | Linux x64 | Extract, run `./godshand` |
+          | `GodsHand-macos-arm64.zip` | macOS (Apple Silicon) | Extract; the first time, right-click `godshand` > Open |
+          | `GodsHand-android.apk` | Android 7+ | Open it on the phone and allow installing from this source |
+          | `GodsHand-complete-source.zip` | Source | The game plus every library it uses: builds without internet (see `BUILDING.txt`) |
+
+          Mod packs: Freeplay > MOD PACKS in the game, or the [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) release.
+          EOF
+          # An official release: a pushed v* tag, or a manual run with a tag to create.
+          tag="$RELEASE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tag="$GITHUB_REF_NAME"; fi
+          if [ -n "$tag" ]; then
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tags look like v1.2.3, not '$tag'."; exit 1; }
+            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "God's Hand $tag" --notes-file notes.md
+          else
+            gh release delete nightly --cleanup-tag -y || true
+            printf '\nAutomatic build of %s from %s.\n' "${GITHUB_SHA::7}" "$GITHUB_REF_NAME" >> notes.md
+            gh release create nightly "${files[@]}" --prerelease --target "$GITHUB_SHA" \
+              --title "God's Hand - latest build" --notes-file notes.md
+          fi
