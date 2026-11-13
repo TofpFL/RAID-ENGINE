@@ -164,8 +164,11 @@ bool chartContent(const fs::path& f) {
 }
 
 bool hasChartJson(const fs::path& dir) {
-    for (const fs::path& f : listDir(dir, false))
-        if (chartName(toLower(pathStr(f.filename()))) && chartContent(f)) return true;
+    for (const fs::path& f : listDir(dir, false)) {
+        const std::string n = toLower(pathStr(f.filename()));
+        if (endsWithI(n, ".raid")) return true;  // RAID Engine binary chart
+        if (chartName(n) && chartContent(f)) return true;
+    }
     return false;
 }
 
@@ -448,6 +451,7 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
     fs::path meta, vsliceChart;
     for (const fs::path& f : listDir(dir, false)) {
         const std::string n = toLower(pathStr(f.filename()));
+        if (endsWithI(n, ".raid")) { charts.push_back(f); continue; }  // binary chart
         if (!endsWithI(n, ".json")) continue;
         if (n.find("-metadata") != std::string::npos) { meta = f; continue; }
         if (!chartName(n) || !chartContent(f)) continue;  // dialogue.json and the like
@@ -742,7 +746,8 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                     SongEntry& e = songs.back();
                     for (const fs::path& f : listDir(audio, false)) {
                         ChartPeek pk;
-                        if (!looksLikeChart(f, pk)) continue;
+                        const bool isRaid = endsWithI(toLower(pathStr(f.filename())), ".raid");
+                        if (!isRaid && !looksLikeChart(f, pk)) continue;
                         std::string label = prettyName(pathStr(f.stem()));
                         for (const std::string& d : e.diffs)
                             if (equalsI(d, label)) label += " (songs)";

@@ -19,6 +19,8 @@ using namespace gh;
 int g_fail = 0, g_pass = 0;
 void runPsychTests();
 void runScanTests();
+void runRaidTests();
+int raidConvertCli(int argc, char** argv, int first);
 #ifdef GH_AUDIO_TESTS
 void runAudioTests();
 #endif
@@ -35,7 +37,10 @@ static bool near(double a, double b, double eps = 1e-6) { return std::fabs(a - b
 
 static void testJson() {
     json::Document d;
-    CHECK(d.parse(R"({"a": [1, 2.5, -3e2], "s": "x\"yé", "t": true, "n": null, "o": {"k": false},})"));
+    // Hoisted out of CHECK(): MSVC's preprocessor mangles raw-string arguments
+    // that contain escapes when it stringizes the macro parameter.
+    const char* kDoc = R"({"a": [1, 2.5, -3e2], "s": "x\"yé", "t": true, "n": null, "o": {"k": false},})";
+    CHECK(d.parse(kDoc));
     const json::Value& r = d.root();
     const json::Value* a = d.get(r, "a");
     CHECK(a && d.size(*a) == 3);
@@ -431,6 +436,7 @@ static int benchCharts(int argc, char** argv, int first) {
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // see progress before any crash
     bool audio = false;
     const char* wav = nullptr;
     for (int i = 1; i < argc; ++i)
@@ -441,6 +447,8 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--psych-corpus")) return runPsychCorpus(argv[i + 1]);
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--flp")) return printFlp(argc, argv, i + 1);
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--raid")) return raidConvertCli(argc, argv, i + 1);
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--audio")) audio = true;
         if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) { wav = argv[++i]; audio = true; }
@@ -452,6 +460,7 @@ int main(int argc, char** argv) {
     testSession();
     runPsychTests();
     runScanTests();
+    runRaidTests();
 #ifdef GH_AUDIO_TESTS
     runAudioTests();
 #endif

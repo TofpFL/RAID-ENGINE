@@ -86,6 +86,17 @@ public:
     bool botplay() const { return cfg_.botplay; }
     bool keyHeld(int lane) const { return held_[lane]; }
 
+    // Streaming charts (.raid): init() runs on the metadata-only Chart (no
+    // notes), then notes are fed incrementally with appendLaneNote() in
+    // non-decreasing time order per lane. setTotals() supplies the file's
+    // note counts (they cannot be counted without materializing). Notes
+    // resolved well behind the playhead are dropped by gcBefore() so lane
+    // memory stays bounded; mid-song rewind beyond the kept window is not
+    // supported for streaming charts.
+    void setTotals(uint64_t player, uint64_t opponent);
+    void appendLaneNote(int side, int lane, const LaneNote& n);
+    void gcBefore(double songMs);
+
     std::vector<GameEvent> events;  // consumed (cleared) by the caller
 
     // Stats. Every note of the file counts, stacked ones included.
@@ -124,6 +135,7 @@ private:
     long long mult_[2] = {1, 1};
     static constexpr size_t kMaxHitErrors = size_t(1) << 21;
     uint64_t errStride_ = 1, errTick_ = 0;
+    double lastGcMs_ = -1e18;
 };
 
 }  // namespace gh

@@ -78,7 +78,14 @@ int countTitle(const SongScan& s, const std::string& title) {
 }
 
 bool endsWith(const std::string& s, const std::string& suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    // Compare with '/' separators: pathStr() yields native separators, which
+    // are '\\' on Windows while the expectations below are written portably.
+    auto norm = [](std::string v) {
+        for (char& c : v) if (c == '\\') c = '/';
+        return v;
+    };
+    const std::string a = norm(s), b = norm(suf);
+    return a.size() >= b.size() && a.compare(a.size() - b.size(), b.size(), b) == 0;
 }
 
 const char* kPulseForgeEditor = R"({"format":"pulseforge-editor-chart","version":1,

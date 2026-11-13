@@ -99,6 +99,8 @@ add_library(gh_core STATIC
   src/scene.cpp
   src/song_scan.cpp
   src/flp_import.cpp
+  src/raid.cpp
+  src/raid_chart.cpp
   src/lua_host.cpp
   src/replay.cpp
   src/mod_install.cpp
@@ -113,8 +115,11 @@ else()
 endif()
 
 if(GH_BUILD_TESTS)
-  add_executable(gh_tests tests/tests.cpp tests/psych_tests.cpp tests/scan_tests.cpp)
+  add_executable(gh_tests tests/tests.cpp tests/psych_tests.cpp tests/scan_tests.cpp tests/raid_tests.cpp)
   target_link_libraries(gh_tests PRIVATE gh_core)
+  if(MSVC)
+    target_compile_options(gh_tests PRIVATE /utf-8)
+  endif()
   enable_testing()
   add_test(NAME core COMMAND gh_tests)
 endif()

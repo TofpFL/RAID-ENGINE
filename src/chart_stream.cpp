@@ -13,6 +13,7 @@
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
+#include "raid_chart.hpp"
 
 namespace gh {
 
@@ -548,6 +549,11 @@ bool loadChartFile(const std::string& path, const std::string& difficulty, Chart
         FlpProject p;
         if (!readFlpFile(flpFile, p, err) || !flpToChart(p, pattern, out, err)) return false;
         out.difficulty = difficulty;
+        return true;
+    }
+    if (raid::isRaidFile(path)) {  // RAID Engine binary chart
+        if (!raid::loadChart(path, out, err)) return false;
+        if (!difficulty.empty()) out.difficulty = difficulty;
         return true;
     }
     const uint64_t size = fileSize(path);

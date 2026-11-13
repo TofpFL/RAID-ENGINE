@@ -13,6 +13,7 @@
 #include "audio.hpp"
 #include "chart.hpp"
 #include "composer.hpp"
+#include "raid_chart.hpp"
 #include "song_scan.hpp"
 
 namespace gh {
@@ -21,6 +22,9 @@ struct Prepared {
     bool ok = false;
     std::string error;
     Chart chart;
+    // Set for .raid charts: streaming note source; chart.notes stays empty.
+    std::shared_ptr<raid::ChartStream> stream;
+    bool mirrored = false;  // mirror mode was applied (stream flips note sides)
     PcmPtr inst, voiceP, voiceO;
 };
 

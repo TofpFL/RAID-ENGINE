@@ -146,7 +146,15 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
         std::string meta;
         if (!e.metaPath.empty()) readTextFile(e.metaPath, meta);
         std::string err;
-        if (!loadChartFile(e.chartPaths[idx], diff, p.chart, err, meta, 0, extraKeys)) { p.error = err; return p; }
+        // .raid charts stream: only metadata is materialized, notes are
+        // pumped in playback windows by PlayState.
+        if (raid::isRaidFile(e.chartPaths[idx])) {
+            p.stream = std::make_shared<raid::ChartStream>();
+            if (!p.stream->open(e.chartPaths[idx], p.chart, err)) { p.error = err; return p; }
+        } else if (!loadChartFile(e.chartPaths[idx], diff, p.chart, err, meta, 0, extraKeys)) {
+            p.error = err;
+            return p;
+        }
         if (p.chart.title.empty()) p.chart.title = e.title;
         p.chart.difficulty = diff;
         // Psych keeps events in a separate events.json next to the charts.
@@ -180,9 +188,10 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
     }
     if (mirror) {
         p.chart.mirror();
+        p.mirrored = true;
         if (p.voiceO) std::swap(p.voiceP, p.voiceO);
     }
-    if (p.chart.notes.empty()) { p.error = "chart has no notes"; return p; }
+    if (p.chart.notes.empty() && !p.stream) { p.error = "chart has no notes"; return p; }
     p.ok = true;
     return p;
 }

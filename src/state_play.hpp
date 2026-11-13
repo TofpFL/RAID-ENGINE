@@ -15,6 +15,7 @@
 #include "characters.hpp"
 #include "gfx.hpp"
 #include "lua_host.hpp"
+#include "raid_chart.hpp"
 #include "raylib.h"
 #include "replay.hpp"
 #include "scene.hpp"
@@ -86,6 +87,7 @@ private:
     void restart();
     void beginCountdown();
     void handleInput();
+    void pumpNotes();  // .raid charts: feed the rolling note window
     void handleNoteEvents();
     void processChartEvents();
     void onBeat(int b);
@@ -224,6 +226,11 @@ private:
     Chart chart_;
     Session session_;
     SessionConfig cfg_;
+    // .raid streaming: notes arrive in playback windows instead of
+    // chart_.notes. fedUs_/prefetchUs_ are the pump/prefetch horizons.
+    std::shared_ptr<raid::ChartStream> noteStream_;
+    bool streamMirror_ = false, streamFailed_ = false;
+    int64_t fedUs_ = 0, prefetchUs_ = 0;
     Stage stage_;
     CharacterState left_, right_;
     Color leftColor_{}, rightColor_{};

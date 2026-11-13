@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include "audio_decode.hpp"
 #include "common.hpp"
@@ -184,6 +185,7 @@ void PlayState::update(double dt) {
         const int at = int(std::max(0.0, songMs_) / 1000.0), len = int(chart_.lengthMs / 1000.0);
         a.renderLabel = TextFormat("%d:%02d / %d:%02d", at / 60, at % 60, len / 60, len % 60);
     }
+    if (noteStream_ && !streamFailed_) pumpNotes();
     handleInput();
     if (phase_ != Phase::Playing) return;
     if (!songStarted_ && songMs_ >= 0) {
@@ -330,6 +332,9 @@ void PlayState::draw() {
 void PlayState::setup() {
     App& a = app();
     chart_ = std::move(prep_.chart);
+    noteStream_ = prep_.stream;
+    streamMirror_ = prep_.mirrored;
+    streamFailed_ = false;
     cfg_.ghostTapping = a.settings.ghostTapping;
     cfg_.botplay = !req_.story && a.mods.botplay;
     cfg_.practice = !req_.story && a.mods.practice;
@@ -370,9 +375,11 @@ void PlayState::setup() {
             if (code > 0 && code < Input::kMaxCodes) keyLane_[size_t(code)] = l;
     for (int l = 0; l < chart_.keys && l < 9; ++l) keyLane_[size_t(kTouchLane + l)] = l;  // on-screen lanes
 
-    // Script note ids: every note in chart order.
+    // Script note ids: every note in chart order. Streaming charts cannot
+    // enumerate notes without materializing them, so noteOrder_ stays empty
+    // and script note lookups return nothing for .raid songs.
     noteOrder_.clear();
-    {
+    if (!noteStream_) {
         Session probe;
         probe.init(chart_, cfg_);
         std::vector<NoteRef> refs(chart_.notes.size(), NoteRef{0, 0, 0});
@@ -469,6 +476,13 @@ double PlayState::scrollSpeed() const {
 void PlayState::restart() {
     App& a = app();
     session_.init(chart_, cfg_);
+    if (noteStream_) {
+        // Metadata chart has no notes: totals come from the file header and
+        // the pump refills the lanes from the start.
+        session_.setTotals(chart_.playerNotes, chart_.opponentNotes);
+        fedUs_ = std::numeric_limits<int64_t>::min() / 4;
+        prefetchUs_ = fedUs_;
+    }
     popups_.clear();
     fx_.clear();
     for (auto& s : confirm_)
@@ -522,6 +536,45 @@ void PlayState::beginCountdown() {
 }
 
 // ------------------------------------------------------------------- input --
+
+void PlayState::pumpNotes() {
+    // .raid charts: feed every event up to the scroll horizon into the
+    // session lanes, then warm the next stretch on worker threads. Notes are
+    // judged ~166 ms after their time; 4 s of lookahead covers judgement and
+    // on-screen scroll, and gcBefore keeps lane memory bounded.
+    constexpr double kLookaheadMs = 4000.0;
+    constexpr double kPrefetchMs = 16000.0;
+    const int64_t endUs = int64_t(std::max(0.0, songMs_ + kLookaheadMs) * 1000.0);
+    if (endUs > fedUs_) {
+        std::vector<raid::Event> evs;
+        std::vector<uint64_t> idx;
+        std::string err;
+        if (!noteStream_->pump(fedUs_, endUs, evs, idx, err)) {
+            debug_.push_back({"raid stream: " + err, {255, 80, 80, 255}, app().now});
+            streamFailed_ = true;
+            return;
+        }
+        for (size_t i = 0; i < evs.size(); ++i) {
+            const raid::Event& e = evs[i];
+            LaneNote ln;
+            ln.t = double(e.timeUs) / 1000.0;
+            ln.len = double(e.lengthUs) / 1000.0;
+            ln.kind = e.kind;
+            ln.flags = e.flags;
+            ln.type = e.type;
+            ln.stack = std::max<uint16_t>(1, e.stack);
+            ln.id = uint32_t(idx[i]);  // global expanded index (stable across rewind)
+            const int side = int(e.side) ^ (streamMirror_ ? 1 : 0);
+            if (e.lane < chart_.keys) session_.appendLaneNote(side, int(e.lane), ln);
+        }
+        fedUs_ = endUs;
+        session_.gcBefore(songMs_);
+    }
+    if (endUs >= prefetchUs_) {
+        noteStream_->prefetch(endUs, endUs + int64_t(kPrefetchMs * 1000.0));
+        prefetchUs_ = endUs + int64_t(kPrefetchMs * 500.0);
+    }
+}
 
 void PlayState::handleInput() {
     App& a = app();

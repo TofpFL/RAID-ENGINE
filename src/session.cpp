@@ -208,6 +208,55 @@ void Session::release(int lane, double songMs) {
     events.push_back(e);
 }
 
+void Session::setTotals(uint64_t player, uint64_t opponent) {
+    totalPlayerNotes = player;
+    totalOpponentNotes = opponent;
+    const size_t want = size_t(std::min<uint64_t>(totalPlayerNotes, kMaxHitErrors));
+    if (hitErrors.capacity() < want) hitErrors.reserve(want);
+}
+
+void Session::appendLaneNote(int side, int lane, const LaneNote& n) {
+    if (side < 0 || side > 1 || lane < 0 || lane >= keys_) return;
+    std::vector<LaneNote>& v = lanes_[side][lane];
+    v.push_back(n);
+    maxSus_[side][lane] = std::max(maxSus_[side][lane], n.len);
+}
+
+// Notes this far behind the playhead may be dropped; the margin keeps
+// history for late-judgement edge cases and modest rewinds.
+static constexpr double kGcMarginMs = 30000.0;
+
+void Session::gcBefore(double songMs) {
+    if (songMs - lastGcMs_ < 2000.0) return;
+    lastGcMs_ = songMs;
+    const double cutoff = songMs - kGcMarginMs;
+    for (int s = 0; s < 2; ++s) {
+        for (int l = 0; l < keys_; ++l) {
+            std::vector<LaneNote>& v = lanes_[s][l];
+            if (v.empty()) continue;
+            // Prefix of fully-resolved notes whose sustain ended before the
+            // cutoff. Anything pending, holding, or still sustaining stays.
+            size_t keepFrom = 0;
+            while (keepFrom < v.size()) {
+                const LaneNote& n = v[keepFrom];
+                const bool resolved = n.state == kHit || n.state == kMissed ||
+                                      n.state == kHeldDone || n.state == kMineHit ||
+                                      n.state == kMinePassed || n.state == kDropped;
+                if (!resolved || n.t + n.len >= cutoff) break;
+                ++keepFrom;
+            }
+            // Never drop the note an active hold is sustaining.
+            const long long ah = activeHold_[s][l];
+            if (ah >= 0 && size_t(ah) < keepFrom) keepFrom = size_t(ah) + 1;
+            if (keepFrom == 0 || keepFrom > v.size()) continue;
+            v.erase(v.begin(), v.begin() + keepFrom);
+            if (cursor_[s][l] >= keepFrom) cursor_[s][l] -= keepFrom;
+            else cursor_[s][l] = 0;
+            if (activeHold_[s][l] >= 0) activeHold_[s][l] -= long long(keepFrom);
+        }
+    }
+}
+
 void Session::update(double songMs) {
     const double dt = lastMs_ > -1e17 ? std::max(0.0, songMs - lastMs_) : 0.0;
     lastMs_ = songMs;
