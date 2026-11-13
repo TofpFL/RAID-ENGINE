@@ -1,9 +1,11 @@
 #include "flp_import.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 #include "common.hpp"
 
@@ -54,6 +56,21 @@ constexpr size_t kNoteSize = 24;
 bool isSpecial(uint32_t pitch) { return pitch == 53 || pitch == 54 || pitch == 56 || pitch == 57 || pitch == 58; }
 bool isChartPitch(uint32_t pitch) { return (pitch >= 48 && pitch <= 51) || (pitch >= 60 && pitch <= 63); }
 
+// Channels named "Opp"/"Player" chart by channel instead of the FPC pitch
+// windows: {opponent, player} channel indices, -1 when absent.
+std::pair<int, int> flpNamedChannels(const FlpProject& p) {
+    int opp = -1, player = -1;
+    for (const auto& [ch, names] : p.channelNames)
+        for (const std::string& nm : names) {
+            std::string low;
+            low.reserve(nm.size());
+            for (char c : nm) low += char(std::tolower((unsigned char)c));
+            if (low == "opp" || low == "opponent") opp = int(ch);
+            else if (low == "player" || low == "player1") player = int(ch);
+        }
+    return {opp, player};
+}
+
 }  // namespace
 
 bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
@@ -69,7 +86,7 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
     i += 8;
     int prevId = -1;
     uint32_t prevValue = 0, lastChannel = 0;
-    bool fpcFound = false;
+    bool fpcFound = false, chanCtx = false;
     auto pattern = [&](int number) -> FlpPattern& {
         for (FlpPattern& p : out.patterns)
             if (p.number == number) return p;
@@ -107,7 +124,8 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
             i += len;
         }
         switch (id) {
-            case kGenChannel: lastChannel = value; break;
+            case kGenChannel: lastChannel = value; chanCtx = true; break;
+            case kPatStart: chanCtx = false; break;
             case kTempo: out.bpm = value / 1000.0; break;
             case kOldTempo: if (out.bpm <= 0) out.bpm = value; break;
             case kTitle: out.title = flString(data, len); break;
@@ -137,6 +155,15 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
             }
             default: break;
         }
+        // Text events inside a channel's definition block are its names
+        // (channel name, plugin name); pattern names never reach here.
+        if (chanCtx && data && id >= 0xC0 && id <= 0xCF) {
+            std::string nm = flString(data, len);
+            if (!nm.empty()) {
+                auto& v = out.channelNames[lastChannel];
+                if (v.empty() || v.back() != nm) v.push_back(nm);
+            }
+        }
         prevId = id;
         prevValue = value;
     }
@@ -151,14 +178,22 @@ bool readFlpFile(const std::string& path, FlpProject& out, std::string& err) {
 }
 
 std::vector<int> flpChartPatterns(const FlpProject& p, bool strict) {
+    const auto named = flpNamedChannels(p);
     std::vector<int> out;
     for (const FlpPattern& pat : p.patterns) {
         size_t onChannel = 0, sniffKeys = 0, lanes = 0;
         for (const FlpNote& n : pat.notes) {
-            if (n.channel != p.chartChannel) continue;
+            const bool onNamed = (named.first >= 0 && n.channel == uint16_t(named.first)) ||
+                                 (named.second >= 0 && n.channel == uint16_t(named.second));
+            if (!onNamed && n.channel != p.chartChannel) continue;
             ++onChannel;
-            sniffKeys += isChartPitch(n.pitch) || isSpecial(n.pitch);
-            lanes += isChartPitch(n.pitch);
+            if (onNamed) {  // a named channel charts every key
+                ++sniffKeys;
+                ++lanes;
+            } else {
+                sniffKeys += isChartPitch(n.pitch) || isSpecial(n.pitch);
+                lanes += isChartPitch(n.pitch);
+            }
         }
         if (lanes > 0 && (!strict || sniffKeys * 10 >= onChannel * 9)) out.push_back(pat.number);
     }
@@ -186,9 +221,13 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
     const double bpm = bpmIn > 0 ? bpmIn : p.bpm > 0 ? p.bpm : 120.0;
     const double msPerTick = 60000.0 / (bpm * p.ppqn);
 
+    const auto named = flpNamedChannels(p);
     std::vector<FlpNote> notes;
-    for (const FlpNote& n : pat->notes)
-        if (n.channel == p.chartChannel) notes.push_back(n);
+    for (const FlpNote& n : pat->notes) {
+        const bool onNamed = (named.first >= 0 && n.channel == uint16_t(named.first)) ||
+                             (named.second >= 0 && n.channel == uint16_t(named.second));
+        if (onNamed || n.channel == p.chartChannel) notes.push_back(n);
+    }
     // By time; at the same time the section markers come first (SNIFF).
     std::stable_sort(notes.begin(), notes.end(), [](const FlpNote& a, const FlpNote& b) {
         if (a.time != b.time) return a.time < b.time;
@@ -220,11 +259,24 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
             case 56: continue;  // a tempo change: SNIFF asks for the new tempo, the chart keeps one
             default: break;
         }
-        if (!isChartPitch(n.pitch)) continue;
+        const bool onOpp = named.first >= 0 && n.channel == uint16_t(named.first);
+        const bool onPlayer = named.second >= 0 && n.channel == uint16_t(named.second);
+        int side;
+        uint8_t lane;
+        if (onOpp || onPlayer) {
+            // A named channel charts every key; pitch % 4 is C-anchored, so
+            // the C3-D#3 / C4-D#4 windows land on the same lanes as before.
+            side = onOpp ? 0 : 1;
+            lane = uint8_t(n.pitch & 3);
+        } else {
+            if (!isChartPitch(n.pitch)) continue;
+            side = n.pitch <= 51 ? 1 : 0;
+            lane = uint8_t(n.pitch <= 51 ? n.pitch - 48 : n.pitch - 60);
+        }
         Note note;
         note.time = n.time * msPerTick;
-        note.side = n.pitch <= 51 ? 1 : 0;
-        note.lane = uint8_t(n.pitch <= 51 ? n.pitch - 48 : n.pitch - 60);
+        note.side = side;
+        note.lane = lane;
         if (n.velocity < 0x40 || n.duration >= uint32_t(p.ppqn))
             note.length = std::max(0.0, (double(n.duration) - p.ppqn / 4.0) * msPerTick);
         pending.push_back({note, n.time / sectionTicks});

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "chart.hpp"
@@ -424,6 +425,68 @@ std::string makeFlp() {
     return f + ev;
 }
 
+// A project whose channels are named "Player"/"Opp": every key on those
+// channels charts, the side coming from the channel, not the pitch window.
+std::string makeFlpNamed() {
+    std::string ev;
+    auto word = [&](uint8_t id, uint16_t v) { ev += char(id); ev += char(v & 255); ev += char(v >> 8); };
+    auto dword = [&](uint8_t id, uint32_t v) {
+        ev += char(id);
+        for (int i = 0; i < 4; ++i) ev += char((v >> (8 * i)) & 255);
+    };
+    auto array = [&](uint8_t id, const std::string& data) {
+        ev += char(id);
+        size_t n = data.size();
+        do {
+            uint8_t c = uint8_t(n & 0x7F);
+            n >>= 7;
+            if (n) c |= 0x80;
+            ev += char(c);
+        } while (n);
+        ev += data;
+    };
+    auto utf16 = [](const std::string& a) {
+        std::string w;
+        for (char c : a) { w += c; w += char(0); }
+        return w + std::string(2, '\0');
+    };
+    auto notes = [&](const std::vector<std::tuple<uint32_t, uint16_t, uint32_t>>& v) {
+        std::string d;
+        for (const auto& [t, ch, pitch] : v) {
+            std::string r(24, '\0');
+            for (int i = 0; i < 4; ++i) r[size_t(i)] = char((t >> (8 * i)) & 255);
+            r[6] = char(ch & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(12 + i)] = char((pitch >> (8 * i)) & 255);
+            r[21] = char(100);
+            d += r;
+        }
+        return d;
+    };
+    dword(0x9C, 120000);
+    word(0x40, 0);
+    array(0xC9, utf16("Player"));
+    word(0x40, 1);
+    array(0xC9, utf16("Opp"));
+    word(0x40, 2);
+    array(0xC9, utf16("3x Osc"));
+    word(0x41, 1);
+    array(0xC1, utf16("both"));
+    word(0x41, 1);
+    array(0xE0, notes({{0, 0, 72},     // Player channel, C5: outside the windows -> player lane 0
+                       {96, 1, 65},    // Opp channel, F4 -> opponent lane 1
+                       {192, 1, 50},   // Opp channel, D#3: a player-window pitch, still opponent lane 2
+                       {288, 2, 60}}));  // another channel: not the chart
+    std::string f = "FLhd";
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
+    u32(6);
+    f += std::string("\0\0\x02\0", 4);
+    f += char(96);
+    f += char(0);
+    f += "FLdt";
+    u32(uint32_t(ev.size()));
+    return f + ev;
+}
+
 void testFlStudio() {
     FlpProject p;
     std::string err;
@@ -455,6 +518,20 @@ void testFlStudio() {
     SCHECK(flpChartPath("a b/song.flp#2", file, pat) && file == "a b/song.flp" && pat == 2);
     SCHECK(flpChartPath("song.FSC", file, pat) && pat == -1);
     SCHECK(!flpChartPath("song.json", file, pat));
+
+    // Channels named "Player"/"Opp" chart every key by channel.
+    FlpProject pn;
+    SCHECK(readFlp(makeFlpNamed(), pn, err));
+    SCHECK(pn.channelNames.size() == 3);
+    SCHECK(flpChartPatterns(pn, true) == std::vector<int>({1}));
+    Chart cn;
+    SCHECK(flpToChart(pn, -1, cn, err));
+    SCHECK(cn.notes.size() == 3 && cn.playerNotes == 1 && cn.opponentNotes == 2);
+    if (cn.notes.size() == 3) {
+        SCHECK(cn.notes[0].side == 1 && cn.notes[0].lane == 0);  // C5 on "Player"
+        SCHECK(cn.notes[1].side == 0 && cn.notes[1].lane == 1);  // F4 on "Opp"
+        SCHECK(cn.notes[2].side == 0 && cn.notes[2].lane == 2);  // D#3 on "Opp": channel wins over the window
+    }
 
     // Through the chart loader and the song scan.
     const fs::path base = fs::temp_directory_path() / "gh_flp_scan";
