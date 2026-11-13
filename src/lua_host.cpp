@@ -1377,9 +1377,10 @@ scene::Camera* effectCamera(scene::Scene& sc, const std::string& name) {
 // Adds a built-in effect to a camera (camhud/hud, camother/other,
 // camgame/game) or puts it on a sprite (a Lua tag or a PlayState object such
 // as dad); anything else goes on the game camera.
-scene::ShaderPtr addEffect(lua_State* L, const std::string& name, bool timed) {
+scene::ShaderPtr addEffect(lua_State* L, const std::string& name, bool timed, const std::string& timeName = "uTime",
+                           float start = 0.0f) {
     if (!G(L).shadersEnabled()) return nullptr;
-    scene::ShaderPtr e = fx::make(SC(L), name, timed);
+    scene::ShaderPtr e = fx::make(SC(L), name, timed, timeName, start);
     if (!e) return nullptr;
     const std::string target = lua_type(L, 1) == LUA_TSTRING ? str(L, 1) : std::string();
     if (scene::Camera* c = effectCamera(SC(L), target)) c->filters.push_back(e);
@@ -1391,7 +1392,11 @@ scene::ShaderPtr addEffect(lua_State* L, const std::string& name, bool timed) {
 void setF(const scene::ShaderPtr& e, const char* name, double v) {
     if (e) e->floats[name] = {float(v)};
 }
+void setB(const scene::ShaderPtr& e, const char* name, bool v) {  // bool and int uniforms
+    if (e) e->ints[name] = {v ? 1 : 0};
+}
 
+// Each takes JS Engine's arguments and sets what its Effect class sets.
 int l_addChromaticAbberationEffect(lua_State* L) {
     const double off = num(L, 2, 0.005);
     const scene::ShaderPtr e = addEffect(L, "__fx_chromatic", false);
@@ -1401,33 +1406,38 @@ int l_addChromaticAbberationEffect(lua_State* L) {
     return 0;
 }
 int l_addScanlineEffect(lua_State* L) {
-    setF(addEffect(L, "__fx_scanline", false), "lockAlpha", boolean(L, 2, false));
+    setB(addEffect(L, "__fx_scanline", false), "lockAlpha", boolean(L, 2, false));
     return 0;
 }
 int l_addGrainEffect(lua_State* L) {
-    const scene::ShaderPtr e = addEffect(L, "__fx_grain", true);
-    setF(e, "grainSize", num(L, 2, 1.6));
-    setF(e, "lumAmount", num(L, 3, 1));
-    setF(e, "lockAlpha", boolean(L, 4, false));
+    // GrainEffect: its time starts anywhere from 0 to 8 seconds.
+    static std::mt19937 rng{std::random_device{}()};
+    const scene::ShaderPtr e = addEffect(L, "__fx_grain", true, "uTime", std::uniform_real_distribution<float>(0.0f, 8.0f)(rng));
+    setF(e, "grainsize", num(L, 2, 1.6));
+    setF(e, "lumamount", num(L, 3, 1));
+    setF(e, "coloramount", 0.6);
+    setB(e, "lockAlpha", boolean(L, 4, false));
     return 0;
 }
 int l_addTiltshiftEffect(lua_State* L) {
     const scene::ShaderPtr e = addEffect(L, "__fx_tiltshift", false);
     setF(e, "bluramount", num(L, 2, 1));
-    setF(e, "center", num(L, 3, 0.5));
+    setF(e, "center", num(L, 3, 1));
     return 0;
 }
 int l_addVCREffect(lua_State* L) {
-    const scene::ShaderPtr e = addEffect(L, "__fx_vcr", true);
+    const scene::ShaderPtr e = addEffect(L, "__fx_vcr", true, "iTime");
     setF(e, "glitchModifier", num(L, 2, 0));
-    setF(e, "distortionOn", boolean(L, 3, true));
-    setF(e, "perspectiveOn", boolean(L, 4, true));
-    setF(e, "vignetteMoving", boolean(L, 5, true));
+    setB(e, "distortionOn", boolean(L, 3, true));
+    setB(e, "perspectiveOn", boolean(L, 4, true));
+    setB(e, "vignetteMoving", boolean(L, 5, true));
+    setB(e, "vignetteOn", true);
+    setB(e, "scanlinesOn", true);
     return 0;
 }
 int l_addWiggleEffect(lua_State* L) {
     const scene::ShaderPtr e = addEffect(L, "__fx_wiggle", true);
-    setF(e, "effectType", fx::wiggleType(str(L, 2, "dreamy")));
+    if (e) e->ints["effectType"] = {fx::wiggleType(str(L, 2, "dreamy"))};
     setF(e, "uSpeed", num(L, 3, 0.1));
     setF(e, "uFrequency", num(L, 4, 0.1));
     setF(e, "uWaveAmplitude", num(L, 5, 0.1));
@@ -1435,19 +1445,20 @@ int l_addWiggleEffect(lua_State* L) {
     setF(e, "horizontalStrength", num(L, 7, 1));
     return 0;
 }
-int waveEffect(lua_State* L, const char* name, int speedArg, int freqArg, int ampArg) {
-    const scene::ShaderPtr e = addEffect(L, name, true);
+int waveEffect(lua_State* L, const char* name, int speedArg, int freqArg, int ampArg, bool pulse = false) {
+    // PulseEffect stays off (uEnabled false, its time still), as in JS Engine.
+    const scene::ShaderPtr e = addEffect(L, name, !pulse);
     setF(e, "uSpeed", num(L, speedArg, 0.1));
     setF(e, "uFrequency", num(L, freqArg, 0.1));
     setF(e, "uWaveAmplitude", num(L, ampArg, 0.1));
-    setF(e, "uEnabled", 0);  // the pulse effect stays off, as in JS Engine
+    if (pulse) setB(e, "uEnabled", false);
     return 0;
 }
 int l_addGlitchEffect(lua_State* L) { return waveEffect(L, "__fx_glitch", 2, 3, 4); }
 int l_addGlitchShader(lua_State* L) { return waveEffect(L, "__fx_glitch", 4, 3, 2); }
-int l_addPulseEffect(lua_State* L) { return waveEffect(L, "__fx_pulse", 2, 3, 4); }
+int l_addPulseEffect(lua_State* L) { return waveEffect(L, "__fx_pulse", 2, 3, 4, true); }
 int l_addDistortionEffect(lua_State* L) { return waveEffect(L, "__fx_distort", 2, 3, 4); }
-int l_addInvertEffect(lua_State* L) { addEffect(L, "__fx_invert", false); return 0; }
+int l_addInvertEffect(lua_State* L) { addEffect(L, "__fx_invert", false); return 0; }  // lockAlpha is unused there too
 int l_addGreyscaleEffect(lua_State* L) { addEffect(L, "__fx_greyscale", false); return 0; }
 int l_add3DEffect(lua_State* L) {
     const scene::ShaderPtr e = addEffect(L, "__fx_3d", false);
@@ -1464,13 +1475,13 @@ int l_addBloomEffect(lua_State* L) {
     return 0;
 }
 int l_addBlockedGlitchEffect(lua_State* L) {
-    if (!boolean(L, 5, true)) return 0;  // JS Engine only adds it with the colour transform on
-    const scene::ShaderPtr e = addEffect(L, "__fx_blocked", true);
+    // (camera, res, time, colorMult, colorTransform): JS Engine only adds it
+    // with the colour transform on; its time starts at `time`.
+    if (!boolean(L, 5, true)) return 0;
+    const scene::ShaderPtr e = addEffect(L, "__fx_blocked", true, "time", float(num(L, 3, 1)));
     if (!e) return 0;
     const float res = float(num(L, 2, 1280));
     e->floats["screenSize"] = {res, res};
-    setF(e, "uTime", num(L, 3, 1));
-    setF(e, "glitchColor", 1);
     return 0;
 }
 int l_clearEffects(lua_State* L) {

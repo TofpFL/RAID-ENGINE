@@ -18,8 +18,19 @@ void shutdown();
 // Virtual canvas: everything is drawn in 1280x720 units, scaled and letterboxed.
 Camera2D screenCamera(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
 // While drawing into a render texture of this size, the canvas maps onto it
-// instead of the window (0, 0 = the window again).
+// instead of the window (0, 0 = the window, or the frame target, again).
 void setRenderTargetSize(int w, int h);
+// Rendering mode: whole frames are drawn into `rt` (a video's size) instead
+// of the window. beginTexture/endTexture stand for raylib's Begin/
+// EndTextureMode in the game's own passes: ending one goes back to the frame
+// target, not to the window.
+void beginFrameTarget(const RenderTexture2D& rt);
+void endFrameTarget();
+bool frameTargetActive();
+void beginTexture(const RenderTexture2D& rt);
+void endTexture();
+int targetWidth();   // pixels of what is drawn into now (window or frame target)
+int targetHeight();
 void beginCanvas(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
 void endCanvas();
 void drawLetterbox();

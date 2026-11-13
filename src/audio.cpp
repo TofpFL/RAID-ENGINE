@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #include "audio_decode.hpp"
 #include "common.hpp"
@@ -101,6 +103,16 @@ void Mixer::shutdown() {
     stopAudioDecoders();
 }
 
+void Mixer::setOffline(bool on) {
+    offline_ = on;
+    stalled_ = false;
+    haveLast_ = false;
+    if (!on && !audioOk_ && playing_) {  // the fallback clock goes on from the mixed position
+        fbStart_ = nowSec();
+        fbStartPos_ = pos_.load() / kRate;
+    }
+}
+
 void Mixer::hintStreams(double sec) {
     // tracks_ is only replaced on the main thread, where this runs.
     const size_t at = sec > 0 ? size_t(sec * kRate) : 0;
@@ -171,6 +183,10 @@ void Mixer::setLoop(bool loop, double startSec, double endSec) {
     loopStart_ = startSec * kRate;
     loopEnd_ = endSec * kRate;
     loop_ = loop && endSec > startSec;
+    // A long streamed track keeps the loop's start in memory for the jump back.
+    const size_t hold = loop_.load() ? size_t(std::max(0.0, startSec) * kRate) : ~size_t(0);
+    for (const PcmPtr& t : tracks_)
+        if (t && t->stream) t->stream->holdPos.store(hold, std::memory_order_relaxed);
 }
 
 void Mixer::setRate(double r) {
@@ -201,6 +217,7 @@ double Mixer::lengthSec() const {
 }
 
 double Mixer::rawTime() const {
+    if (offline_.load()) return pos_.load() / kRate;
     if (!audioOk_) {
         if (!playing_) return fbStartPos_;
         return fbStartPos_ + (nowSec() - fbStart_) * rate_.load();
@@ -235,6 +252,7 @@ double Mixer::estimate(double now) const {
 }
 
 double Mixer::time(double now) {
+    if (offline_.load()) return pos_.load() / kRate;  // the rendering mode: exactly what was mixed
     if (stalled_.load() && haveLast_ && playing_) {  // waiting for a streamed track: the clock holds
         lastNow_ = now;
         return lastValue_;
@@ -278,13 +296,37 @@ void Mixer::audioCallback(float* out, unsigned frames) {
         g_seq.fetch_add(1, std::memory_order_acq_rel);
     };
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
-    // In the background (Android) the song holds its place instead of playing on.
-    if (!playing_ || !lk.owns_lock() || platform::inBackground()) {
+    // In the background (Android) the song holds its place instead of playing
+    // on; in the rendering mode the game mixes the song itself (mixOffline).
+    const bool offline = offline_.load();
+    if (offline || !playing_ || !lk.owns_lock() || platform::inBackground()) {
         std::memset(out, 0, size_t(frames) * 2 * sizeof(float));
-        publish(pos_.load());
+        if (!offline) publish(pos_.load());
         return;
     }
     double pos = pos_.load();
+    stalled_.store(mixTracks(out, frames, pos));
+    publish(pos);
+}
+
+void Mixer::mixOffline(float* out, unsigned frames) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!playing_) {
+        std::memset(out, 0, size_t(frames) * 2 * sizeof(float));
+        return;
+    }
+    double pos = pos_.load();
+    // Every sample is wanted here: wait for a streamed track's decoder rather
+    // than leave a gap (it decodes far faster than a video renders).
+    for (int tries = 0; mixTracks(out, frames, pos); ++tries) {
+        if (tries >= 5000) break;  // ~5 s: something is wrong, leave the silence
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    pos_.store(pos);
+}
+
+bool Mixer::mixTracks(float* out, unsigned frames, double& posInOut) {
+    double pos = posInOut;
     const double rate = rate_.load();
     const bool loop = loop_.load();
     const double ls = loopStart_.load(), le = loopEnd_.load();
@@ -390,8 +432,8 @@ void Mixer::audioCallback(float* out, unsigned frames) {
         for (const View& w : v)
             if (w.s) w.s->playPos.store(at, std::memory_order_relaxed);
     }
-    stalled_.store(stalled);
-    publish(pos);
+    posInOut = pos;
+    return stalled;
 }
 
 // ------------------------------------------------------------------ sfx --

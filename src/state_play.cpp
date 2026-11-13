@@ -61,6 +61,8 @@ std::string psychFcLabel(const Session& s) {
 PlayState::PlayState(PlayRequest r) : req_(std::move(r)) {}
 
 PlayState::~PlayState() {
+    stopRendering();
+    if (uiFromMod_) app().psychUiForSong({});  // the interface as it was
     stopPauseMusic();
     scripts_.reset();
     releaseAudio();
@@ -142,7 +144,10 @@ void PlayState::update(double dt) {
         if (scripts_) scripts_->call("onCustomSubstateUpdatePost", {scene::Value(name), scene::Value(dt)});
     }
     if (popupHold_) {  // "Popup" event: the song waits for OK
-        if (a.input.accept() || a.input.back()) {
+        // While recording nobody presses OK: the popup stays two seconds.
+        const bool recordedLongEnough =
+            rendering_ && std::any_of(notices_.begin(), notices_.end(), [&](const Notice& n) { return n.kind == 2 && now - n.t0 > 2.0; });
+        if (a.input.accept() || a.input.back() || recordedLongEnough) {
             popupHold_ = false;
             notices_.erase(std::remove_if(notices_.begin(), notices_.end(), [](const Notice& n) { return n.kind == 2; }),
                            notices_.end());
@@ -164,23 +169,30 @@ void PlayState::update(double dt) {
         return;
     }
 
-    songMs_ = a.mixer.time(now) * 1000.0 - a.settings.offsetMs * rate_;
+    // The audio offset is for the player's ears; a recording is in sync by itself.
+    songMs_ = a.mixer.time(now) * 1000.0 - (rendering_ ? 0.0 : a.settings.offsetMs * rate_);
+    if (rendering_) {
+        const int at = int(std::max(0.0, songMs_) / 1000.0), len = int(chart_.lengthMs / 1000.0);
+        a.renderLabel = TextFormat("%d:%02d / %d:%02d", at / 60, at % 60, len / 60, len % 60);
+    }
     handleInput();
     if (phase_ != Phase::Playing) return;
     if (!songStarted_ && songMs_ >= 0) {
         songStarted_ = true;
+        songStartAt_ = now;
         if (scripts_) scripts_->call("onSongStart");
     }
     session_.update(songMs_);
     handleNoteEvents();
     processChartEvents();
     adaptNoteGap();
-    if (a.settings.noteCounter > 0) {  // notes per second, counted like the note counter
-        const long long hits = session_.judged() + (a.settings.noteCounter == 2 ? session_.opponentHits : 0);
-        npsWindow_.emplace_back(now, hits);
-        while (npsWindow_.size() > 1 && now - npsWindow_.front().first > 1.0) npsWindow_.pop_front();
-        nps_ = hits - npsWindow_.front().second;
+    if (a.settings.noteCounter > 0) {  // notes per second of each side
+        npsWindow_.push_back({now, session_.judged(), session_.opponentHits});
+        while (npsWindow_.size() > 1 && now - npsWindow_.front().t > 1.0) npsWindow_.pop_front();
+        nps_ = session_.judged() - npsWindow_.front().player;
+        npsOpp_ = session_.opponentHits - npsWindow_.front().opponent;
         maxNps_ = std::max(maxNps_, nps_);
+        maxNpsOpp_ = std::max(maxNpsOpp_, npsOpp_);
     }
 
     // Psych order: onBeatHit, then onStepHit, then onSectionHit.
@@ -284,6 +296,7 @@ void PlayState::draw() {
         gfx::endCanvas();
 
         gfx::beginCanvas(hudZoom_);
+        drawUnderNotes();
         drawLanes();
         fx_.draw(true);
         drawHud();
@@ -317,6 +330,11 @@ void PlayState::setup() {
         cfg_.practice = true;  // a replay never ends early
         cfg_.ghostTapping = playback_.ghostTapping;
         playerLeft_ = playback_.mirror;
+    }
+    // Rendering mode: the song plays by itself and is recorded from here on.
+    if (a.wantsRender() && !replaying_) {
+        rendering_ = a.startRender(entry_->title, req_.diff);
+        if (rendering_) cfg_.botplay = true;
     }
     const CharId opp = entry_->builtin ? charFromName(entry_->opponent) : CharId::Shade;
     left_ = CharacterState{};
@@ -422,8 +440,11 @@ Vector2 PlayState::strumCenter(int side, int lane) const {
 float PlayState::noteSize() const { return std::min(112.0f, 500.0f / float(chart_.keys)) * 0.94f; }
 
 double PlayState::scrollSpeed() const {
-    const Settings& s = app().settings;
-    const double base = s.scrollSpeed > 0.001f ? s.scrollSpeed : chart_.speed;
+    const App& a = app();
+    const Settings& s = a.settings;
+    double base = s.scrollSpeed > 0.001f ? s.scrollSpeed : chart_.speed;
+    if (a.mods.scrollType == 1) base *= a.mods.scrollValue;  // Freeplay modifiers
+    else if (a.mods.scrollType == 2) base = a.mods.scrollValue;
     return base * speedMult_;
 }
 
@@ -452,7 +473,7 @@ void PlayState::restart() {
     camZoom_ = hudZoom_ = 1.0f;
     zoomingOn_ = false;
     npsWindow_.clear();
-    nps_ = maxNps_ = 0;
+    nps_ = maxNps_ = npsOpp_ = maxNpsOpp_ = 0;
     speedMult_ = 1.0;
     speedTweenDur_ = 0;
     left_.singUntil = right_.singUntil = -10;
@@ -490,6 +511,11 @@ void PlayState::handleInput() {
         const bool pauseKey = e.code == KEY_ESCAPE || e.code == KEY_BACK || e.code == kPadBase + GAMEPAD_BUTTON_MIDDLE_RIGHT ||
                               (e.code == KEY_ENTER && !a.input.isDown(KEY_LEFT_ALT) && !a.input.isDown(KEY_RIGHT_ALT));
         if (e.down && pauseKey && (e.code <= 0 || e.code >= Input::kMaxCodes || keyLane_[size_t(e.code)] < 0)) {
+            if (rendering_) {  // stops the recording: the video keeps what was recorded
+                stopRendering();
+                exitToMenu();
+                return;
+            }
             if (scripts_ && scripts_->callStops("onPause")) continue;
             pause();
             return;
@@ -589,7 +615,11 @@ void PlayState::handleTouch() {
 }
 
 void PlayState::popup(const std::string& text, Color c, const std::string& timing) {
-    const double now = app().now;
+    App& a = app();
+    const double now = a.now;
+    int rating = -1;
+    for (int k = 0; k < kRatingCount; ++k)
+        if (text == ratingInfo(Rating(k)).name) rating = k;
     if (!popups_.empty() && now - popups_.back().t0 < 0.03) {  // spam: update instead of stacking
         Popup& p = popups_.back();
         if (p.text == "MISS" && text != "MISS") return;
@@ -597,10 +627,18 @@ void PlayState::popup(const std::string& text, Color c, const std::string& timin
         p.timing = timing;
         p.c = c;
         p.combo = session_.combo;
+        p.rating = rating;
         return;
     }
-    if (popups_.size() >= 4) popups_.erase(popups_.begin());
-    popups_.push_back({text, timing, c, now, session_.combo});
+    // Combo stacking off (Psych's option): the new one replaces the others.
+    if (!a.settings.comboStacking) popups_.clear();
+    if (popups_.size() >= 16) popups_.erase(popups_.begin());
+    Popup p{text, timing, c, now, session_.combo};
+    p.rating = rating;
+    p.seed = uint32_t(GetRandomValue(1, 0x7FFFFFFF));
+    const double bpm = chart_.bpmAt(std::max(0.0, songMs_));
+    p.beat = float(60.0 / std::max(1.0, bpm));
+    popups_.push_back(p);
 }
 
 void PlayState::splash(int side, int lane) {
@@ -640,6 +678,7 @@ void PlayState::handleNoteEvents() {
                 if (!(ev.flags & kFlagNoAnim)) charOf(1).sing(dir, now, ev.length / 1000.0 / rate_);
                 a.mixer.setTrackVolume(Mixer::kVoicePlayer, 1.0f);
                 const RatingInfo& ri = ratingInfo(ev.rating);
+                if (!cfg_.botplay && (!cfg_.practice || replaying_)) scoreBopAt_ = now;  // Psych: the score text zooms
                 popup(ri.name, ratingColor(ev.rating),
                       a.settings.showTimings && !cfg_.botplay ? TextFormat("%+.0f ms", ev.errMs) : "");
                 if (ev.rating == kDivine && a.settings.noteSplashes && now - lastSplash_[ev.lane] > 0.06) {
@@ -749,11 +788,11 @@ void PlayState::pause() {
     pauseScroll_ = 0;
     pausedAt_ = a.now;
     a.mixer.pause();
-    // Psych's pause music (breakfast), from a random point, fading in.
+    // Psych's pause music (Options: pause screen song), from a random point, fading in.
     const PsychUi& ui = psychUi();
-    if (ui.active() && !ui.pauseMusic().empty()) {
+    if (const std::string song = ui.active() ? ui.pauseMusic(a.settings.pauseMusic) : std::string(); !song.empty()) {
         stopPauseMusic();
-        pauseMusic_ = LoadMusicStream(ui.pauseMusic().c_str());
+        pauseMusic_ = LoadMusicStream(song.c_str());
         if (pauseMusic_.stream.buffer) {
             pauseMusic_.looping = true;
             pauseMusicVol_ = 0;
@@ -840,8 +879,15 @@ void PlayState::updateDead() {
     else if (a.input.back()) exitToMenu();
 }
 
+void PlayState::stopRendering() {
+    if (!rendering_) return;
+    rendering_ = false;
+    app().stopRender();
+}
+
 void PlayState::exitToMenu() {
     App& a = app();
+    stopRendering();
     if (scripts_) scripts_->call("onDestroy");
     a.mixer.stop();
     a.mixer.clear();
@@ -850,6 +896,7 @@ void PlayState::exitToMenu() {
 
 void PlayState::openChartEditor() {
     App& a = app();
+    stopRendering();
     if (scripts_) scripts_->call("onDestroy");
     a.mixer.stop();
     a.mixer.clear();
@@ -860,6 +907,7 @@ void PlayState::openChartEditor() {
 // Options from the pause menu: leaving them starts this song again, as in Psych.
 void PlayState::openOptions() {
     App& a = app();
+    stopRendering();
     if (scripts_) scripts_->call("onDestroy");
     a.mixer.stop();
     a.mixer.clear();
@@ -880,6 +928,7 @@ void PlayState::finish() {
         }
     }
     finished_ = true;
+    stopRendering();  // the video ends with the song
     if (scripts_) scripts_->call("onDestroy");
     ResultData r;
     r.req = req_;
@@ -918,7 +967,7 @@ void PlayState::finish() {
         record_.score = r.score;
         record_.acc = r.acc;
         record_.misses = r.misses;
-        const std::string dir = a.base + "replays/";
+        const std::string dir = a.userDir + "replays/";
         const std::string last = dir + replayFileName(entry_->id, req_.diff, "last");
         if (record_.save(last)) r.replayPath = last;
         if (r.newBest) record_.save(dir + replayFileName(entry_->id, req_.diff, "best"));
@@ -993,6 +1042,7 @@ void PlayState::drawLanes() {
     const double reach = (gfx::H * 1.5 + ns) / pxPerMs;
     drawnNotes_ = candidateNotes_ = 0;
     for (int side = 0; side < 2; ++side) {
+        if (side == 0 && !s.opponentNotes) continue;  // Options: opponent notes (Psych hides their receptors and notes)
         for (int lane = 0; lane < K; ++lane) {
             const scene::Strum& st = strum(side, lane);
             const Vector2 c = strumCenter(side, lane);
@@ -1111,51 +1161,75 @@ bool PlayState::hudShown(const char* name, float* alpha) const {
     return it->second->visible && it->second->alpha > 0.002f;
 }
 
+// The HUD. With the Psych Engine interface it is laid out as Psych 0.7.3's
+// PlayState does it: healthBar.png centred with its top at 89% of the height
+// (11% in downscroll), the icons on its top edge beside the split, the score
+// text 40 pixels under it, the time text and bar at the top, BOTPLAY under
+// them. The game's own look otherwise.
 void PlayState::drawHud() {
     App& a = app();
     const Settings& s = a.settings;
     const double now = a.now;
+    const PsychUi& ui = psychUi();
+    const bool look = ui.active();  // the Psych Engine interface
+    const bool hide = s.hideHud;    // Psych's Hide HUD: health bar, icons, score line
     // health bar
-    const float by = s.downscroll ? 82.0f : 640.0f, bx = 340, bw = 600, bh = 18;
+    const Vector2 hbs = ui.healthBarSize();
+    const bool psychBar = hbs.x > 0;
+    const Rectangle frame = psychBar ? Rectangle{(gfx::W - hbs.x) * 0.5f, gfx::H * (s.downscroll ? 0.11f : 0.89f), hbs.x, hbs.y}
+                                     : Rectangle{335, s.downscroll ? 77.0f : 635.0f, 610, 28};
+    const float inset = psychBar ? ui.barInset() : 5.0f;
+    const float bx = frame.x + inset, by = frame.y + inset, bw = frame.width - 2 * inset, bh = frame.height - 2 * inset;
     const float hp = healthShown_ / 2.0f;
     const float leftFrac = playerLeft_ ? hp : 1.0f - hp;
-    const float split = bx + bw * leftFrac;
-    float barAlpha = 1;
-    const PsychUi& ui = psychUi();
+    const float split = bx + bw * leftFrac;      // Psych's barCenter
     const float barOpacity = s.healthBarAlpha;  // Options: health bar opacity (the icons too)
-    if (hudShown("healthBar", &barAlpha)) barAlpha *= barOpacity;
-    if (barAlpha > 0.002f && hudShown("healthBar") && ui.healthBar({bx, by, bw, bh}, leftColor_, rightColor_, leftFrac, barAlpha)) {
-        // the Psych Engine interface drew it
-    } else if (barAlpha > 0.002f && hudShown("healthBar")) {
-        DrawRectangleRounded({bx - 5, by - 5, bw + 10, bh + 10}, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha));
-        DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
-        DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
-        DrawRectangleRec({bx, by, bw, bh * 0.35f}, Color{255, 255, 255, (unsigned char)(40 * barAlpha)});
+    float barAlpha = 1, bgAlpha = 1;
+    if (!hide && hudShown("healthBar", &barAlpha)) {
+        if (!hudShown("healthBarBG", &bgAlpha)) bgAlpha = 0;  // Psych 0.6 scripts fade the picture on its own
+        barAlpha *= barOpacity;
+        if (barAlpha > 0.002f && !ui.healthBar(frame, leftColor_, rightColor_, leftFrac, barAlpha, barAlpha * bgAlpha)) {
+            DrawRectangleRounded(frame, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha * bgAlpha));
+            DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
+            DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
+            DrawRectangleRec({bx, by, bw, bh * 0.35f}, Color{255, 255, 255, (unsigned char)(40 * barAlpha)});
+        }
     }
     const bool playerLosing = session_.health < 0.4, oppLosing = session_.health > 1.6;
+    // Psych: 150-pixel icons centred on the bar's top edge, beside the split,
+    // growing to 1.2 on each beat and easing back (exp(-9 t)).
+    float bop = 1;
+    if (look && songStarted_) {
+        const double beat = std::floor(chart_.beatAt(songMs_));
+        if (beat >= 1) bop = 1.0f + 0.2f * float(std::exp(-0.009 * std::max(0.0, songMs_ - chart_.msAtBeat(beat))));
+    }
     const float isz = 86.0f * (1.0f + 0.12f * beatPulse_);
-    for (int i = 0; i < 2; ++i) {  // 0 = left (opponent side), 1 = right
+    for (int i = 0; i < 2 && !hide; ++i) {  // 0 = left (opponent side), 1 = right
         float ia = 1;
         if (!hudShown(i == 0 ? "iconP2" : "iconP1", &ia)) continue;
         ia *= barOpacity;
         if (ia <= 0.002f) continue;
-        const Vector2 pos{split + (i == 0 ? -36.0f : 36.0f), by + bh * 0.5f};
+        const Vector2 pos = look ? Vector2{i == 0 ? split - 75.0f * bop + 23.0f : split + 75.0f * bop - 26.0f, frame.y}
+                                 : Vector2{split + (i == 0 ? -36.0f : 36.0f), by + bh * 0.5f};
         const bool losing = i == 0 ? (playerLeft_ ? playerLosing : oppLosing) : (playerLeft_ ? oppLosing : playerLosing);
         if (psych_ && hasPsychIcon_[i] && iconTex_[i].id) {
             const int frames = std::max(1, iconFrames_[i]);
             const float fw = float(iconTex_[i].width) / float(frames), fh = float(iconTex_[i].height);
             const int fi = losing && frames > 1 ? 1 : 0;
-            const float dsz = isz * 1.6f;
+            const float dw = look ? fw * bop : isz * 1.6f, dh = dw * fh / fw;
             Rectangle src{fw * float(fi), 0, i == 1 ? -fw : fw, fh};
-            DrawTexturePro(iconTex_[i], src, {pos.x, pos.y, dsz, dsz * fh / fw}, {dsz * 0.5f, dsz * fh / fw * 0.5f}, 0,
-                           fade(WHITE, ia));
+            DrawTexturePro(iconTex_[i], src, {pos.x, pos.y, dw, dh}, {dw * 0.5f, dh * 0.5f}, 0, fade(WHITE, ia));
         } else {
             const CharacterState& cs = i == 0 ? left_ : right_;
-            drawIcon(cs.id, cs.tint, pos, isz, losing, now);
+            drawIcon(cs.id, cs.tint, pos, look ? 115.0f * bop : isz, losing, now);
         }
     }
-    // score line
-    if (hudShown("scoreTxt")) {
+    // score line (Psych: 40 pixels under the bar's top; 36 in 0.6)
+    float scoreAlpha = 1;
+    const bool scoreShown = !hide && hudShown("scoreTxt", &scoreAlpha);
+    const float scoreTop = frame.y + (psychBar && !ui.barOnTop() ? 36.0f : 40.0f);
+    const bool psychText = look && ui.font();
+    if (scoreShown) {
         std::string line = "Score " + fmtThousands(session_.score) + "   |   Misses " + fmtThousands(session_.misses) +
                            "   |   " + TextFormat("%.2f%%", session_.accuracy() * 100.0) + " (" +
                            (ratingNameOverride_.empty() ? session_.rank() : ratingNameOverride_) + ")";
@@ -1175,26 +1249,28 @@ void PlayState::drawHud() {
         }
         // Long numbers (spam charts) shrink the line to fit instead of running off screen.
         constexpr float kMaxLineW = gfx::W - 40.0f;
-        if (const Font* f = ui.active() ? ui.font() : nullptr) {
-            // Psych's score text: vcr.ttf 20 with a black outline, zooming a
-            // little on every hit (scoreZoom).
+        if (psychText) {
+            // vcr.ttf 20 with a black outline; with "Score text zoom on hit" it
+            // grows to 1.075 on each note you hit and eases back in 0.2 s, around
+            // the middle of its box (two lines high: Psych ends it with a line break).
             float size = 20;
-            const float sz = MeasureTextEx(*f, line.c_str(), size, 0).x;
-            if (sz > kMaxLineW) size *= kMaxLineW / sz;
-            const float hitAge = popups_.empty() ? 1.0f : float(now - popups_.back().t0);
-            if (hitAge < 0.2f) size *= 1.0f + 0.075f * (1.0f - hitAge / 0.2f);
-            ui.text(line, gfx::W / 2, by + 40 - (size - 20) * 0.5f, size, WHITE, 0, 1.25f);
+            const float w = ui.textWidth(line, size);
+            if (w > kMaxLineW) size *= kMaxLineW / w;
+            float zoom = 1;
+            if (s.scoreZoom && now - scoreBopAt_ < 0.2) zoom = 1.075f - 0.075f * float((now - scoreBopAt_) / 0.2);
+            const float mid = scoreTop + ui.lineHeight(size) + 2;
+            ui.text(line, gfx::W / 2, mid + (scoreTop + 2 - mid) * zoom - 2, size * zoom, fade(WHITE, scoreAlpha), 0, 1.25f * zoom);
         } else {
             float size = 24;
             const float w = gfx::measure(FontId::Ui, line, size).x;
             if (w > kMaxLineW) size *= kMaxLineW / w;
-            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, size, WHITE, Align::Center, 2.0f);
+            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, size, fade(WHITE, scoreAlpha), Align::Center, 2.0f);
         }
     }
     // Note counter (Options, Note counter): notes hit so far out of the chart's
     // total, for your side, or both sides added up the way H-Slice shows them
     // ("opponent + yours = both").
-    if (s.noteCounter > 0 && hudShown("scoreTxt")) {
+    if (s.noteCounter > 0 && scoreShown) {
         std::string line;
         if (s.noteCounter == 2) {
             const long long opp = session_.opponentHits, mine = session_.judged();
@@ -1203,27 +1279,39 @@ void PlayState::drawHud() {
         } else {
             line = "Notes " + fmtThousands(session_.judged()) + " / " + fmtThousands((long long)session_.totalPlayerNotes);
         }
-        line += "   |   NPS " + fmtThousands(nps_) + " (max " + fmtThousands(maxNps_) + ")";
+        if (s.noteCounter == 2)  // each side on its own: opponent / yours
+            line += "   |   NPS " + fmtThousands(npsOpp_) + " / " + fmtThousands(nps_) + " (max " + fmtThousands(maxNpsOpp_) + " / " +
+                    fmtThousands(maxNps_) + ")";
+        else
+            line += "   |   NPS " + fmtThousands(nps_) + " (max " + fmtThousands(maxNps_) + ")";
         if (cfg_.practice && !replaying_) line += "   |   PRACTICE MODE";
-        if (const Font* f = ui.active() ? ui.font() : nullptr) {
+        if (psychText) {
             float size = 16;
-            const float w = MeasureTextEx(*f, line.c_str(), size, 0).x;
+            const float w = ui.textWidth(line, size);
             if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
-            ui.text(line, gfx::W / 2, by + 62, size, WHITE, 0, 1.0f);
+            ui.text(line, gfx::W / 2, scoreTop + 22, size, fade(WHITE, scoreAlpha), 0, 1.0f);
         } else {
             float size = 18;
             const float w = gfx::measure(FontId::Ui, line, size).x;
             if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
-            gfx::text(FontId::Ui, line, gfx::W / 2, by + 60, size, fade(kIvory, 0.9f), Align::Center, 1.5f);
+            gfx::text(FontId::Ui, line, gfx::W / 2, by + 60, size, fade(kIvory, 0.9f * scoreAlpha), Align::Center, 1.5f);
         }
     }
-    if ((cfg_.botplay || replaying_) && hudShown("botplayTxt")) {
-        // Psych: vcr.ttf 32 under the time bar, fading in and out.
-        const float al = 1.0f - std::fabs(std::sin(float(now) * float(kPi) * 0.5f));
-        if (!ui.text(replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? gfx::H - 125.0f : 82.0f, 32,
-                     fade(WHITE, al), 0, 1.25f))
-            gfx::text(FontId::Title, replaying_ ? "REPLAY" : "BOTPLAY", gfx::W / 2, s.downscroll ? 560 : 150, 40,
-                      fade(kGold, 0.55f + 0.35f * std::sin(float(now) * 3.0f)), Align::Center, 2.0f);
+    // Psych's time text: vcr.ttf 32 in a 400-pixel box at x 434 (STRUM_X +
+    // FlxG.width / 2 - 248), 19 pixels down (FlxG.height - 44 in downscroll);
+    // the time bar a quarter of the text's height under its top.
+    const float timeTop = s.downscroll ? gfx::H - 44.0f : 19.0f;
+    const float timeBarTop = timeTop + (ui.lineHeight(32) + 4) * 0.25f;
+    float botAlpha = 1;
+    if ((cfg_.botplay || replaying_) && s.botplayText && hudShown("botplayTxt", &botAlpha)) {
+        const char* label = replaying_ ? "REPLAY" : "BOTPLAY";
+        // Psych: under the time bar (above it in downscroll), fading out and
+        // back in over a second, then a second fully shown.
+        const float al = std::clamp(1.0f - float(std::sin(kPi * (now - loadStart_))), 0.0f, 1.0f);
+        if (!(psychText && ui.text(label, gfx::W / 2, s.downscroll ? timeBarTop - 78 : timeBarTop + 55, 32, fade(WHITE, al * botAlpha), 0,
+                                   1.25f)))
+            gfx::text(FontId::Title, label, gfx::W / 2, s.downscroll ? 560 : 150, 40,
+                      fade(kGold, (0.55f + 0.35f * std::sin(float(now) * 3.0f)) * botAlpha), Align::Center, 2.0f);
     }
     if (s.touchControls && !a.touchMode && !replaying_) {
         const float half = std::min(112.0f, 500.0f / float(chart_.keys)) * 0.5f;
@@ -1233,54 +1321,116 @@ void PlayState::drawHud() {
             DrawRectangleRec({c.x - half, gfx::H * 0.55f, half * 2 - 4, gfx::H * 0.45f}, fade(col, touchDown_[l] ? 0.28f : 0.09f));
         }
     }
-    if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && hudShown("scoreTxt")))
+    if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && scoreShown))
         gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
     if (rate_ != 1.0) gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
 
     // song progress (Options: time left, time elapsed, song name or off)
-    if (s.timeBar != 3 && hudShown("timeBar")) {
+    float tbAlpha = 1, ttAlpha = 1, tbgAlpha = 1;
+    const bool tbShown = hudShown("timeBar", &tbAlpha), ttShown = hudShown("timeTxt", &ttAlpha);
+    if (!hudShown("timeBarBG", &tbgAlpha)) tbgAlpha = 0;
+    if (s.timeBar != 3 && (tbShown || ttShown)) {
         const float prog = float(clampv(songMs_ / std::max(1.0, shownLengthMs()), 0.0, 1.0));
-        const double remain = std::max(0.0, (shownLengthMs() - songMs_) / 1000.0 / rate_);
-        const double elapsed = std::max(0.0, songMs_ / 1000.0 / rate_);
+        // Psych counts the song's own time (a faster rate does not shorten it);
+        // the game's own look counts the real time left.
+        const double div = look ? 1.0 : rate_;
+        const double remain = std::max(0.0, (shownLengthMs() - songMs_) / 1000.0 / div);
+        const double elapsed = std::max(0.0, songMs_ / 1000.0 / div);
         const std::string name = songNameShown_.empty() ? chart_.title : songNameShown_;
-        const float textY = s.downscroll ? gfx::H - 44.0f : 19.0f;  // Psych's timeTxt
-        const bool custom = timeBarBack_.a || timeBarFill_.a;        // setTimeBarColors()
-        if (!custom && ui.timeBar(gfx::W / 2, textY + 8, prog, 1.0f)) {
-            if (hudShown("timeTxt"))
-                ui.text(s.timeBar == 2 ? name : fmtTime(s.timeBar == 1 ? elapsed : remain), gfx::W / 2, textY, 32, WHITE, 0, 1.25f);
+        const bool custom = timeBarBack_.a || timeBarFill_.a;  // setTimeBarColors()
+        if (!custom && look) {
+            // Psych: hidden until the song starts, then fading in for 0.5 s (circOut).
+            const float t = songStartAt_ < 0 ? 0.0f : std::min(1.0f, float(now - songStartAt_) / 0.5f);
+            const float in = std::sqrt(std::max(0.0f, 1.0f - (t - 1.0f) * (t - 1.0f)));
+            const Vector2 tbs = ui.timeBarSize();
+            if (tbShown) ui.timeBar({(gfx::W - tbs.x) * 0.5f, timeBarTop, tbs.x, tbs.y}, prog, in * tbAlpha, in * tbAlpha * tbgAlpha);
+            const bool songName = s.timeBar == 2;  // Psych: 24 pixels, 3 lower
+            if (ttShown && !(psychText && ui.text(songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain), 42 + gfx::W / 2 - 248 + 200,
+                                                  songName ? timeTop + 3 : timeTop, songName ? 24.0f : 32.0f,
+                                                  fade(WHITE, in * ttAlpha), 0, 2.0f)))
+                gfx::text(FontId::Ui, songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain), gfx::W / 2, timeTop, 28,
+                          fade(WHITE, in * ttAlpha), Align::Center, 2.0f);
         } else {
             const float ty = s.downscroll ? gfx::H - 26.0f : 12.0f;
-            DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200});
-            DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
-                                 timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f));
+            if (tbShown) {
+                DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, fade(timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200}, tbAlpha));
+                DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
+                                     fade(timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f), tbAlpha));
+            }
             std::string label = name + "  -  " + req_.diff;
             if (s.timeBar != 2) label += "  -  " + fmtTime(s.timeBar == 1 ? elapsed : remain);
-            if (hudShown("timeTxt"))
-                gfx::text(FontId::Ui, label, gfx::W / 2, s.downscroll ? ty - 26 : ty + 14, 20, fade(WHITE, 0.85f), Align::Center, 1.5f);
+            if (ttShown)
+                gfx::text(FontId::Ui, label, gfx::W / 2, s.downscroll ? ty - 26 : ty + 14, 20, fade(WHITE, 0.85f * ttAlpha), Align::Center,
+                          1.5f);
         }
     }
+}
 
-    // rating popups
-    const float px = s.middlescroll ? 1030.0f : gfx::W / 2;
-    const float py = s.downscroll ? 400.0f : 300.0f;
-    if (!popups_.empty() && s.hitPopups) {  // Options: hit popups
-        const Popup& p = popups_.back();
-        const float age = float(now - p.t0);
-        if (age <= 0.7f) {
-            const float pop = 1.0f + 0.25f * std::exp(-age * 20.0f);
-            const float al = age < 0.4f ? 1.0f : 1.0f - (age - 0.4f) / 0.3f;
-            const float y = py - age * 26.0f;
-            int ri = -1;
-            for (int k = 0; k < kRatingCount; ++k)
-                if (p.text == ratingInfo(Rating(k)).name) ri = k;
-            if (ri >= 0 && ui.rating(ri, {px, y + 10}, 0.7f * pop, al)) {  // Psych: the rating picture and combo digits
-                if (p.combo >= 10) ui.combo(p.combo, {px, y + 90}, 0.5f, al);
-            } else {
+// Rating popups and the countdown: under the notes, as Psych adds its
+// comboGroup and countdown sprites before the notes.
+void PlayState::drawUnderNotes() {
+    App& a = app();
+    const Settings& s = a.settings;
+    const double now = a.now;
+    const PsychUi& ui = psychUi();
+    float comboAlpha = 1;
+    if (!popups_.empty() && s.hitPopups && !s.hideHud && hudShown("comboGroup", &comboAlpha)) {  // Options: hit popups
+        if (ui.active() && ui.ratingSize(0).x > 0) {
+            // Psych's popUpScore: the rating at FlxG.width * 0.35 - 40, 60 pixels
+            // over the middle, at 70%; the combo digits (three at least) at 50%,
+            // 43 pixels apart, 80 pixels under the middle. Each falls with its own
+            // random speed and fades out in 0.2 s: the rating a beat later, the
+            // digits two beats later. Misses show nothing.
+            for (const Popup& p : popups_) {
+                if (p.rating < 0) continue;
+                const float tau = float((now - p.t0) * rate_);
+                if (tau > 2.0f * p.beat + 0.2f) continue;
+                uint32_t r = p.seed;
+                auto rnd = [&r] {
+                    r ^= r << 13;
+                    r ^= r >> 17;
+                    r ^= r << 5;
+                    return float(r & 0xFFFFFF) / float(0x1000000);
+                };
+                auto irange = [&](int lo, int hi) { return float(lo + int(rnd() * float(hi - lo + 1))); };
+                const Vector2 rs = ui.ratingSize(std::min(p.rating, 3));
+                if (rs.x <= 0) continue;
+                const float rk = std::floor(rs.x * 0.7f) / rs.x;
+                const float rvx = -irange(0, 10), rvy = -irange(140, 175);
+                const float rx = gfx::W * 0.35f - 40.0f + rvx * tau;
+                const float ry = (gfx::H - rs.y) * 0.5f - 60.0f + rvy * tau + 0.5f * 550.0f * tau * tau;
+                const float ra = tau < p.beat ? 1.0f : std::max(0.0f, 1.0f - (tau - p.beat) / 0.2f);
+                if (ra > 0.002f) ui.ratingAt(std::min(p.rating, 3), rx, ry, rk, ra * comboAlpha);
+                std::string digits = std::to_string(std::max(0LL, p.combo));
+                while (digits.size() < 3) digits.insert(digits.begin(), '0');
+                const float da = tau < 2.0f * p.beat ? 1.0f : std::max(0.0f, 1.0f - (tau - 2.0f * p.beat) / 0.2f);
+                for (size_t i = 0; i < digits.size(); ++i) {
+                    const int d = digits[i] - '0';
+                    const float ay = irange(200, 300), vy = -irange(140, 160), vx = rnd() * 10.0f - 5.0f;
+                    const Vector2 ns = ui.numSize(d);
+                    if (ns.x <= 0 || da <= 0.002f) continue;
+                    const float nk = std::floor(ns.x * 0.5f) / ns.x;
+                    const float x = gfx::W * 0.35f + 43.0f * float(i) - 90.0f + vx * tau;
+                    const float y = (gfx::H - ns.y) * 0.5f + 80.0f + vy * tau + 0.5f * ay * tau * tau;
+                    ui.numAt(d, x, y, nk, da * comboAlpha);
+                }
+                if (!p.timing.empty() && ra > 0.002f)
+                    ui.text(p.timing, rx + rs.x * rk * 0.5f, ry - 22.0f, 20, fade(WHITE, ra * comboAlpha), 0, 1.25f);
+            }
+        } else {
+            const float px = s.middlescroll ? 1030.0f : gfx::W / 2;
+            const float py = s.downscroll ? 400.0f : 300.0f;
+            const Popup& p = popups_.back();
+            const float age = float(now - p.t0);
+            if (age <= 0.7f) {
+                const float pop = 1.0f + 0.25f * std::exp(-age * 20.0f);
+                const float al = (age < 0.4f ? 1.0f : 1.0f - (age - 0.4f) / 0.3f) * comboAlpha;
+                const float y = py - age * 26.0f;
                 gfx::text(FontId::Title, p.text, px, y, 46 * pop, fade(p.c, al), Align::Center, 2.5f);
                 if (p.combo >= 3 && p.text != "MISS")
                     gfx::text(FontId::Ui, "x" + std::to_string(p.combo), px, y + 52, 34 * pop, fade(WHITE, al), Align::Center, 2.0f);
+                if (!p.timing.empty()) gfx::text(FontId::Ui, p.timing, px, y - 26, 22, fade(kIvory, al * 0.9f), Align::Center, 1.5f);
             }
-            if (!p.timing.empty()) gfx::text(FontId::Ui, p.timing, px, y - 26, 22, fade(kIvory, al * 0.9f), Align::Center, 1.5f);
         }
     }
     // countdown
@@ -1292,8 +1442,11 @@ void PlayState::drawHud() {
         static const char* psychWords[4] = {"3", "2", "1", "GO!"};
         if (b >= -4 && b <= -1) {
             const float sc = 1.0f + 0.35f * std::pow(1.0f - frac, 3.0f);
-            if (ui.active()) {  // Psych: nothing on "three", then ready, set, go
-                if (b > -4) ui.countdown(b + 3, {gfx::W / 2, gfx::H / 2}, 1.0f - frac);
+            if (ui.active()) {
+                // Psych: nothing on "three", then ready, set, go in the middle of
+                // the screen, each fading out over a beat (cubeInOut).
+                const float e = frac <= 0.5f ? 4.0f * frac * frac * frac : 1.0f - 4.0f * std::pow(1.0f - frac, 3.0f);
+                if (b > -4) ui.countdown(b + 3, {gfx::W / 2, gfx::H / 2}, 1.0f - e);
             } else {
                 gfx::glowText(FontId::Title, psych_ ? psychWords[b + 4] : words[b + 4], gfx::W / 2, 300 - 40 * sc, 96 * sc,
                               fade(kGold, 1.0f - frac), Color{255, 170, 60, 255});
@@ -1325,17 +1478,20 @@ void PlayState::drawPsychPause() {
     App& a = app();
     const PsychUi& ui = psychUi();
     const float t = float(a.now - pausedAt_);
-    DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, std::min(0.6f, t / 0.4f * 0.6f)));
+    auto quartInOut = [](float x) { return x <= 0.5f ? 8.0f * x * x * x * x : 1.0f - 8.0f * std::pow(1.0f - x, 4.0f); };
+    DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.6f * quartInOut(saturate(t / 0.4f))));
     std::string diff = req_.diff;
     for (char& c : diff) c = char(std::toupper((unsigned char)c));
-    std::vector<std::string> info = {songNameShown_.empty() ? chart_.title : songNameShown_, diff,
-                                     "Blueballed: " + std::to_string(a.blueballed)};
-    if (cfg_.practice) info.push_back("PRACTICE MODE");
-    if (cfg_.botplay) info.push_back("BOTPLAY");
-    for (size_t i = 0; i < info.size(); ++i) {
-        const float k = saturate((t - 0.3f - 0.2f * float(i)) / 0.4f);
-        ui.text(info[i], gfx::W - 20, 15.0f + 32.0f * float(i) + 5.0f * k - 5.0f, 32, fade(WHITE, k), 1, 0);
+    // Psych: the song, the difficulty and the deaths at the top right, each
+    // sliding 5 pixels down while it fades in (0.4 s, quartInOut, 0.3, 0.5 and
+    // 0.7 s after pausing); PRACTICE MODE shown at once under them.
+    const std::string info[3] = {songNameShown_.empty() ? chart_.title : songNameShown_, diff, "Blueballed: " + std::to_string(a.blueballed)};
+    for (int i = 0; i < 3; ++i) {
+        const float k = quartInOut(saturate((t - 0.3f - 0.2f * float(i)) / 0.4f));
+        ui.text(info[i], gfx::W - 20, 15.0f + 32.0f * float(i) + 5.0f * k, 32, fade(WHITE, k), 1, 0);
     }
+    if (cfg_.practice) ui.text("PRACTICE MODE", gfx::W - 20, 15.0f + 101.0f, 32, WHITE, 1, 0);
+    if (cfg_.botplay) ui.text("BOTPLAY", gfx::W - 20, 15.0f + (cfg_.practice ? 133.0f : 101.0f), 32, WHITE, 1, 0);
     static const char* items[kPauseItems] = {"Resume", "Restart Song", "Options", "Exit to menu"};
     for (int i = 0; i < kPauseItems; ++i) {
         const float target = float(i) - pauseScroll_;

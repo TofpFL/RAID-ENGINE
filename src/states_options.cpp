@@ -50,6 +50,7 @@ public:
              &s.offsetMs, -300, 300, 1},
             {Row::Action, "Calibrate offset...", "Tap along to a metronome to measure your offset."},
             {Row::Bool, "Show timing (ms)", "Shows how early or late each hit was.", &s.showTimings},
+            {Row::Bool, "Opponent notes", "OFF hides the opponent's receptors and notes, as Psych's Opponent Notes.", &s.opponentNotes},
             {Row::Bool, "Opponent strums", "Light up the opponent's receptors when they sing.", &s.opponentStrums},
             {Row::Bool, "Note splashes", "Bursts of light on DIVINE hits.", &s.noteSplashes},
             {Row::Bool, "Touch controls", "Tap the lanes on a touchscreen (a mouse click counts as a tap).", &s.touchControls},
@@ -66,7 +67,12 @@ public:
             {Row::Bool, "VSync", "Waits for the screen's refresh. OFF: the frame limit below decides (most precise input).", &s.vsync},
             {Row::Choice, "Frame limit", "Higher limits make notes smoother. Input is polled at ~1000 Hz regardless.",
              nullptr, nullptr, 0, 0, 0, &s.fpsCap, {60, 120, 144, 165, 240, 360, 500, 0}},
-            {Row::Bool, "Show FPS", "", &s.showFps},
+            {Row::Bool, "Show FPS", "The frame rate at the top left.", &s.showFps},
+            {Row::Bool, "FPS: memory", "Under the frame rate: the memory the game uses, and the most it has used.", &s.fpsMemory},
+            {Row::Bool, "FPS: frame times", "How long updating and drawing take, the slowest frame of the last second, and a graph.",
+             &s.fpsFrameTimes},
+            {Row::Bool, "FPS: processor and RAM", "How much of the processor the game uses, and the system's memory in use.", &s.fpsUsage},
+            {Row::Bool, "FPS: hardware", "The processor, graphics card, OpenGL version and system the game runs on.", &s.fpsHardware},
             {Row::Bool, "Low detail", "Fewer particles and effects for slower machines.", &s.lowDetail},
             {Row::Bool, "Flashing lights", "Screen flashes on some beats.", &s.flashing},
             {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
@@ -84,6 +90,25 @@ public:
             {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
             {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
+            {Row::Bool, "Hide HUD", "Hides the health bar, the icons, the score line and the ratings, as Psych's Hide HUD.", &s.hideHud},
+            {Row::Bool, "Score text zoom on hit", "The score line grows a little on each note you hit, as in Psych.", &s.scoreZoom},
+            {Row::Bool, "Botplay text", "BOTPLAY (or REPLAY) on screen while the game plays by itself.", &s.botplayText},
+            {Row::Bool, "Combo stacking", "Ratings and combo numbers pile up. OFF: only the latest one, easier to read.",
+             &s.comboStacking},
+            {Row::Choice, "Pause screen song", "The pause menu's music with the Psych Engine interface.", nullptr, nullptr, 0, 0, 0,
+             &s.pauseMusic, {0, 1, 2}, {"None", "Breakfast", "Tea Time"}},
+            {Row::Header, "RENDERING", ""},
+            {Row::Bool, "Rendering mode", "Songs play by themselves and are recorded to a video in renders/, frame by frame, as in JS Engine and "
+             "H-Slice: smooth even if the computer cannot keep up. Needs ffmpeg next to the game or installed. ESC stops.", &s.renderMode},
+            {Row::Choice, "Video size", "", nullptr, nullptr, 0, 0, 0, &s.renderSize, {0, 1, 2, 3},
+             {"1280x720", "1920x1080", "2560x1440", "3840x2160"}},
+            {Row::Choice, "Video frame rate", "", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
+            {Row::Choice, "Video encoder", "x264 and x265 use the processor; the NVIDIA, AMD and Intel ones use the graphics card "
+             "(much faster, when the card has one).", nullptr, nullptr, 0, 0, 0, &s.renderEncoder, {0, 1, 2, 3, 4, 5, 6},
+             {"H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
+            {Row::Choice, "Video bitrate", "Higher is sharper and bigger. Spam charts move a lot: 20 Mbps or more.", nullptr, nullptr, 0,
+             0, 0, &s.renderBitrate, {5, 10, 20, 40, 80}, {"5 Mbps", "10 Mbps", "20 Mbps", "40 Mbps", "80 Mbps"}},
+            {Row::Bool, "Video audio", "The song (instrumental and voices) in the video.", &s.renderAudio},
             {Row::Header, "AUDIO", ""},
             {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
             {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
@@ -119,7 +144,7 @@ public:
             bool controls = false;
             std::vector<Row> kept;
             for (Row& r : rows_) {
-                if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0;
+                if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0 || r.label == "RENDERING";  // no ffmpeg on Android
                 if (controls || r.label == "Fullscreen" || r.label == "Touch controls") continue;
                 kept.push_back(std::move(r));
             }

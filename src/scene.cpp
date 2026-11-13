@@ -1015,7 +1015,7 @@ void Scene::update(double dt, double stepMs, bool playerHolding) {
     // Built-in effects keep their own clock.
     auto tick = [&](const ShaderPtr& sh) {
         if (!sh || sh->timeRate == 0) return;
-        std::vector<float>& t = sh->floats["uTime"];
+        std::vector<float>& t = sh->floats[sh->timeName];
         if (t.empty()) t.push_back(0);
         t[0] += float(dt) * sh->timeRate;
     };

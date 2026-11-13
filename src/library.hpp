@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +38,9 @@ public:
     // first: a song looks there for what its own folders do not have, since
     // mods reuse each other's assets.
     std::vector<std::string> sharedAssetRootsFor(const SongEntry& e) const { return sharedRootsFor(assets_, e); }
+    // The editors: every mod's asset folders by mod (its folder in mods/), and all of them.
+    const std::map<std::string, std::vector<std::string>>& packRoots() const { return assets_.packRoots; }
+    const std::vector<std::string>& allAssetRoots() const { return assets_.sharedRoots; }
 
     // Heavy work (decoding, composing, parsing). Thread-safe.
     // extraKeys = false: every chart gets 4 keys (Options, Extra keys).

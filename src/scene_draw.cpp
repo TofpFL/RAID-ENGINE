@@ -165,7 +165,7 @@ void SceneRenderer::drawFiltered(scene::Scene& sc, const std::vector<scene::Shad
                 if (rt.id) UnloadRenderTexture(rt);
                 rt = LoadRenderTexture(int(w), int(h));
             }
-            BeginTextureMode(rt);
+            gfx::beginTexture(rt);
             ClearBackground(BLANK);
         }
         BeginShaderMode(chain[i]->sh);
@@ -176,7 +176,7 @@ void SceneRenderer::drawFiltered(scene::Scene& sc, const std::vector<scene::Shad
         EndShaderMode();
         rlSetBlendMode(BLEND_ALPHA);
         if (!last) {
-            EndTextureMode();
+            gfx::endTexture();
             in = &pingPong_[k].texture;
             k ^= 1;
         }

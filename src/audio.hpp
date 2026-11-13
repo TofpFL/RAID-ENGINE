@@ -68,6 +68,13 @@ public:
 
     void audioCallback(float* out, unsigned frames);  // audio thread
 
+    // Rendering mode: the device plays nothing and the game mixes the song
+    // itself, one video frame at a time; the song clock is then exactly the
+    // position mixed so far.
+    void setOffline(bool on);
+    bool offline() const { return offline_.load(); }
+    void mixOffline(float* out, unsigned frames);  // the next `frames` stereo frames
+
 private:
     double estimate(double now) const;
 
@@ -84,7 +91,11 @@ private:
     std::atomic<float> fadeStep_{0.0f};
     std::atomic<bool> loop_{false};
     std::atomic<bool> stalled_{false};
+    std::atomic<bool> offline_{false};
     void hintStreams(double sec);  // tells streamed tracks where playing goes on
+    // Mixes `frames` frames from `pos` into out (pos moves on); true when a
+    // streamed track has not decoded that part yet (silence, pos kept).
+    bool mixTracks(float* out, unsigned frames, double& pos);
     std::atomic<double> loopStart_{0}, loopEnd_{0};
     float curVol_[kTrackCount] = {1, 1, 1};
     float fadeGain_ = 1.0f;

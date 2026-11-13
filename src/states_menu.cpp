@@ -198,6 +198,11 @@ public:
             sfxPlay(sel == 4 ? Sfx::Cancel : Sfx::Confirm);
         }
         if (a.input.back()) { sfxPlay(Sfx::Cancel); a.change(makeTitle()); }
+        // 7: the editors (chart, character, stage, events), as Psych's Master Editor Menu.
+        if (a.input.pressed(KEY_SEVEN) || a.input.pressed(KEY_KP_7)) {
+            sfxPlay(Sfx::Confirm);
+            a.change(makeEditorMenu());
+        }
     }
     void draw() override {
         App& a = app();
@@ -227,7 +232,7 @@ public:
                 gfx::drawNote(gfx::kLeft, {gfx::W / 2 + w, y + size * 0.55f}, 44);
             }
         }
-        hints("UP/DOWN select   ENTER confirm   ESC back   F11 fullscreen");
+        hints("UP/DOWN select   ENTER confirm   7 editors   ESC back   F11 fullscreen");
         gfx::text(FontId::Ui, a.library.report(), 16, gfx::H - 70, 20, fade(kIvory, 0.6f));
         gfx::endCanvas();
     }
@@ -329,8 +334,8 @@ public:
 
         if (modsOpen_) {
             Modifiers& m = a.mods;
-            if (in.up()) { modSel_ = (modSel_ + 3) % 4; sfxPlay(Sfx::Scroll); }
-            if (in.down()) { modSel_ = (modSel_ + 1) % 4; sfxPlay(Sfx::Scroll); }
+            if (in.up()) { modSel_ = (modSel_ + kModRows - 1) % kModRows; sfxPlay(Sfx::Scroll); }
+            if (in.down()) { modSel_ = (modSel_ + 1) % kModRows; sfxPlay(Sfx::Scroll); }
             const int dir = in.left() ? -1 : (in.right() ? 1 : 0);
             if (dir || in.accept()) {
                 sfxPlay(Sfx::Scroll);
@@ -338,6 +343,15 @@ public:
                 if (modSel_ == 1) m.botplay = !m.botplay;
                 if (modSel_ == 2) m.practice = !m.practice;
                 if (modSel_ == 3) m.mirror = !m.mirror;
+                if (modSel_ == 4) {
+                    m.scrollType = (m.scrollType + (dir ? dir : 1) + 3) % 3;
+                    m.scrollValue = m.scrollType == 2 ? 2.5 : 1.0;
+                }
+                if (modSel_ == 5 && m.scrollType != 0) {
+                    const double step = m.scrollType == 1 ? 0.05 : 0.1;
+                    m.scrollValue = std::round((m.scrollValue + step * (dir ? dir : 1)) / step) * step;
+                    m.scrollValue = m.scrollType == 1 ? clampv(m.scrollValue, 0.25, 5.0) : clampv(m.scrollValue, 0.5, 10.0);
+                }
             }
             if (in.back() || in.pressed(KEY_TAB)) modsOpen_ = false;
             return;
@@ -481,8 +495,10 @@ public:
             if (m.botplay) ms += "  Botplay";
             if (m.practice) ms += "  Practice";
             if (m.mirror) ms += "  Opponent";
-            gfx::text(FontId::Ui, ms, 1035, 586, 22, (m.rate != 1.0 || m.botplay || m.practice || m.mirror) ? kGold : fade(kIvory, 0.5f),
-                      Align::Center);
+            if (m.scrollType == 1) ms += TextFormat("  Scroll x%.2f", m.scrollValue);
+            if (m.scrollType == 2) ms += TextFormat("  Scroll %.1f", m.scrollValue);
+            gfx::text(FontId::Ui, ms, 1035, 586, 22,
+                      (m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0) ? kGold : fade(kIvory, 0.5f), Align::Center);
         }
         if (a.library.customCount() == 0) {
             const std::string tip = a.touchMode
@@ -536,14 +552,19 @@ private:
     void drawMods() {
         const Modifiers& m = app().mods;
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 150});
-        DrawRectangleRounded({390, 180, 500, 330}, 0.08f, 12, Color{16, 10, 30, 245});
-        gfx::text(FontId::Title, "MODIFIERS", 640, 200, 38, kGold, Align::Center, 2.0f);
-        const std::string rows[4] = {TextFormat("Playback rate   %.2fx", m.rate), std::string("Botplay   ") + (m.botplay ? "ON" : "OFF"),
-                                     std::string("Practice (no death)   ") + (m.practice ? "ON" : "OFF"),
-                                     std::string("Play as the opponent   ") + (m.mirror ? "ON" : "OFF")};
-        for (int i = 0; i < 4; ++i)
-            gfx::text(FontId::Ui, rows[i], 640, 270.0f + i * 52, 32, i == modSel_ ? kGold : kIvory, Align::Center, 1.5f);
-        gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 480, 18,
+        DrawRectangleRounded({370, 140, 540, 430}, 0.08f, 12, Color{16, 10, 30, 245});
+        gfx::text(FontId::Title, "MODIFIERS", 640, 158, 38, kGold, Align::Center, 2.0f);
+        static const char* scrollTypes[3] = {"the chart's", "multiplied", "constant"};
+        const std::string rows[kModRows] = {
+            TextFormat("Playback rate   %.2fx", m.rate), std::string("Botplay   ") + (m.botplay ? "ON" : "OFF"),
+            std::string("Practice (no death)   ") + (m.practice ? "ON" : "OFF"),
+            std::string("Play as the opponent   ") + (m.mirror ? "ON" : "OFF"), std::string("Scroll speed   ") + scrollTypes[m.scrollType],
+            m.scrollType == 0 ? std::string("Scroll value   -")
+                              : std::string(TextFormat(m.scrollType == 1 ? "Scroll value   x%.2f" : "Scroll value   %.1f", m.scrollValue))};
+        for (int i = 0; i < kModRows; ++i)
+            gfx::text(FontId::Ui, rows[i], 640, 222.0f + i * 50, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
+                      Align::Center, 1.5f);
+        gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 532, 18,
                   fade(kIvory, 0.6f), Align::Center);
     }
 
@@ -555,6 +576,7 @@ private:
     std::string pendingId_, previewId_;
     bool previewPlaying_ = false;
     bool modsOpen_ = false;
+    static constexpr int kModRows = 6;
     int modSel_ = 0;
     bool importing_ = false;
     std::string note_;

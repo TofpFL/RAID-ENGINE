@@ -279,15 +279,30 @@ void waitForReaders() {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
 }
 
-// A long track keeps the blocks around the play position: the others go.
+// The blocks kept at holdPos ([first, last) or an empty range).
+void holdRange(const PcmStream& s, size_t& first, size_t& last) {
+    const size_t h = s.holdPos.load(std::memory_order_relaxed);
+    first = last = 0;
+    if (h == ~size_t(0) || h >= s.total) return;
+    first = h / PcmStream::kBlockFrames;
+    last = std::min(s.blocks, first + PcmStream::kHoldBlocks);
+}
+
+// A long track keeps the blocks around the play position (and at holdPos):
+// the others go.
 void evictFar(PcmStream& s, size_t pb, size_t end, std::vector<int16_t*>& doomed) {
-    if (s.inMemory.load(std::memory_order_relaxed) < PcmStream::kBehindBlocks + PcmStream::kAheadBlocks + 16) return;
+    if (s.inMemory.load(std::memory_order_relaxed) <
+        PcmStream::kBehindBlocks + PcmStream::kAheadBlocks + PcmStream::kHoldBlocks + 16)
+        return;
     const size_t lo = pb > PcmStream::kBehindBlocks ? pb - PcmStream::kBehindBlocks : 0;
+    size_t hFirst, hLast;
+    holdRange(s, hFirst, hLast);
     for (size_t b = 0; b < s.blocks; ++b) {
         if (b >= lo && b < end) {
             b = end - 1;
             continue;
         }
+        if (b >= hFirst && b < hLast) continue;
         if (int16_t* p = s.block[b].exchange(nullptr, std::memory_order_seq_cst)) doomed.push_back(p);
     }
     if (doomed.empty()) return;
@@ -316,6 +331,12 @@ void decodeLoop(std::weak_ptr<PcmStream> weak, std::unique_ptr<Converter> conv) 
             if (target == ~size_t(0) && !s->windowed)
                 for (size_t b = 0; b < pb; ++b)
                     if (!s->get(b)) { target = b; break; }
+            if (target == ~size_t(0) && s->windowed) {  // where a loop jumps back to
+                size_t hFirst, hLast;
+                holdRange(*s, hFirst, hLast);
+                for (size_t b = hFirst; b < hLast; ++b)
+                    if (!s->get(b)) { target = b; break; }
+            }
         }
         if (target == ~size_t(0)) {
             if (!s->windowed) {

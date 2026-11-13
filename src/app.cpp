@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <thread>
 #include <typeinfo>
 
@@ -12,6 +14,8 @@
 #include "common.hpp"
 #include "gfx.hpp"
 #include "platform.hpp"
+#include "process.hpp"
+#include "sysinfo.hpp"
 #include "raylib.h"
 
 namespace gh {
@@ -77,7 +81,20 @@ void App::applyVolumes() {
     sfxSetVolume(settings.sfxVol);
 }
 
-void App::saveSettings() { settings.save(base + "settings.cfg"); }
+void App::saveSettings() { settings.save(userDir + "settings.cfg"); }
+
+// The first time the per-user folder is used, what the game's folder has
+// (settings, scores, saves, replays) is copied over; nothing is deleted.
+static void moveInUserData(const std::string& from, const std::string& to) {
+    namespace fs = std::filesystem;
+    auto p = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
+    std::error_code ec;
+    for (const char* f : {"settings.cfg", "scores.cfg"})
+        if (!fs::exists(p(to + f), ec) && fs::exists(p(from + f), ec)) fs::copy_file(p(from + f), p(to + f), ec);
+    for (const char* d : {"saves", "replays"})
+        if (!fs::exists(p(to + d), ec) && fs::is_directory(p(from + d), ec))
+            fs::copy(p(from + d), p(to + d), fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+}
 
 void App::volumeKeys() {
     if (platform::kAndroid) return;  // phones have their own volume buttons
@@ -118,6 +135,14 @@ void App::drawVolumeTray() {
     }
     gfx::text(gfx::FontId::Ui, settings.muted ? "MUTED" : TextFormat("VOLUME %d%%", level * 10), gfx::W / 2, y + 42, 18,
               WHITE, gfx::Align::Center, 1.0f);
+}
+
+void App::psychUiForSong(const std::vector<std::string>& modRoots) {
+    PsychUi& ui = psychUi();
+    if (!ui.active() || psychFolderInUse.empty()) return;
+    std::string rep;
+    if (ui.load(psychFolderInUse, rep, modRoots) > 0) ui.setActive(true);
+    ui.applySounds();
 }
 
 void App::applyPsychUi() {
@@ -196,6 +221,7 @@ int App::run(int argc, char** argv) {
         else if (!std::strcmp(a, "--check-charts")) checkCharts = true;
         else if (!std::strcmp(a, "--touch")) touchMode = true;
         else if (!std::strcmp(a, "--perf")) perf = true;  // frame times on stdout every second
+        else if (!std::strcmp(a, "--render")) renderCli = true;  // record the --autoplay song to renders/
         else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
     if (listSongs) {
@@ -233,6 +259,7 @@ int App::run(int argc, char** argv) {
         return 0;
     }
 
+    const bool baseGiven = !base.empty();
     if (platform::kAndroid) {
         base = platform::dataDir();
         platform::prepareDataDir(base);
@@ -243,8 +270,18 @@ int App::run(int argc, char** argv) {
         std::string cwd = std::string(GetWorkingDirectory()) + "/";
         if (FileExists((cwd + "assets/fonts/Rajdhani-Bold.ttf").c_str())) base = cwd;
     }
-    settings.load(base + "settings.cfg");
-    scores.load(base + "scores.cfg");
+    userDir = base;
+    if (!platform::kAndroid && !baseGiven && !FileExists((base + "portable.txt").c_str())) {
+        const std::string u = platform::userDir();
+        std::error_code ec;
+        if (!u.empty() && (std::filesystem::create_directories(std::filesystem::path(std::u8string(u.begin(), u.end())), ec), !ec ||
+                           DirectoryExists(u.c_str()))) {
+            moveInUserData(base, u);
+            userDir = u;
+        }
+    }
+    settings.load(userDir + "settings.cfg");
+    scores.load(userDir + "scores.cfg");
 
     unsigned flags = platform::kAndroid ? 0u : (FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     if (settings.vsync) flags |= FLAG_VSYNC_HINT;
@@ -299,14 +336,32 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "credits") state_ = makeCredits();
     else if (autoRun.state == "calibration") state_ = makeCalibration();
     else if (autoRun.state == "modpacks") state_ = makeModPacks();
+    else if (autoRun.state == "editors") state_ = makeEditorMenu();
+    else if (autoRun.state == "character-editor") state_ = makeCharacterEditor();
+    else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
+    else if (autoRun.state == "event-editor") state_ = makeEventEditor();
     else state_ = makeTitle();
     state_->enter();
     logScreen(*state_);
 
-    double last = nowSec(), nextFrame = last;
+    double last = nowSec(), nextFrame = last, lastReal = last;
     while (!quit && !WindowShouldClose()) {
         PollInputEvents();
-        now = nowSec();
+        if (renderer.active()) {
+            // Rendering mode: one video frame of game time per loop, as fast
+            // as the computer goes (no frame limit, no waiting for the screen).
+            renderClock_ += renderer.frameTime();
+            now = renderClock_;
+            input.poll(now);
+            dt = renderer.frameTime();
+            last = now;
+            const double real = nowSec();
+            if (real > lastReal) fps = fps * 0.95f + float(1.0 / (real - lastReal)) * 0.05f;
+            lastReal = real;
+            frame();
+            continue;
+        }
+        now = nowSec() + clockShift_;
         input.poll(now);
         if (touchMode) touch.update(input, now);
         const int cap = settings.vsync ? 0 : settings.fpsCap;
@@ -320,12 +375,15 @@ int App::run(int argc, char** argv) {
             nextFrame += 1.0 / cap;
             if (now - nextFrame > 0.1) nextFrame = now;
         }
-        dt = std::min(0.1, now - last);
+        dt = clampv(now - last, 0.0, 0.1);
         last = now;
+        lastReal = nowSec();
         if (dt > 0) fps = fps * 0.95f + float(1.0 / dt) * 0.05f;
         frame();
     }
 
+    stopRender();  // closing the game mid-song keeps what was recorded
+    VideoRenderer::waitIdle(120);
     state_.reset();
     next_.reset();
     waitForBackgroundJobs();
@@ -379,13 +437,48 @@ void App::frame() {
     }
 
     const double tDraw = nowSec();
+    // Rendering mode: the frame is drawn into the video's picture, sent to
+    // ffmpeg with this frame's audio, and shown scaled in the window.
+    const bool rendering = renderer.active();
     BeginDrawing();
     ClearBackground(BLACK);
+    if (rendering) {
+        gfx::beginFrameTarget(renderer.target());
+        ClearBackground(BLACK);
+    }
     state_->draw();
+    if (rendering) {
+        gfx::drawLetterbox();
+        gfx::endFrameTarget();
+        if (!renderer.captureFrame()) {
+            stopRender();
+        } else {
+            const unsigned n = renderer.audioFramesFor(renderer.frames() - 1);
+            renderAudio_.resize(size_t(n) * 2);
+            mixer.mixOffline(renderAudio_.data(), n);
+            renderer.addAudio(renderAudio_.data(), n);
+        }
+        if (renderer.active()) {
+            const Texture2D& tex = renderer.target().texture;
+            const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
+            const float s = std::min(sw / float(tex.width), sh / float(tex.height));
+            DrawTexturePro(tex, {0, 0, float(tex.width), -float(tex.height)},
+                           {(sw - tex.width * s) * 0.5f, (sh - tex.height * s) * 0.5f, tex.width * s, tex.height * s}, {0, 0}, 0, WHITE);
+        }
+    }
     gfx::beginCanvas();
     if (fade_ > 0) DrawRectangleRec({-10, -10, gfx::W + 20, gfx::H + 20}, gfx::fade(BLACK, fade_));
-    if (settings.showFps) gfx::text(gfx::FontId::Ui, TextFormat("%d FPS", int(fps + 0.5f)), 8, 4, 20, WHITE, gfx::Align::Left, 1.5f);
+    drawFpsPanel();
     drawVolumeTray();
+    if (renderer.active()) drawRenderBadge();
+    const std::string msg = VideoRenderer::takeMessage();
+    if (!msg.empty()) notify(msg, 10.0);
+    if (now < noticeUntil_ && !notice_.empty()) {
+        const float al = float(clampv(noticeUntil_ - now, 0.0, 1.0));
+        const Vector2 sz = gfx::measure(gfx::FontId::Ui, notice_, 20);
+        DrawRectangleRec({gfx::W * 0.5f - sz.x * 0.5f - 12, gfx::H - 44, sz.x + 24, 32}, gfx::fade(BLACK, 0.75f * al));
+        gfx::text(gfx::FontId::Ui, notice_, gfx::W * 0.5f, gfx::H - 40, 20, gfx::fade(WHITE, al), gfx::Align::Center, 1.0f);
+    }
     gfx::endCanvas();
     gfx::drawLetterbox();
     if (touchMode) touch.draw();
@@ -400,7 +493,13 @@ void App::frame() {
         }
         if (autoRun.quitAfter > 0 && t >= autoRun.quitAfter) quit = true;
     }
-    SwapScreenBuffer();
+    // While recording, the window only needs a preview: showing ~30 frames a
+    // second leaves the rest of the time to drawing and encoding.
+    const double realNow = nowSec();
+    if (!rendering || realNow - lastSwap_ >= 1.0 / 30.0) {
+        SwapScreenBuffer();
+        lastSwap_ = realNow;
+    }
 
     // Frame timing: update, draw (including the buffer swap), worst frame of the last second.
     const double tEnd = nowSec();
@@ -408,6 +507,7 @@ void App::frame() {
     updateMs = updateMs * 0.9f + upd * 0.1f;
     drawMs = drawMs * 0.9f + drw * 0.1f;
     perfWorst_ = std::max(perfWorst_, float(dt * 1000.0));
+    frameHist_[frameHistPos_++ % frameHist_.size()] = float(dt * 1000.0);
     perfUpd_ += upd;
     perfDraw_ += drw;
     ++perfFrames_;
@@ -420,6 +520,156 @@ void App::frame() {
         perfFrames_ = 0;
         perfUpd_ = perfDraw_ = perfWorst_ = 0;
     }
+}
+
+// ------------------------------------------------------------ FPS panel --
+
+void App::drawFpsPanel() {
+    const Settings& s = settings;
+    if (!s.showFps && !s.fpsMemory && !s.fpsFrameTimes && !s.fpsUsage && !s.fpsHardware) return;
+    // Memory and processor use change slowly and cost a system call to read:
+    // twice a second is enough.
+    if ((s.fpsMemory || s.fpsUsage) && now - statsAt_ >= 0.5) {
+        const double cpu = sysinfo::processCpuSeconds(), wall = nowSec();
+        if (statsAt_ > 0 && wall > cpuAt_) {
+            const int threads = std::max(1, sysinfo::hardware().threads);
+            cpuUse_ = float(std::clamp((cpu - cpuSecs_) / (wall - cpuAt_) / threads * 100.0, 0.0, 100.0));
+        }
+        cpuSecs_ = cpu;
+        cpuAt_ = wall;
+        memNow_ = sysinfo::processMemory();
+        memPeak_ = std::max<unsigned long long>(sysinfo::peakProcessMemory(), memNow_);
+        if (s.fpsUsage) sysUsed_ = sysinfo::systemMemoryUsed();
+        statsAt_ = now;
+    }
+    std::vector<std::pair<std::string, Color>> lines;
+    const Color dim{205, 205, 215, 255};
+    if (s.showFps) {
+        // Red at half the frame limit or under, as Psych's counter.
+        const int f = int(fps + 0.5f);
+        int cap = s.fpsCap > 0 && !s.vsync ? s.fpsCap : GetMonitorRefreshRate(GetCurrentMonitor());
+        if (cap <= 0) cap = 60;
+        lines.push_back({TextFormat("%d FPS", f), f <= cap / 2 ? Color{255, 90, 90, 255} : WHITE});
+    }
+    if (s.fpsMemory)
+        lines.push_back({"Memory: " + (memNow_ ? sysinfo::formatBytes(memNow_) : std::string("?")) +
+                             (memPeak_ ? "  (peak " + sysinfo::formatBytes(memPeak_) + ")" : std::string()),
+                         dim});
+    if (s.fpsFrameTimes)
+        lines.push_back({TextFormat("Frame %.2f ms  (update %.2f, draw %.2f, worst %.1f)", dt * 1000.0, updateMs, drawMs, worstFrameMs), dim});
+    const sysinfo::Hardware& hw = sysinfo::hardware();
+    if (s.fpsUsage) {
+        std::string l = TextFormat("CPU %.0f%% of %d threads", cpuUse_, hw.threads);
+        if (hw.totalRam) l += "   RAM " + (sysUsed_ ? sysinfo::formatBytes(sysUsed_) + " / " : std::string()) + sysinfo::formatBytes(hw.totalRam);
+        lines.push_back({l, dim});
+    }
+    if (s.fpsHardware) {
+        lines.push_back({hw.cpu, dim});
+        if (!hw.gpu.empty()) lines.push_back({hw.gpu, dim});
+        if (!hw.gl.empty()) lines.push_back({"OpenGL " + hw.gl, dim});
+        if (!hw.os.empty()) lines.push_back({hw.os, dim});
+    }
+    const float size = 17, lineH = 20;
+    float w = 0;
+    for (auto& l : lines) w = std::max(w, gfx::measure(gfx::FontId::Ui, l.first, size).x);
+    const float graphH = s.fpsFrameTimes ? 44.0f : 0.0f;
+    if (s.fpsFrameTimes) w = std::max(w, 240.0f);
+    const bool panel = lines.size() > 1 || graphH > 0;
+    if (panel) DrawRectangleRec({2, 2, w + 14, lines.size() * lineH + graphH + 8}, gfx::fade(BLACK, 0.55f));
+    float y = 5;
+    for (auto& l : lines) {
+        gfx::text(gfx::FontId::Ui, l.first, 8, y, l.first == lines.front().first && s.showFps ? 20.0f : size, l.second, gfx::Align::Left, 1.5f);
+        y += lineH;
+    }
+    if (graphH > 0) {
+        // One bar per frame (oldest on the left), 0 to 50 ms high; green under
+        // 17 ms (60 FPS), yellow under 34, red above.
+        const float gx = 8, gy = y + 4, gh = graphH - 8;
+        DrawRectangleRec({gx, gy, 240, gh}, gfx::fade(BLACK, 0.4f));
+        DrawLineEx({gx, gy + gh - gh * 16.7f / 50.0f}, {gx + 240, gy + gh - gh * 16.7f / 50.0f}, 1, gfx::fade(WHITE, 0.25f));
+        const size_t n = frameHist_.size();
+        for (size_t i = 0; i < n; ++i) {
+            const float ms = frameHist_[(frameHistPos_ + i) % n];
+            if (ms <= 0) continue;
+            const float hgt = std::min(gh, gh * ms / 50.0f);
+            const Color c = ms < 17.5f ? Color{110, 230, 120, 255} : (ms < 34.0f ? Color{255, 210, 90, 255} : Color{255, 90, 90, 255});
+            DrawRectangleRec({gx + float(i), gy + gh - hgt, 1, hgt}, c);
+        }
+    }
+}
+
+// -------------------------------------------------------- rendering mode --
+
+bool App::wantsRender() const { return !platform::kAndroid && (settings.renderMode || renderCli); }
+
+bool App::startRender(const std::string& title, const std::string& diff) {
+    if (renderer.active()) return true;
+    if (!ffmpegProbed_) {
+        ffmpegPath_ = findProgram(base, "ffmpeg", "-version");
+        ffmpegProbed_ = true;
+    }
+    if (ffmpegPath_.empty()) {
+        notify("Rendering mode needs ffmpeg: put ffmpeg next to the game, or install it", 10.0);
+        return false;
+    }
+    static const int kSizes[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+    RenderOptions o;
+    const int sz = clampv(settings.renderSize, 0, 3);
+    o.width = kSizes[sz][0];
+    o.height = kSizes[sz][1];
+    o.fps = settings.renderFps;
+    o.encoder = settings.renderEncoder;
+    o.bitrateMbps = settings.renderBitrate;
+    o.audio = settings.renderAudio;
+    // "Song (Hard) 2026-11-12 15-04-05", without characters file systems refuse.
+    char stamp[32];
+    const std::time_t tt = std::time(nullptr);
+    std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H-%M-%S", std::localtime(&tt));
+    std::string name;
+    for (unsigned char c : title + " (" + diff + ") " + stamp)
+        name += (c < 32 || std::strchr("<>:\"/\\|?*", int(c))) ? '_' : char(c);
+    if (name.size() > 150) name = name.substr(name.size() - 150);
+    std::string err;
+    if (!renderer.start(ffmpegPath_, base + "renders/" + trim(name), o, err)) {
+        notify("Rendering mode: " + err, 10.0);
+        return false;
+    }
+    mixer.setOffline(true);
+    renderClock_ = now;
+    renderStartReal_ = nowSec();
+    lastSwap_ = 0;
+    platform::log("rendering " + title + " " + diff + TextFormat(" at %dx%d, %d fps", o.width, o.height, o.fps));
+    return true;
+}
+
+void App::stopRender() {
+    if (!renderer.active()) return;
+    std::string err;
+    const std::string path = renderer.finish(err);
+    mixer.setOffline(false);
+    clockShift_ = now - nowSec();  // the game's clock goes on from where the video ended
+    renderLabel.clear();
+    if (path.empty()) notify("Rendering mode: " + err, 10.0);
+    else std::printf("[render] %s\n", path.c_str());
+}
+
+void App::notify(const std::string& text, double seconds) {
+    notice_ = text;
+    noticeUntil_ = now + seconds;
+}
+
+void App::drawRenderBadge() {
+    const double real = std::max(1e-3, nowSec() - renderStartReal_);
+    const double video = double(renderer.frames()) * renderer.frameTime();
+    const int vs = int(video);
+    std::string s = TextFormat("REC  %d:%02d", vs / 60, vs % 60);
+    if (!renderLabel.empty()) s += "  |  song " + renderLabel;
+    s += TextFormat("  |  %.2fx real time  |  ESC stops", video / real);
+    const Vector2 sz = gfx::measure(gfx::FontId::Ui, s, 18);
+    DrawRectangleRec({8, 8, sz.x + 40, 28}, gfx::fade(BLACK, 0.7f));
+    const float blink = std::fmod(float(real), 1.0f) < 0.5f ? 1.0f : 0.35f;
+    DrawCircleV({24, 22}, 7, gfx::fade(Color{230, 40, 50, 255}, blink));
+    gfx::text(gfx::FontId::Ui, s, 38, 12, 18, WHITE, gfx::Align::Left, 1.0f);
 }
 
 // ------------------------------------------------------- shared visuals --

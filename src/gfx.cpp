@@ -134,10 +134,35 @@ void shutdown() {
 
 static int g_targetW = 0, g_targetH = 0;
 static float g_viewW = W;
+static RenderTexture2D g_frameRt{};  // rendering mode: frames drawn here
 void setRenderTargetSize(int w, int h) {
-    g_targetW = w;
-    g_targetH = h;
+    g_targetW = w > 0 ? w : (g_frameRt.id ? g_frameRt.texture.width : 0);
+    g_targetH = h > 0 ? h : (g_frameRt.id ? g_frameRt.texture.height : 0);
 }
+
+void beginFrameTarget(const RenderTexture2D& rt) {
+    g_frameRt = rt;
+    setRenderTargetSize(0, 0);
+    BeginTextureMode(rt);
+}
+
+void endFrameTarget() {
+    EndTextureMode();
+    g_frameRt = {};
+    setRenderTargetSize(0, 0);
+}
+
+bool frameTargetActive() { return g_frameRt.id != 0; }
+
+void beginTexture(const RenderTexture2D& rt) { BeginTextureMode(rt); }
+
+void endTexture() {
+    EndTextureMode();
+    if (g_frameRt.id) BeginTextureMode(g_frameRt);  // back to the frame being rendered
+}
+
+int targetWidth() { return g_targetW > 0 ? g_targetW : GetScreenWidth(); }
+int targetHeight() { return g_targetH > 0 ? g_targetH : GetScreenHeight(); }
 
 void setViewWidth(float w) { g_viewW = std::clamp(w, 64.0f, W); }
 float viewWidth() { return g_viewW; }
@@ -177,7 +202,7 @@ void beginCanvas(float zoom, Vector2 focus, float rotationDeg) { BeginMode2D(scr
 void endCanvas() { EndMode2D(); }
 
 void drawLetterbox() {
-    const float sw = float(GetScreenWidth()), sh = float(GetScreenHeight());
+    const float sw = float(targetWidth()), sh = float(targetHeight());
     const float s = canvasScale();
     const Vector2 o = canvasOrigin();
     const float right = o.x + g_viewW * s;

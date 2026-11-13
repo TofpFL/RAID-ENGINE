@@ -18,6 +18,11 @@ struct Settings {
     bool flashing = true;
     bool camZoom = true;
     bool showFps = false;
+    // More in the FPS counter (JS Engine's RAM and debug info, and more):
+    bool fpsMemory = false;      // the game's memory and its peak
+    bool fpsFrameTimes = false;  // update, draw and worst frame times, with a graph
+    bool fpsUsage = false;       // processor use and the system's memory
+    bool fpsHardware = false;    // processor, graphics card, OpenGL and system names
     bool lowDetail = false;
     bool vsync = false;
     bool shaders = true;       // mod shaders and screen effects
@@ -26,6 +31,14 @@ struct Settings {
     // 1 full (every pixel).
     int noteDetail = 0;
     bool luaNoteCallbacks = true;  // goodNoteHit, opponentNoteHit, noteMiss... (OFF: faster spam charts)
+    // Rendering mode (desktop): songs play by themselves and are recorded to a
+    // video with ffmpeg, frame by frame (render_mode.hpp).
+    bool renderMode = false;
+    int renderSize = 0;       // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160
+    int renderFps = 60;
+    int renderEncoder = 0;    // renderEncoders()
+    int renderBitrate = 20;   // Mbps
+    bool renderAudio = true;
     bool extraKeys = true;     // OFF: every chart has 4 keys, like Psych and JS Engine
     int noteCounter = 1;       // HUD note counter: 0 off, 1 your side, 2 both sides
     // Mod script errors and warnings on screen: 0 always, 1 only for scripts
@@ -36,6 +49,13 @@ struct Settings {
     bool hitPopups = true;     // rating pictures and combo numbers on each hit
     int timeBar = 0;           // 0 time left, 1 time elapsed, 2 song name, 3 off (as in Psych)
     float healthBarAlpha = 1.0f;
+    // Psych Engine's own options (Visuals and UI, Gameplay).
+    bool hideHud = false;       // health bar, icons, score line and ratings hidden
+    bool scoreZoom = true;      // the score line grows a little on each note you hit
+    bool botplayText = true;    // BOTPLAY (or REPLAY) on screen while the game plays by itself
+    bool comboStacking = true;  // ratings and combo numbers pile up (OFF: only the latest)
+    bool opponentNotes = true;  // OFF: the opponent's receptors and notes are hidden
+    int pauseMusic = 2;         // Psych interface's pause menu song: 0 none, 1 Breakfast, 2 Tea Time
     std::string psychFolder;   // a Psych Engine / JS Engine copy to take that interface from
     bool fullscreen = false;
     bool showTimings = true;

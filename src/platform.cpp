@@ -298,6 +298,8 @@ std::string dataDir() {
     return s;
 }
 
+std::string userDir() { return dataDir(); }
+
 void prepareDataDir(const std::string& base) {
     std::error_code ec;
     for (const char* d : {"mods", "songs", "replays", "saves", "cache"}) fs::create_directories(base + d, ec);
@@ -418,6 +420,22 @@ bool touchEvents() { return false; }
 void takeTouchEvents(std::vector<TouchEvent>&) {}
 void log(const std::string&) {}
 std::string dataDir() { return ""; }
+std::string userDir() {
+#if defined(_WIN32)
+    const wchar_t* app = _wgetenv(L"APPDATA");
+    if (!app || !*app) return "";
+    const std::u8string u = (fs::path(app) / L"GodsHand").u8string();
+    return std::string(u.begin(), u.end()) + "/";
+#elif defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    return home && *home ? std::string(home) + "/Library/Application Support/GodsHand/" : std::string();
+#else
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && *xdg == '/') return std::string(xdg) + "/GodsHand/";
+    const char* home = std::getenv("HOME");
+    return home && *home ? std::string(home) + "/.local/share/GodsHand/" : std::string();
+#endif
+}
 void prepareDataDir(const std::string&) {}
 void afterWindowInit() {}
 void setVsync(bool on) {

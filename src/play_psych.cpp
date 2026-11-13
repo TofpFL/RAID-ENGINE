@@ -11,6 +11,7 @@
 #include "common.hpp"
 #include "effects.hpp"
 #include "platform.hpp"
+#include "psych_ui.hpp"
 #include "state_play.hpp"
 #include "rlgl.h"
 
@@ -404,6 +405,15 @@ bool PlayState::setupPsych() {
     roots.push_back(a.base + "mods/");
     sc.files.setRoots(roots);
     sc.files.setSharedRoots(a.library.sharedAssetRootsFor(*entry_));  // what this mod lacks, from the other mods
+    // The Psych interface: this song's own mod first, as Psych's Paths does.
+    {
+        std::vector<std::string> own = entry_->assetRoots;
+        if (own.empty() && !entry_->modRoot.empty()) own.push_back(entry_->modRoot);
+        if (psychUi().active() && !own.empty() && hasPsychPieces(own)) {
+            a.psychUiForSong(own);
+            uiFromMod_ = true;
+        }
+    }
 
     // Charts from older engines name no stage: the original game picks it from the song.
     auto baseStageAvailable = [&](const std::string& st) {
@@ -992,10 +1002,14 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
             if (rainbow_) sc->camGame.filters.push_back(rainbow_);
         }
         if (rainbow_) {
+            // JS Engine: its time starts anywhere from -1000 to 1000 and
+            // advances by elapsed * speed (PulseShader.update).
             rainbow_->floats["uWaveAmplitude"] = {1.0f};
             rainbow_->floats["uFrequency"] = {2.0f};
             rainbow_->floats["uSpeed"] = {float(speed * rate_)};
-            rainbow_->floats["uEnabled"] = {1.0f};
+            rainbow_->floats["uTime"] = {float(GetRandomValue(-1000000, 1000000)) / 1000.0f};
+            rainbow_->timeRate = float(speed * rate_);
+            rainbow_->ints["uEnabled"] = {1};
         }
         return true;
     }
@@ -1191,22 +1205,24 @@ void PlayState::drawHudLayer() {
     const Vector2 focus{gfx::W * 0.5f - (cam.shakeX + cam.x) / std::max(0.01f, cam.zoom),
                         gfx::H * 0.5f - (cam.shakeY + cam.y) / std::max(0.01f, cam.zoom)};
     if (cam.alpha < 0.999f && !capturing_) {
-        const int w = GetScreenWidth(), h = GetScreenHeight();
+        const int w = gfx::targetWidth(), h = gfx::targetHeight();
         if (!hudRt_.id || hudRt_.texture.width != w || hudRt_.texture.height != h) {
             if (hudRt_.id) UnloadRenderTexture(hudRt_);
             hudRt_ = LoadRenderTexture(w, h);
         }
-        BeginTextureMode(hudRt_);
+        gfx::beginTexture(hudRt_);
         ClearBackground(BLANK);
         gfx::beginCanvas(cam.zoom, focus, cam.angle);
+        drawHudCentered(true);
         drawLanes();
         fx_.draw(true);
         drawHudCentered();
         gfx::endCanvas();
-        EndTextureMode();
+        gfx::endTexture();
         DrawTextureRec(hudRt_.texture, {0, 0, float(w), -float(h)}, {0, 0}, gfx::fade(WHITE, cam.alpha));
     } else {
         gfx::beginCanvas(cam.zoom, focus, cam.angle);
+        drawHudCentered(true);
         drawLanes();
         fx_.draw(true);
         drawHudCentered();
@@ -1217,16 +1233,20 @@ void PlayState::drawHudLayer() {
 
 // The health bar and score sit in the middle of the game's width (a script
 // may have narrowed it, Flixel's FlxG.width).
-void PlayState::drawHudCentered() {
+void PlayState::drawHudCentered(bool underNotes) {
     const float shift = (gameW_ - gfx::W) * 0.5f;
+    auto body = [&] {
+        if (underNotes) drawUnderNotes();
+        else drawHud();
+    };
     if (shift == 0) {
-        drawHud();
+        body();
         return;
     }
     rlDrawRenderBatchActive();
     rlPushMatrix();
     rlTranslatef(shift, 0, 0);
-    drawHud();
+    body();
     rlDrawRenderBatchActive();
     rlPopMatrix();
 }
@@ -1288,7 +1308,7 @@ void PlayState::psychDraw() {
             if (camRt_.id) UnloadRenderTexture(camRt_);
             camRt_ = LoadRenderTexture(rw, rh);
         }
-        BeginTextureMode(camRt_);
+        gfx::beginTexture(camRt_);
         ClearBackground(BLANK);
         gfx::setRenderTargetSize(rw, rh);
         gfx::beginCanvas();
@@ -1300,7 +1320,7 @@ void PlayState::psychDraw() {
         capturing_ = false;
         gfx::endCanvas();
         gfx::setRenderTargetSize(0, 0);
-        EndTextureMode();
+        gfx::endTexture();
         renderer_.drawFiltered(sc, cam.filters, camRt_, Rectangle{origin.x, origin.y, float(rw), float(rh)});
         gfx::beginCanvas();
     };
@@ -2018,7 +2038,7 @@ void PlayState::timeBarColors(uint32_t left, uint32_t right) {
     timeBarBack_ = Color{(unsigned char)(right >> 16), (unsigned char)(right >> 8), (unsigned char)right, 255};
 }
 
-std::string PlayState::saveDir() { return app().base + "saves/"; }
+std::string PlayState::saveDir() { return app().userDir + "saves/"; }
 
 bool PlayState::shadersEnabled() { return app().settings.shaders; }
 

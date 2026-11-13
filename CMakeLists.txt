@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.5.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -212,11 +212,14 @@ if(GH_BUILD_GAME)
     src/video.cpp
     src/state_results.cpp
     src/state_editor.cpp
+    src/state_editors.cpp
     src/state_modpacks.cpp
     src/process.cpp
+    src/render_mode.cpp
     src/platform.cpp
     src/folder_picker.cpp
     src/psych_ui.cpp
+    src/sysinfo.cpp
     src/touch_ui.cpp
   )
   if(ANDROID)
@@ -253,7 +256,7 @@ if(GH_BUILD_GAME)
     target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
   endif()
   if(WIN32)
-    target_link_libraries(godshand PRIVATE shell32 ole32)  # the folder dialog
+    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32)  # the folder dialog; the FPS counter's graphics card name
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/
@@ -271,7 +274,7 @@ endif()
 
 # Streamed song audio is tested with raylib's decoders when raylib is built.
 if(GH_BUILD_TESTS AND TARGET raylib)
-  target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio_decode.cpp)
+  target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio_decode.cpp src/render_mode.cpp src/process.cpp)
   target_link_libraries(gh_tests PRIVATE raylib)
   target_compile_definitions(gh_tests PRIVATE GH_AUDIO_TESTS=1)
 endif()

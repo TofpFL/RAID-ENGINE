@@ -10,6 +10,7 @@
 #include "audio.hpp"
 #include "input.hpp"
 #include "library.hpp"
+#include "render_mode.hpp"
 #include "session.hpp"
 #include "settings.hpp"
 #include "touch_ui.hpp"
@@ -35,6 +36,10 @@ public:
 struct Modifiers {
     double rate = 1.0;
     bool botplay = false, practice = false, mirror = false;
+    // Scroll speed, as Psych's gameplay changers: 0 the chart's (or Options'),
+    // 1 that times scrollValue, 2 scrollValue whatever the chart says.
+    int scrollType = 0;
+    double scrollValue = 1.0;
 };
 
 struct PlayRequest {
@@ -69,6 +74,10 @@ struct ResultData {
 class App {
 public:
     std::string base;  // folder with assets/, songs/, mods/ (ends with '/')
+    // Settings, scores, script save data (saves/) and replays (replays/): the
+    // system's per-user folder, so updating the game keeps them; the game's
+    // own folder with portable.txt in it, with --base, and on Android.
+    std::string userDir;
     bool listSongs = false;
     bool checkCharts = false;  // --check-charts with --list-songs
     Settings settings;
@@ -118,7 +127,21 @@ public:
     void applyPsychUi();
     std::string psychReport;
     std::string psychFolderInUse;  // the folder chosen, or the one found automatically
+    // During a song: the Psych interface takes what the song's own mod has
+    // first (fonts, health bar, notes, ratings, sounds); {} goes back.
+    void psychUiForSong(const std::vector<std::string>& modRoots);
     bool psychAutomatic = false;   // no folder chosen: the best copy found on disk
+
+    // Rendering mode (render_mode.hpp): the song being played is recorded to a
+    // video. While it records, the game's time moves one video frame per loop.
+    VideoRenderer renderer;
+    bool renderCli = false;  // --render: the rendering mode for this run
+    bool wantsRender() const;
+    bool startRender(const std::string& title, const std::string& diff);  // false (and a notice) if it cannot
+    void stopRender();
+    std::string renderLabel;  // where the song is ("1:23 / 3:05"), shown while recording
+    // A line of text at the bottom of the screen for a few seconds (any screen).
+    void notify(const std::string& text, double seconds = 6.0);
     // Options opened from a song's pause menu: leaving them plays it again.
     std::unique_ptr<PlayRequest> optionsReturn;
     // Deaths on the song played last (Psych's "Blueballed" in the pause menu).
@@ -131,6 +154,21 @@ private:
     void drawVolumeTray();
     double volumeShownAt_ = -10;
     double perfSince_ = 0;
+    double renderClock_ = 0, clockShift_ = 0, renderStartReal_ = 0, lastSwap_ = 0;
+    std::vector<float> renderAudio_;
+    std::string ffmpegPath_;
+    bool ffmpegProbed_ = false;
+    std::string notice_;
+    double noticeUntil_ = 0;
+    void drawRenderBadge();
+    // The FPS counter and what Options adds under it (memory, frame times,
+    // processor use, hardware), sampled twice a second.
+    void drawFpsPanel();
+    double statsAt_ = -10, cpuAt_ = 0, cpuSecs_ = 0;
+    float cpuUse_ = 0;
+    unsigned long long memNow_ = 0, memPeak_ = 0, sysUsed_ = 0;
+    std::array<float, 240> frameHist_{};  // the last frames' times (ms), for the graph
+    size_t frameHistPos_ = 0;
     int perfFrames_ = 0;
     float perfUpd_ = 0, perfDraw_ = 0, perfWorst_ = 0;
     std::unique_ptr<State> state_, next_;
@@ -160,6 +198,11 @@ std::unique_ptr<State> makePlay(const PlayRequest& req);
 std::unique_ptr<State> makeResults(const ResultData& r);
 std::unique_ptr<State> makeChartEditor(const std::string& songId, const std::string& diff);
 std::unique_ptr<State> makeModPacks();
+// Main menu: 7. The editors (state_editors.cpp), as Psych's Master Editor Menu.
+std::unique_ptr<State> makeEditorMenu();
+std::unique_ptr<State> makeCharacterEditor();
+std::unique_ptr<State> makeStageEditor();
+std::unique_ptr<State> makeEventEditor();
 
 // Waits (bounded) for detached preview/compose jobs before shutdown.
 void waitForBackgroundJobs();

@@ -2,6 +2,7 @@
 // match the file, resampling, decoding where the song plays first, and long
 // tracks keeping only a window in memory. Built when raylib (whose decoders
 // these are) is part of the build.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -14,6 +15,8 @@
 
 #include "audio.hpp"
 #include "audio_decode.hpp"
+#include "process.hpp"
+#include "render_mode.hpp"
 
 using namespace gh;
 namespace fs = std::filesystem;
@@ -176,6 +179,32 @@ void testWindow(const std::string& dir) {
     ACHECK(p && p[5] == sampleM(5));
 }
 
+void testLoopHold(const std::string& dir) {
+    // A long track looping (the Freeplay preview): the loop's start stays in
+    // memory while the window moves on, so the jump back never waits.
+    const std::string path = dir + "/long.wav";  // written by testWindow
+    auto pcm = openAudioStream(path, 0.0, 1 << 20);
+    ACHECK(pcm && pcm->stream && pcm->stream->windowed);
+    if (!pcm || !pcm->stream) return;
+    PcmStream& s = *pcm->stream;
+    const size_t B = PcmStream::kBlockFrames;
+    s.holdPos.store(2 * B + 100);
+    s.playPos.store(300 * B);
+    ACHECK(waitBlock(s, 300) && waitBlock(s, s.blocks - 1));
+    ACHECK(waitBlock(s, 2) && waitBlock(s, 2 + PcmStream::kHoldBlocks - 1));
+    s.playPos.store(170 * B);  // more memory needed: the far blocks go, the held ones stay
+    ACHECK(waitBlock(s, 299));
+    bool evicted = false;
+    for (int i = 0; i < 400 && !evicted; ++i) {
+        evicted = !s.get(0) && !s.get(2 + PcmStream::kHoldBlocks);
+        if (!evicted) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ACHECK(evicted);
+    ACHECK(s.get(2) && s.get(2 + PcmStream::kHoldBlocks - 1));
+    const int16_t* p = s.get(2);
+    ACHECK(p && p[100] == sampleM(2 * B + 100));
+}
+
 void testNotAudio(const std::string& dir) {
     const std::string path = dir + "/notes.txt";
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -190,6 +219,52 @@ void testNotAudio(const std::string& dir) {
     ACHECK(!openAudioStream(dir + "/missing.ogg"));
 }
 
+void testRenderMode(const std::string& dir) {
+    // A second of video gets exactly a second of audio, whatever the frame rate.
+    for (int fps : {24, 30, 60, 120, 144, 240}) {
+        uint64_t sum = 0;
+        unsigned lo = ~0u, hi = 0;
+        for (long long k = 0; k < fps * 3; ++k) {
+            const unsigned n = renderAudioFrames(k, fps);
+            sum += n;
+            lo = std::min(lo, n);
+            hi = std::max(hi, n);
+        }
+        ACHECK(sum == 3 * 44100);
+        ACHECK(hi - lo <= 1);
+    }
+    RenderOptions o;
+    o.width = 1920;
+    o.height = 1080;
+    o.fps = 60;
+    o.bitrateMbps = 20;
+    std::vector<std::string> a = renderVideoArgs(o, "out.mp4");
+    auto has = [&](const std::string& x) { return std::find(a.begin(), a.end(), x) != a.end(); };
+    ACHECK(has("1920x1080") && has("libx264") && has("20M") && has("vflip") && a.back() == "out.mp4");
+    o.encoder = 2;
+    a = renderVideoArgs(o, "out.webm");
+    ACHECK(has("libvpx-vp9"));
+    a = renderMuxArgs(o, "v.webm", "a.wav", "out.webm");
+    ACHECK(has("libopus") && has("-shortest") && a.back() == "out.webm");
+    ACHECK(renderEncoders().size() == 7 && std::string(renderEncoders()[2].ext) == "webm");
+#if !defined(_WIN32)
+    // What is written goes to the program's standard input (here cat, into a file).
+    const std::string log = dir + "/pipe.txt";
+    PipeProcess p;
+    ACHECK(p.start("cat", {}, log));
+    ACHECK(p.write("frames go here", 14));
+    ACHECK(p.finish() == 0);
+    FILE* f = std::fopen(log.c_str(), "rb");
+    char buf[32] = {};
+    if (f) {
+        buf[std::fread(buf, 1, sizeof buf - 1, f)] = 0;
+        std::fclose(f);
+    }
+    ACHECK(std::string(buf) == "frames go here");
+    ACHECK(!p.write("x", 1));  // after finish nothing goes anywhere
+#endif
+}
+
 }  // namespace
 
 void runAudioTests() {
@@ -202,7 +277,9 @@ void runAudioTests() {
     testStreamExact(d);
     testResample(d);
     testWindow(d);
+    testLoopHold(d);
     testNotAudio(d);
+    testRenderMode(d);
     stopAudioDecoders();
     ACHECK(liveAudioDecoders() == 0);
     fs::remove_all(dir, ec);

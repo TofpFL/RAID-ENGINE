@@ -36,11 +36,21 @@ bool Settings::load(const std::string& path) {
         else if (k == "flashing") flashing = b;
         else if (k == "camZoom") camZoom = b;
         else if (k == "showFps") showFps = b;
+        else if (k == "fpsMemory") fpsMemory = b;
+        else if (k == "fpsFrameTimes") fpsFrameTimes = b;
+        else if (k == "fpsUsage") fpsUsage = b;
+        else if (k == "fpsHardware") fpsHardware = b;
         else if (k == "lowDetail") lowDetail = b;
         else if (k == "vsync") vsync = b;
         else if (k == "shaders") shaders = b;
         else if (k == "noteDetail") noteDetail = clampv(int(d), 0, 1);
         else if (k == "luaNoteCallbacks") luaNoteCallbacks = b;
+        else if (k == "renderMode") renderMode = b;
+        else if (k == "renderSize") renderSize = clampv(int(d), 0, 3);
+        else if (k == "renderFps") renderFps = clampv(int(d), 1, 1000);
+        else if (k == "renderEncoder") renderEncoder = clampv(int(d), 0, 6);
+        else if (k == "renderBitrate") renderBitrate = clampv(int(d), 1, 500);
+        else if (k == "renderAudio") renderAudio = b;
         else if (k == "extraKeys") extraKeys = b;
         else if (k == "noteCounter") noteCounter = clampv(int(d), 0, 2);
         else if (k == "luaErrors") luaErrors = clampv(int(d), 0, 2);
@@ -49,6 +59,12 @@ bool Settings::load(const std::string& path) {
         else if (k == "hitPopups") hitPopups = b;
         else if (k == "timeBar") timeBar = clampv(int(d), 0, 3);
         else if (k == "healthBarAlpha") healthBarAlpha = clampv(float(d), 0.0f, 1.0f);
+        else if (k == "hideHud") hideHud = b;
+        else if (k == "scoreZoom") scoreZoom = b;
+        else if (k == "botplayText") botplayText = b;
+        else if (k == "comboStacking") comboStacking = b;
+        else if (k == "opponentNotes") opponentNotes = b;
+        else if (k == "pauseMusic") pauseMusic = clampv(int(d), 0, 2);
         else if (k == "psychFolder") psychFolder = v;
         else if (k == "fullscreen") fullscreen = b;
         else if (k == "showTimings") showTimings = b;
@@ -73,10 +89,15 @@ bool Settings::save(const std::string& path) const {
         for (int j = 0; j < 2; ++j) f << "key" << i << j << "=" << keys4[i][j] << "\n";
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
-      << "\nshowFps=" << showFps << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter
+      << "\nshowFps=" << showFps << "\nfpsMemory=" << fpsMemory << "\nfpsFrameTimes=" << fpsFrameTimes << "\nfpsUsage=" << fpsUsage
+      << "\nfpsHardware=" << fpsHardware << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter
       << "\nnoteDetail=" << noteDetail << "\nluaNoteCallbacks=" << luaNoteCallbacks
+      << "\nrenderMode=" << renderMode << "\nrenderSize=" << renderSize << "\nrenderFps=" << renderFps
+      << "\nrenderEncoder=" << renderEncoder << "\nrenderBitrate=" << renderBitrate << "\nrenderAudio=" << renderAudio
       << "\nluaErrors=" << luaErrors << "\nluaWarnings=" << luaWarnings << "\nhitPopups=" << hitPopups
-      << "\ntimeBar=" << timeBar << "\nhealthBarAlpha=" << healthBarAlpha
+      << "\ntimeBar=" << timeBar << "\nhealthBarAlpha=" << healthBarAlpha << "\nhideHud=" << hideHud << "\nscoreZoom=" << scoreZoom
+      << "\nbotplayText=" << botplayText << "\ncomboStacking=" << comboStacking << "\nopponentNotes=" << opponentNotes
+      << "\npauseMusic=" << pauseMusic
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol

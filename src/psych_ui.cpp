@@ -39,6 +39,44 @@ void unloadTex(Texture2D& t) {
     t = Texture2D{};
 }
 
+// Psych 0.7's healthBar.png and timeBar.png are frames with a see-through
+// middle, drawn over the bar's colours; 0.6's are solid backgrounds under them.
+bool seeThroughMiddle(const std::string& path) {
+    if (path.empty()) return true;
+    Image img = LoadImage(path.c_str());
+    if (!img.data) return true;
+    const Color c = GetImageColor(img, img.width / 2, img.height / 2);
+    UnloadImage(img);
+    return c.a < 128;
+}
+
+// A TrueType font's em square and line (hhea ascent and descent), to size
+// text the way Flash does.
+bool fontMetrics(const std::string& path, float& upm, float& ascent, float& descent) {
+    int size = 0;
+    unsigned char* d = LoadFileData(path.c_str(), &size);
+    if (!d) return false;
+    auto u16 = [&](int o) { return o + 2 <= size ? int(d[o]) << 8 | d[o + 1] : 0; };
+    auto s16 = [&](int o) { return int(int16_t(uint16_t(u16(o)))); };
+    bool ok = false;
+    int head = -1, hhea = -1;
+    const int tables = u16(4);
+    for (int i = 0; i < tables && 12 + 16 * i + 16 <= size; ++i) {
+        const unsigned char* t = d + 12 + 16 * i;
+        const int off = int(uint32_t(t[8]) << 24 | uint32_t(t[9]) << 16 | uint32_t(t[10]) << 8 | t[11]);
+        if (std::equal(t, t + 4, "head")) head = off;
+        if (std::equal(t, t + 4, "hhea")) hhea = off;
+    }
+    if (head >= 0 && hhea >= 0 && head + 20 <= size && hhea + 8 <= size) {
+        upm = float(u16(head + 18));
+        ascent = float(s16(hhea + 4));
+        descent = float(s16(hhea + 6));
+        ok = upm > 0 && ascent - descent > 0;
+    }
+    UnloadFileData(d);
+    return ok;
+}
+
 const char* kColors[4] = {"purple", "blue", "green", "red"};
 
 // Psych Engine 0.7's default note colours: main, highlight, outline.
@@ -86,14 +124,16 @@ PsychUi& psychUi() {
     return ui;
 }
 
-int PsychUi::load(const std::string& folder, std::string& report) {
+int PsychUi::load(const std::string& folder, std::string& report) { return load(folder, report, {}); }
+
+int PsychUi::load(const std::string& folder, std::string& report, const std::vector<std::string>& firstRoots) {
     unload();
     root_ = folder;
     if (!root_.empty() && root_.back() != '/' && root_.back() != '\\') root_ += '/';
     // The engine's own folder, its assets/ folder or the library folders
     // inside it: wherever the player pointed, the same names are found.
     scene::Files f;
-    std::vector<std::string> roots;
+    std::vector<std::string> roots = firstRoots;
     for (const char* sub : {"", "assets/", "assets/shared/", "assets/preload/", "assets/embed/", "shared/", "preload/", "../",
                             "../shared/", "../preload/"})
         roots.push_back(root_ + sub);
@@ -148,9 +188,12 @@ int PsychUi::load(const std::string& folder, std::string& report) {
         count_[i] = loadTex(findAny(f, {std::string("images/") + cnames[i] + ".png"}));
         if (count_[i].id) ++found;
     }
-    bar_ = loadTex(findAny(f, {"images/healthBar.png"}));
+    const std::string barPng = findAny(f, {"images/healthBar.png"}), timePng = findAny(f, {"images/timeBar.png"});
+    bar_ = loadTex(barPng);
+    barOnTop_ = seeThroughMiddle(barPng);
     if (bar_.id) ++found;
-    timeBar_ = loadTex(findAny(f, {"images/timeBar.png"}));
+    timeBar_ = loadTex(timePng);
+    timeOnTop_ = timePng.empty() ? barOnTop_ : seeThroughMiddle(timePng);
     if (timeBar_.id) ++found;
     // Alphabet: the bold letters of the pause menu and other menus.
     const std::string abc = findAny(f, {"images/alphabet.png"});
@@ -180,6 +223,13 @@ int PsychUi::load(const std::string& folder, std::string& report) {
             SetTextureFilter(font_.texture, TEXTURE_FILTER_BILINEAR);
             ++found;
         }
+        float upm = 0, asc = 0, desc = 0;
+        fontScale_ = 1.0f;
+        fontAscent_ = 1.0f;
+        if (fontMetrics(ttf, upm, asc, desc)) {
+            fontScale_ = (asc - desc) / upm;  // vcr.ttf: 1800 / 2048
+            fontAscent_ = asc / upm;
+        }
     }
     auto sound = [&](Sfx id, const std::string& name) {
         const std::string p = findAny(f, {"sounds/" + name + ".ogg", "sounds/" + name + ".mp3", "sounds/" + name + ".wav"});
@@ -203,6 +253,8 @@ int PsychUi::load(const std::string& folder, std::string& report) {
     if (!menuMusic_.empty()) ++found;
     pauseMusic_ = findAny(f, {"music/breakfast.ogg", "music/breakfast.mp3"});
     if (!pauseMusic_.empty()) ++found;
+    teaTime_ = findAny(f, {"music/tea-time.ogg", "music/tea-time.mp3"});
+    if (!teaTime_.empty()) ++found;
 
     report = std::to_string(found) + " pieces found";
     if (!missing.empty()) {
@@ -225,6 +277,9 @@ void PsychUi::unload() {
     unloadTex(alphabet_);
     letters_.clear();
     pauseMusic_.clear();
+    teaTime_.clear();
+    fontScale_ = fontAscent_ = 1.0f;
+    barOnTop_ = timeOnTop_ = true;
     if (font_.texture.id && IsWindowReady()) UnloadFont(font_);
     font_ = Font{};
     atlas_.clear();
@@ -368,6 +423,39 @@ bool PsychUi::combo(long long value, Vector2 c, float scale, float alpha) const 
     return true;
 }
 
+Vector2 PsychUi::ratingSize(int which) const {
+    if (which < 0 || which > 3 || !ratings_[which].id) return {0, 0};
+    return {float(ratings_[which].width), float(ratings_[which].height)};
+}
+
+Vector2 PsychUi::numSize(int digit) const {
+    if (digit < 0 || digit > 9 || !nums_[digit].id) return {0, 0};
+    return {float(nums_[digit].width), float(nums_[digit].height)};
+}
+
+static void drawAt(const Texture2D& t, float x, float y, float scale, float alpha) {
+    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {x, y, t.width * scale, t.height * scale}, {0, 0}, 0,
+                   gfx::fade(WHITE, alpha));
+}
+
+bool PsychUi::ratingAt(int which, float x, float y, float scale, float alpha) const {
+    if (!active_ || which < 0 || which > 3 || !ratings_[which].id) return false;
+    drawAt(ratings_[which], x, y, scale, alpha);
+    return true;
+}
+
+bool PsychUi::numAt(int digit, float x, float y, float scale, float alpha) const {
+    if (!active_ || digit < 0 || digit > 9 || !nums_[digit].id) return false;
+    drawAt(nums_[digit], x, y, scale, alpha);
+    return true;
+}
+
+std::string PsychUi::pauseMusic(int which) const {
+    if (which <= 0) return {};
+    if (which == 2) return teaTime_.empty() ? pauseMusic_ : teaTime_;
+    return pauseMusic_.empty() ? teaTime_ : pauseMusic_;
+}
+
 bool PsychUi::countdown(int i, Vector2 c, float alpha) const {
     if (!active_ || i < 0 || i > 2 || !count_[i].id) return false;
     const Texture2D& t = count_[i];
@@ -376,45 +464,78 @@ bool PsychUi::countdown(int i, Vector2 c, float alpha) const {
     return true;
 }
 
-bool PsychUi::healthBar(Rectangle bar, Color left, Color right, float leftFrac, float alpha) const {
+Vector2 PsychUi::healthBarSize() const {
+    if (!active_ || !bar_.id) return {0, 0};
+    return {float(bar_.width), float(bar_.height)};
+}
+
+// Psych's Bar: the left colour fills leftFrac of the bar, the right colour
+// the rest; 0.7 draws healthBar.png over them, 0.6 under them.
+bool PsychUi::healthBar(Rectangle frame, Color left, Color right, float leftFrac, float alpha, float frameAlpha) const {
     if (!active_ || !bar_.id) return false;
-    // healthBar.png is the frame; the colours fill it 4 pixels in.
-    DrawTexturePro(bar_, {0, 0, float(bar_.width), float(bar_.height)}, {bar.x - 4, bar.y - 4, bar.width + 8, bar.height + 8}, {0, 0}, 0,
-                   gfx::fade(WHITE, alpha));
-    const float split = bar.x + bar.width * leftFrac;
-    DrawRectangleRec({bar.x, bar.y, split - bar.x, bar.height}, gfx::fade(left, alpha));
-    DrawRectangleRec({split, bar.y, bar.x + bar.width - split, bar.height}, gfx::fade(right, alpha));
+    if (frameAlpha < 0) frameAlpha = alpha;
+    const float in = barInset();
+    const Rectangle bar{frame.x + in, frame.y + in, frame.width - 2 * in, frame.height - 2 * in};
+    const Rectangle src{0, 0, float(bar_.width), float(bar_.height)};
+    if (!barOnTop_) DrawTexturePro(bar_, src, frame, {0, 0}, 0, gfx::fade(WHITE, frameAlpha));
+    const float split = bar.width * std::clamp(leftFrac, 0.0f, 1.0f);
+    DrawRectangleRec({bar.x, bar.y, split, bar.height}, gfx::fade(left, alpha));
+    DrawRectangleRec({bar.x + split, bar.y, bar.width - split, bar.height}, gfx::fade(right, alpha));
+    if (barOnTop_) DrawTexturePro(bar_, src, frame, {0, 0}, 0, gfx::fade(WHITE, frameAlpha));
     return true;
 }
 
-bool PsychUi::timeBar(float cx, float top, float frac, float alpha) const {
+Vector2 PsychUi::timeBarSize() const {
+    return timeBar_.id ? Vector2{float(timeBar_.width), float(timeBar_.height)} : Vector2{400, 19};
+}
+
+bool PsychUi::timeBar(Rectangle frame, float frac, float alpha, float frameAlpha) const {
     if (!active_) return false;
-    // Psych: timeBar.png (400 x 19) with the bar 4 pixels in: black empty
-    // part, white filled part.
-    const float tw = timeBar_.id ? float(timeBar_.width) : 400.0f, th = timeBar_.id ? float(timeBar_.height) : 19.0f;
-    const Rectangle bar{cx - tw * 0.5f + 4, top + 4, tw - 8, th - 8};
-    if (timeBar_.id)
-        DrawTexturePro(timeBar_, {0, 0, tw, th}, {cx - tw * 0.5f, top, tw, th}, {0, 0}, 0, gfx::fade(WHITE, alpha));
-    else
-        DrawRectangleRec({cx - tw * 0.5f, top, tw, th}, gfx::fade(BLACK, alpha));
-    DrawRectangleRec(bar, gfx::fade(BLACK, alpha));
-    DrawRectangleRec({bar.x, bar.y, bar.width * std::clamp(frac, 0.0f, 1.0f), bar.height}, gfx::fade(WHITE, alpha));
+    if (frameAlpha < 0) frameAlpha = alpha;
+    // Psych: timeBar.png around a white filled part and a black empty part.
+    const float in = timeOnTop_ ? 3.0f : 4.0f;
+    const Rectangle bar{frame.x + in, frame.y + in, frame.width - 2 * in, frame.height - 2 * in};
+    const Rectangle src{0, 0, float(timeBar_.width), float(timeBar_.height)};
+    if (!timeOnTop_ || !timeBar_.id) {
+        if (timeBar_.id) DrawTexturePro(timeBar_, src, frame, {0, 0}, 0, gfx::fade(WHITE, frameAlpha));
+        else DrawRectangleRec(frame, gfx::fade(BLACK, frameAlpha));
+    }
+    const float fill = bar.width * std::clamp(frac, 0.0f, 1.0f);
+    DrawRectangleRec({bar.x, bar.y, fill, bar.height}, gfx::fade(WHITE, alpha));
+    DrawRectangleRec({bar.x + fill, bar.y, bar.width - fill, bar.height}, gfx::fade(BLACK, alpha));
+    if (timeOnTop_ && timeBar_.id) DrawTexturePro(timeBar_, src, frame, {0, 0}, 0, gfx::fade(WHITE, frameAlpha));
     return true;
 }
 
+// FlxText: the text sits 2 pixels in from its box, and its OUTLINE border is
+// the text drawn in black around itself, in rings a pixel apart (borderSize
+// 2: rings at 1 and 2 pixels; 1.25: one ring at 1.25).
 bool PsychUi::text(const std::string& s, float x, float y, float size, Color c, int align, float border) const {
     if (!active_ || !font_.texture.id) return false;
-    const Vector2 sz = MeasureTextEx(font_, s.c_str(), size, 0);
-    const float left = align == 0 ? x - sz.x * 0.5f : align < 0 ? x : x - sz.x;
-    // FlxText's OUTLINE border: the text drawn around itself in black.
-    const Color edge{0, 0, 0, c.a};
-    if (border > 0)
-        for (const Vector2 o : {Vector2{-border, 0}, Vector2{border, 0}, Vector2{0, -border}, Vector2{0, border},
-                                Vector2{-border, -border}, Vector2{border, border}, Vector2{-border, border}, Vector2{border, -border}})
-            DrawTextEx(font_, s.c_str(), {left + o.x, y + o.y}, size, 0, edge);
-    DrawTextEx(font_, s.c_str(), {left, y}, size, 0, c);
+    const float px = size * fontScale_;
+    const float w = MeasureTextEx(font_, s.c_str(), px, 0).x;
+    const float left = align == 0 ? x - w * 0.5f : align < 0 ? x + 2 : x - 2 - w;
+    const float top = y + 2;
+    if (border > 0) {
+        const Color edge{0, 0, 0, c.a};
+        const int rings = std::max(1, int(border));
+        for (int r = 1; r <= rings; ++r) {
+            const float d = border * float(r) / float(rings);
+            for (const Vector2 o : {Vector2{-d, -d}, Vector2{0, -d}, Vector2{d, -d}, Vector2{d, 0}, Vector2{d, d}, Vector2{0, d},
+                                    Vector2{-d, d}, Vector2{-d, 0}})
+                DrawTextEx(font_, s.c_str(), {left + o.x, top + o.y}, px, 0, edge);
+        }
+    }
+    DrawTextEx(font_, s.c_str(), {left, top}, px, 0, c);
     return true;
 }
+
+float PsychUi::textWidth(const std::string& s, float size) const {
+    if (!font_.texture.id) return 0;
+    return MeasureTextEx(font_, s.c_str(), size * fontScale_, 0).x;
+}
+
+float PsychUi::lineHeight(float size) const { return size * fontScale_; }
 
 // Alphabet's bold letters: "A bold0000" in the original game, "a bold
 // instance 10000" in Psych 0.7 and later; symbols go by the character itself
@@ -518,6 +639,17 @@ bool skipWhenSearching(const std::string& name) {
 }
 
 }  // namespace
+
+bool hasPsychPieces(const std::vector<std::string>& roots) {
+    scene::Files f;
+    f.setRoots(roots);
+    for (const char* rel : {"images/NOTE_assets.png", "images/noteSkins/NOTE_assets.png", "images/noteskins/NOTE_assets.png",
+                            "images/healthBar.png", "images/timeBar.png", "fonts/vcr.ttf", "images/sick.png",
+                            "images/ratings/default/sick.png", "images/num0.png", "images/alphabet.png", "images/ready.png",
+                            "sounds/scrollMenu.ogg", "sounds/confirmMenu.ogg", "sounds/missnote1.ogg", "music/breakfast.ogg"})
+        if (!f.find(rel).empty()) return true;
+    return false;
+}
 
 int psychFolderScore(const std::string& folder) {
     const scene::Files f = libraryRoots(folder);

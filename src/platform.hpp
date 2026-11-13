@@ -34,6 +34,12 @@ void log(const std::string& s);
 
 // Android: the app's storage folder (ends with '/'), "" on desktop.
 std::string dataDir();
+// Where settings, scores, script save data and replays live, apart from the
+// game's own folder (which an update replaces): %APPDATA%/GodsHand/ on
+// Windows, ~/Library/Application Support/GodsHand/ on macOS,
+// $XDG_DATA_HOME/GodsHand/ or ~/.local/share/GodsHand/ on Linux, the app's
+// folder on Android. Ends with '/'; "" when the system does not say.
+std::string userDir();
 // Android: copies the fonts and other files packed in the APK into base.
 void prepareDataDir(const std::string& base);
 // Android: keep the screen on and mute the game while it is in the background.

@@ -559,6 +559,7 @@ int runPsychCorpus(const char* dir) {
 // ------------------------------------------------- AutoChart, replays, zips --
 #include "autochart.hpp"
 #include "chart_stream.hpp"
+#include "effects.hpp"
 #include "shader_glsl.hpp"
 #include "composer.hpp"
 #include "miniz.h"
@@ -954,6 +955,59 @@ void testZipInstall() {
     fs::remove_all(root, ec);
 }
 
+// JS Engine's screen effects: its own GLSL, the parameters its Effect classes
+// set, and each one's clock (blocked glitch: "time" from its argument; VCR:
+// "iTime"; grain: "uTime" from 0 to 8).
+void testJsEngineEffects() {
+    scene::Scene sc;
+    sc.keys = 4;
+    sc.strums.resize(8);
+    StubGame game;
+    ScriptHost host(sc, game);
+    PCHECK(host.loadString("fx.lua", R"LUA(
+        function onCreatePost()
+            addBlockedGlitchEffect('camHUD', 640, 2.5, 1, true)
+            addBlockedGlitchEffect('camHUD', 640, 2.5, 1, false)
+            addVCREffect('camGame', 0.3, false)
+            addGrainEffect('camOther', 2, 0.5, true)
+            addWiggleEffect('camOther', 'flag', 1, 2, 0.05)
+            addPulseEffect('camOther', 1, 2, 3)
+        end)LUA"));
+    host.call("onCreatePost");
+    for (const std::string& e : host.errors) std::printf("  %s\n", e.c_str());
+    PCHECK(host.errors.empty());
+    PCHECK(sc.camHud.filters.size() == 1);  // without its colour transform JS Engine adds nothing
+    PCHECK(sc.camGame.filters.size() == 1 && sc.camOther.filters.size() == 3);
+    if (sc.camHud.filters.size() != 1 || sc.camGame.filters.size() != 1 || sc.camOther.filters.size() != 3) return;
+    scene::ShaderInstance& bg = *sc.camHud.filters[0];
+    PCHECK(bg.name == "__fx_blocked" && bg.timeName == "time" && pnear(bg.floats["time"][0], 2.5));
+    PCHECK(bg.floats["screenSize"].size() == 2 && pnear(bg.floats["screenSize"][1], 640));
+    scene::ShaderInstance& vcr = *sc.camGame.filters[0];
+    PCHECK(vcr.timeName == "iTime" && pnear(vcr.floats["glitchModifier"][0], 0.3));
+    PCHECK(vcr.ints["distortionOn"] == std::vector<int>{0} && vcr.ints["perspectiveOn"] == std::vector<int>{1} &&
+           vcr.ints["vignetteOn"] == std::vector<int>{1} && vcr.ints["scanlinesOn"] == std::vector<int>{1});
+    scene::ShaderInstance& grain = *sc.camOther.filters[0];
+    PCHECK(pnear(grain.floats["grainsize"][0], 2) && pnear(grain.floats["lumamount"][0], 0.5) && grain.ints["lockAlpha"] == std::vector<int>{1});
+    const float g0 = grain.floats["uTime"][0];
+    PCHECK(g0 >= 0 && g0 <= 8);
+    scene::ShaderInstance& wig = *sc.camOther.filters[1];
+    PCHECK(wig.ints["effectType"] == std::vector<int>{4} && pnear(wig.floats["uWaveAmplitude"][0], 0.05));
+    scene::ShaderInstance& pulse = *sc.camOther.filters[2];
+    PCHECK(pulse.ints["uEnabled"] == std::vector<int>{0} && pulse.timeRate == 0);  // stays off, its time still
+    sc.update(0.5, 125.0, false);
+    PCHECK(pnear(bg.floats["time"][0], 3.0) && pnear(vcr.floats["iTime"][0], 0.5) && pnear(grain.floats["uTime"][0], g0 + 0.5));
+    // Every effect's GLSL goes through the translator into a whole shader.
+    for (const char* n : {"__fx_chromatic", "__fx_scanline", "__fx_grain", "__fx_tiltshift", "__fx_vcr", "__fx_wiggle", "__fx_glitch",
+                          "__fx_distort", "__fx_pulse", "__fx_invert", "__fx_greyscale", "__fx_3d", "__fx_bloom", "__fx_blocked"}) {
+        const std::string_view src = fx::source(n);
+        PCHECK(!src.empty() && src.find("void main") != std::string_view::npos);
+        for (bool es : {false, true}) {
+            const std::string g = translateShader(src, es);
+            PCHECK(g.find("gh_FragColor") != std::string::npos && g.find("#pragma header") == std::string::npos);
+        }
+    }
+}
+
 }  // namespace
 
 void runExtraTests(bool audio) {
@@ -964,6 +1018,7 @@ void runExtraTests(bool audio) {
     testShaderTranslation();
     testHScript();
     testLuaExtras();
+    testJsEngineEffects();
     if (!audio) return;
     // AutoChart on the built-in songs: report the tempo it hears.
     for (const SongDef& def : builtinSongs()) {

@@ -24,6 +24,7 @@ struct PcmStream {
     static constexpr size_t kWholeBytes = size_t(192) << 20;  // longer tracks keep a window
     static constexpr size_t kBehindBlocks = 81;               // window: ~30 s behind the play position
     static constexpr size_t kAheadBlocks = 162;               // and ~60 s ahead
+    static constexpr size_t kHoldBlocks = 16;                 // ~6 s kept at holdPos
 
     std::string path;
     int channels = 2;     // 1 or 2
@@ -32,6 +33,9 @@ struct PcmStream {
     bool windowed = false;
     std::unique_ptr<std::atomic<int16_t*>[]> block;  // null: not decoded (yet, or any more)
     mutable std::atomic<size_t> playPos{0};          // where the mixer plays (frames)
+    // A second place the mixer will jump to (the start of a loop, as in the
+    // Freeplay preview): its first blocks stay decoded and in memory too.
+    mutable std::atomic<size_t> holdPos{~size_t(0)};
     std::atomic<size_t> inMemory{0};                 // blocks held
     std::atomic<bool> finished{false};               // whole track decoded, or the decoder stopped
 

@@ -82,7 +82,8 @@ struct ShaderInstance {
     std::map<std::string, std::vector<float>, std::less<>> floats;
     std::map<std::string, std::vector<int>, std::less<>> ints;  // ints and bools
     std::map<std::string, std::string, std::less<>> samplers;   // image keys
-    float timeRate = 0;  // built-in effects: "uTime" advances by elapsed * timeRate
+    float timeRate = 0;  // built-in effects: their time uniform advances by elapsed * timeRate
+    std::string timeName = "uTime";  // that uniform (JS Engine's VCR effect: iTime, blocked glitch: time)
 };
 using ShaderPtr = std::shared_ptr<ShaderInstance>;
 struct ShaderSource {
