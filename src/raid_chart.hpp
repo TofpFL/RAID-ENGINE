@@ -17,6 +17,10 @@ namespace gh::raid {
 // Chart -> raid::Event list (time ms -> us, pitch unused by Chart -> -1).
 std::vector<Event> chartEvents(const Chart& c);
 
+// The meta JSON stored inside a .raid file for `chart` (no encoder stats —
+// those are only known after encoding).
+std::string chartMetaJson(const Chart& c);
+
 // Writes a .raid file for `chart`. statsOut receives encoder statistics
 // (logical vs literal events, stored vs raw bytes — the honest compression
 // report). metaJson is built from the chart automatically.

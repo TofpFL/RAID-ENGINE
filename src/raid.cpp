@@ -38,14 +38,18 @@
 // entry carries the crc32 of the whole decompressed payload.
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 
 #include "miniz.h"
 #include "raid.hpp"
+#include "raid_chart.hpp"
+#include "flp_import.hpp"
 
 namespace gh::raid {
 
@@ -613,6 +617,154 @@ struct Tmpl {
     int64_t lastRelUs = 0;
 };
 
+struct ChunkOut {
+    Buf payload;  // u32 opCount + ops + u64 expandedCount (sealed)
+    uint64_t firstEvent = 0;
+    int64_t firstTimeUs = 0, lastTimeUs = 0;
+    uint32_t expanded = 0, opCount = 0;
+};
+
+// Compresses chunk payloads + meta + pattern section and writes the whole
+// .raid file (header, index, sections, chunks). Shared by writeRaid and the
+// FL Studio playlist encoder.
+bool writeRaidDone(const std::string& path, const std::vector<char>& patSection,
+                   std::vector<ChunkOut>& chunks, uint64_t logicalN,
+                   uint64_t literalEvents, uint64_t patternCount,
+                   std::string_view metaJson, const EncodeOptions& opt,
+                   Info* statsOut, std::string& err) {
+    chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
+                                [](const ChunkOut& c) { return c.opCount == 0; }),
+                 chunks.end());
+    // ---- compress --------------------------------------------------------
+    struct ChunkFile {
+        std::vector<char> blob;
+        uint64_t rawSize = 0;
+        uint32_t crc = 0;
+        bool compressed = false;
+    };
+    std::vector<ChunkFile> cf(chunks.size());
+    uint64_t storedBytes = 0, rawBytes = 0;
+    for (size_t k = 0; k < chunks.size(); ++k) {
+        const ChunkOut& c = chunks[k];
+        rawBytes += c.payload.b.size();
+        cf[k].rawSize = c.payload.b.size();
+        cf[k].crc = crcOf(c.payload.b.data(), c.payload.b.size());
+        std::vector<char> comp;
+        if (deflate(c.payload.b.data(), c.payload.b.size(), opt.compressLevel, comp) &&
+            comp.size() < c.payload.b.size()) {
+            cf[k].blob = std::move(comp);
+            cf[k].compressed = true;
+        } else {
+            cf[k].blob = c.payload.b;
+        }
+        storedBytes += cf[k].blob.size();
+    }
+
+    // meta payload = metaJson + crc trailer
+    std::vector<char> metaPayload(metaJson.begin(), metaJson.end());
+    {
+        Buf t;
+        t.u32(crcOf(metaPayload.data(), metaPayload.size()));
+        metaPayload.insert(metaPayload.end(), t.b.begin(), t.b.end());
+    }
+    std::vector<char> metaStored;
+    uint64_t metaComp = 0, metaRaw = metaPayload.size();
+    {
+        std::vector<char> comp;
+        if (deflate(metaPayload.data(), metaPayload.size(), opt.compressLevel, comp) &&
+            comp.size() < metaPayload.size()) {
+            metaComp = comp.size();
+            metaStored = std::move(comp);
+        } else {
+            metaStored = metaPayload;
+        }
+    }
+    std::vector<char> patStored;
+    uint64_t patComp = 0, patRaw = patSection.size();
+    {
+        std::vector<char> comp;
+        if (deflate(patSection.data(), patSection.size(), opt.compressLevel, comp) &&
+            comp.size() < patSection.size()) {
+            patComp = comp.size();
+            patStored = std::move(comp);
+        } else {
+            patStored = patSection;
+        }
+    }
+
+    // ---- write -----------------------------------------------------------
+    const uint64_t indexOff = kHeaderSize;
+    const uint64_t indexSize = chunks.size() * kIndexEntrySize;
+    const uint64_t metaOffAbs = indexOff + indexSize;
+    const uint64_t patOffAbs = metaOffAbs + metaStored.size();
+    uint64_t chunkOffAbs = patOffAbs + patStored.size();
+
+    Buf hdr;
+    hdr.raw(kMagic, 4);
+    hdr.u32(kVersion);
+    hdr.u32(0);                     // flags
+    hdr.u32(0);                     // reserved (keyCount lives in meta)
+    hdr.u32(0);                     // reserved
+    hdr.u64(logicalN);              // logicalEventCount (expanded)
+    hdr.u64(chunks.size());
+    hdr.u64(patternCount);
+    hdr.u64(indexOff);
+    hdr.u64(indexSize);
+    hdr.u64(metaOffAbs);
+    hdr.u64(metaComp);
+    hdr.u64(metaRaw);
+    hdr.u64(patOffAbs);
+    hdr.u64(patComp);
+    hdr.u64(patRaw);
+    hdr.u32(0);                     // crc placeholder at byte 108
+    hdr.u32(0);                     // reserved
+    hdr.padTo(kHeaderSize);
+    uint32_t hcrc = crcOf(hdr.b.data(), kHeaderSize);
+    hdr.b[108] = char(hcrc); hdr.b[109] = char(hcrc >> 8);
+    hdr.b[110] = char(hcrc >> 16); hdr.b[111] = char(hcrc >> 24);
+
+    Buf idx;
+    uint64_t coff = chunkOffAbs;
+    for (size_t k = 0; k < chunks.size(); ++k) {
+        const ChunkOut& c = chunks[k];
+        idx.u64(c.firstEvent);
+        idx.i64(c.firstTimeUs);
+        idx.i64(c.lastTimeUs);
+        idx.u64(coff);
+        idx.u32(uint32_t(cf[k].blob.size()));
+        idx.u32(uint32_t(cf[k].rawSize));
+        idx.u32(c.expanded);
+        idx.u32(c.opCount);
+        idx.u32(cf[k].crc);
+        idx.u32(cf[k].compressed ? 1u : 0u);
+        coff += cf[k].blob.size();
+    }
+
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { err = "cannot write " + path; return false; }
+    bool ok = std::fwrite(hdr.b.data(), 1, hdr.b.size(), f) == hdr.b.size() &&
+              std::fwrite(idx.b.data(), 1, idx.b.size(), f) == idx.b.size() &&
+              std::fwrite(metaStored.data(), 1, metaStored.size(), f) == metaStored.size() &&
+              std::fwrite(patStored.data(), 1, patStored.size(), f) == patStored.size();
+    for (size_t k = 0; ok && k < cf.size(); ++k)
+        ok = std::fwrite(cf[k].blob.data(), 1, cf[k].blob.size(), f) == cf[k].blob.size();
+    std::fclose(f);
+    if (!ok) { err = "write failed: " + path; return false; }
+
+    if (statsOut) {
+        statsOut->version = kVersion;
+        statsOut->flags = 0;
+        statsOut->keyCount = 0;
+        statsOut->logicalEvents = logicalN;
+        statsOut->chunkCount = chunks.size();
+        statsOut->patternCount = patternCount;
+        statsOut->literalEvents = literalEvents;
+        statsOut->storedBytes = storedBytes;
+        statsOut->rawBytes = rawBytes;
+    }
+    return true;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------ public API ---
@@ -796,12 +948,6 @@ bool writeRaid(const std::string& path, const std::vector<Event>& events,
     }
 
     // ---- chunk packing --------------------------------------------------
-    struct ChunkOut {
-        Buf payload;
-        uint64_t firstEvent = 0;
-        int64_t firstTimeUs = 0, lastTimeUs = 0;
-        uint32_t expanded = 0, opCount = 0;
-    };
     std::vector<ChunkOut> chunks;
     chunks.push_back(ChunkOut{});
     uint64_t expandedTotal = 0;
@@ -884,134 +1030,293 @@ bool writeRaid(const std::string& path, const std::vector<Event>& events,
         return false;
     }
 
-    // ---- compress --------------------------------------------------------
-    struct ChunkFile {
-        std::vector<char> blob;
-        uint64_t rawSize = 0;
-        uint32_t crc = 0;
-        bool compressed = false;
-    };
-    std::vector<ChunkFile> cf(chunks.size());
-    uint64_t storedBytes = 0, rawBytes = 0;
-    for (size_t k = 0; k < chunks.size(); ++k) {
-        const ChunkOut& c = chunks[k];
-        rawBytes += c.payload.b.size();
-        cf[k].rawSize = c.payload.b.size();
-        cf[k].crc = crcOf(c.payload.b.data(), c.payload.b.size());
-        std::vector<char> comp;
-        if (deflate(c.payload.b.data(), c.payload.b.size(), opt.compressLevel, comp) &&
-            comp.size() < c.payload.b.size()) {
-            cf[k].blob = std::move(comp);
-            cf[k].compressed = true;
-        } else {
-            cf[k].blob = c.payload.b;
-        }
-        storedBytes += cf[k].blob.size();
-    }
+    return writeRaidDone(path, patSection, chunks, n, literalEvents,
+                         patterns.size(), metaJson, opt, statsOut, err);
+}
 
-    // meta payload = metaJson + crc trailer
-    std::vector<char> metaPayload(metaJson.begin(), metaJson.end());
+// ------------------------------------------------------- FL Studio ------
+
+// Largest event count one pattern-instance op may expand to. Chunks reject
+// expansions beyond kMaxChunkExpand, so FL patterns are cut into blocks well
+// under that bound; each block becomes its own pattern-table definition.
+constexpr uint32_t kFlpBlockEvents = 3000000;
+
+bool writeRaidFlp(const std::string& path, const FlpProject& project,
+                  const EncodeOptions& opt, Info* statsOut, std::string& err) {
+    err.clear();
+    if (opt.chunkEvents == 0 || opt.chunkEvents > uint32_t(kMaxChunkExpand) ||
+        opt.compressLevel < 1 || opt.compressLevel > 10) {
+        err = "invalid encode options";
+        return false;
+    }
+    const double bpm = project.bpm > 0 ? project.bpm : 120.0;
+    const double usPerTick = 60000000.0 / (bpm * double(project.ppqn));
+
+    // ---- chart events per FL pattern (pattern-local microseconds) --------
+    std::unordered_map<int, std::vector<Event>> patEvents;
+    auto eventsFor = [&](int num) -> const std::vector<Event>* {
+        auto it = patEvents.find(num);
+        if (it != patEvents.end()) return it->second.empty() ? nullptr : &it->second;
+        Chart c;
+        std::string cerr;
+        if (!flpToChart(project, num, c, cerr)) {
+            patEvents.emplace(num, std::vector<Event>{});
+            return nullptr;
+        }
+        auto r = patEvents.emplace(num, chartEvents(c));
+        return r.first->second.empty() ? nullptr : &r.first->second;
+    };
+
+    // ---- clips on the timeline -------------------------------------------
+    struct Clip {
+        int pattern = 0;
+        int64_t startUs = 0;
+        uint64_t lenUs = 0;
+        int track = 0;
+    };
+    std::vector<Clip> clips;
+    for (const FlpPlaylistItem& it : project.playlist) {
+        if (it.pattern <= 0 || it.startTick < 0) continue;
+        clips.push_back({it.pattern, int64_t(std::llround(it.startTick * usPerTick)),
+                         uint64_t(std::llround(it.lengthTicks * usPerTick)), it.track});
+    }
+    if (clips.empty()) {
+        // No usable arrangement: lay every pattern that charts notes end to end.
+        std::vector<const FlpPattern*> order;
+        for (const FlpPattern& p : project.patterns)
+            if (eventsFor(p.number)) order.push_back(&p);
+        std::sort(order.begin(), order.end(),
+                  [](const FlpPattern* a, const FlpPattern* b) { return a->number < b->number; });
+        int64_t tUs = 0;
+        for (const FlpPattern* p : order) {
+            const std::vector<Event>& ev = *eventsFor(p->number);
+            const uint64_t len = uint64_t(ev.back().timeUs) + 1;  // content end
+            clips.push_back({p->number, tUs, len, 0});
+            tUs += int64_t(len);
+        }
+    }
+    std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
+        if (a.startUs != b.startUs) return a.startUs < b.startUs;
+        if (a.track != b.track) return a.track < b.track;
+        return a.pattern < b.pattern;
+    });
+
+    // ---- pattern-table definitions ---------------------------------------
+    // One def per (pattern, effective window): the pattern's chart events
+    // inside the clip's time window, cut into <= kFlpBlockEvents blocks.
+    // Clips sharing a pattern and effective length share the same defs.
+    struct Def {
+        Buf ops;                 // u32 opCount(=1) + one literal-rel op
+        uint64_t spanUs = 0;     // last event time - first event time
+        int64_t originUs = 0;    // pattern-local time of the first event
+        int32_t originLane = 0;  // lane of the first event (instance lane origin)
+        uint32_t count = 0;      // expanded events per instance
+        uint64_t sideP = 0, sideO = 0;
+    };
+    std::vector<Def> defs;
+    std::map<std::pair<int, uint64_t>, std::vector<uint32_t>> winDefs;
+
+    auto defsFor = [&](const Clip& c) -> const std::vector<uint32_t>* {
+        const std::vector<Event>* ev = eventsFor(c.pattern);
+        if (!ev) return nullptr;
+        const uint64_t contentEnd = uint64_t(ev->back().timeUs) + 1;
+        const uint64_t winLen = std::min<uint64_t>(c.lenUs ? c.lenUs : ~0ull, contentEnd);
+        const auto key = std::make_pair(c.pattern, winLen);
+        auto it = winDefs.find(key);
+        if (it != winDefs.end()) return &it->second;
+        std::vector<uint32_t> ids;
+        // Events are time-sorted: the window is a prefix.
+        size_t n = 0;
+        while (n < ev->size() && uint64_t(ev->size()) &&
+               uint64_t(ev->at(n).timeUs) < winLen) ++n;
+        for (size_t s = 0; s < n; s += kFlpBlockEvents) {
+            const size_t e = std::min(s + size_t(kFlpBlockEvents), n);
+            Def d;
+            d.count = uint32_t(e - s);
+            d.originUs = ev->at(s).timeUs;
+            d.originLane = ev->at(s).lane;
+            d.spanUs = uint64_t(ev->at(e - 1).timeUs - ev->at(s).timeUs);
+            d.ops.u32(1);
+            Buf op;
+            writeLiteralRel(op, ev->data() + s, e - s, ev->at(s).timeUs, 0, ev->at(s).lane);
+            d.ops.raw(op.b.data(), op.b.size());
+            for (size_t k = s; k < e; ++k) {
+                if (ev->at(k).side == 1) ++d.sideP; else ++d.sideO;
+            }
+            ids.push_back(uint32_t(defs.size()));
+            defs.push_back(std::move(d));
+        }
+        return &winDefs.emplace(key, std::move(ids)).first->second;
+    };
+
+    // Pre-build defs in clip order so pattern ids follow the arrangement.
+    for (const Clip& c : clips) defsFor(c);
+
+    // ---- pattern section --------------------------------------------------
+    Buf pb;
+    pb.u32(uint32_t(defs.size()));
+    for (const Def& d : defs) {
+        pb.u64(d.spanUs);
+        pb.u8(0);  // hasPitch: chart events carry no pitch transforms
+        pb.u32(uint32_t(d.ops.b.size()));
+        pb.raw(d.ops.b.data(), d.ops.b.size());
+    }
     {
         Buf t;
-        t.u32(crcOf(metaPayload.data(), metaPayload.size()));
-        metaPayload.insert(metaPayload.end(), t.b.begin(), t.b.end());
+        t.u32(crcOf(pb.b.data(), pb.b.size()));
+        pb.raw(t.b.data(), t.b.size());
     }
-    std::vector<char> metaStored;
-    uint64_t metaComp = 0, metaRaw = metaPayload.size();
-    {
-        std::vector<char> comp;
-        if (deflate(metaPayload.data(), metaPayload.size(), opt.compressLevel, comp) &&
-            comp.size() < metaPayload.size()) {
-            metaComp = comp.size();
-            metaStored = std::move(comp);
-        } else {
-            metaStored = metaPayload;
+    std::vector<char> patSection = std::move(pb.b);
+
+    // ---- chunks ------------------------------------------------------------
+    // Resolve each clip's defs and last event time; clips with no chart notes
+    // drop out. Chunk index entries require non-overlapping, non-decreasing
+    // time ranges, so clips are grouped into maximal sets whose event spans
+    // overlap: single-clip groups keep pattern-instance ops, overlapping
+    // groups merge into one time-sorted literal run (events interleave exactly
+    // like the arrangement plays them).
+    std::vector<const std::vector<uint32_t>*> clipIds(clips.size(), nullptr);
+    std::vector<int64_t> clipEndUs(clips.size(), 0);
+    std::vector<size_t> active;
+    for (size_t i = 0; i < clips.size(); ++i) {
+        const std::vector<uint32_t>* ids = defsFor(clips[i]);
+        if (!ids || ids->empty()) continue;
+        clipIds[i] = ids;
+        int64_t end = clips[i].startUs;
+        for (uint32_t id : *ids) {
+            const Def& d = defs[id];
+            end = std::max(end, clips[i].startUs + d.originUs + int64_t(d.spanUs));
         }
+        clipEndUs[i] = end;
+        active.push_back(i);
     }
-    std::vector<char> patStored;
-    uint64_t patComp = 0, patRaw = patSection.size();
-    {
-        std::vector<char> comp;
-        if (deflate(patSection.data(), patSection.size(), opt.compressLevel, comp) &&
-            comp.size() < patSection.size()) {
-            patComp = comp.size();
-            patStored = std::move(comp);
-        } else {
-            patStored = patSection;
+
+    std::vector<ChunkOut> chunks;
+    chunks.push_back(ChunkOut{});
+    uint64_t expandedTotal = 0, literalEvents = 0;
+    uint64_t playerNotes = 0, opponentNotes = 0;
+    int64_t maxEndUs = 0;
+
+    auto sealChunk = [&]() {
+        ChunkOut& c = chunks.back();
+        if (c.opCount == 0) return;
+        Buf final;
+        final.u32(c.opCount);
+        final.raw(c.payload.b.data(), c.payload.b.size());
+        final.u64(c.expanded);
+        c.payload = std::move(final);
+        chunks.push_back(ChunkOut{});
+    };
+
+    auto emitInstance = [&](const Clip& c, uint32_t id) {
+        const Def& d = defs[id];
+        const int64_t anchor = c.startUs + d.originUs;
+        for (;;) {
+            ChunkOut& ch = chunks.back();
+            const size_t room = opt.chunkEvents - std::min<uint64_t>(ch.expanded, opt.chunkEvents);
+            if (size_t(d.count) <= room || ch.expanded == 0) {
+                if (ch.opCount == 0) {
+                    ch.firstEvent = expandedTotal;
+                    ch.firstTimeUs = anchor;
+                }
+                writeInst(ch.payload, id, 1, anchor, 0, d.originLane);
+                ch.opCount++;
+                ch.expanded += d.count;
+                ch.lastTimeUs = anchor + int64_t(d.spanUs);
+                expandedTotal += d.count;
+                literalEvents += d.count;
+                playerNotes += d.sideP;
+                opponentNotes += d.sideO;
+                maxEndUs = std::max(maxEndUs, ch.lastTimeUs);
+                return;
+            }
+            sealChunk();
         }
+    };
+
+    size_t g = 0;
+    while (g < active.size()) {
+        size_t h = g + 1;
+        int64_t gEnd = clipEndUs[active[g]];
+        while (h < active.size() && clips[active[h]].startUs < gEnd) {
+            gEnd = std::max(gEnd, clipEndUs[active[h]]);
+            ++h;
+        }
+        if (h - g == 1) {
+            const size_t ai = active[g];
+            for (uint32_t id : *clipIds[ai]) emitInstance(clips[ai], id);
+        } else {
+            // Overlapping clips: merge their in-window events by absolute
+            // time and store them as literal runs.
+            std::vector<Event> merged;
+            for (size_t x = g; x < h; ++x) {
+                const Clip& c = clips[active[x]];
+                const std::vector<Event>* ev = eventsFor(c.pattern);
+                if (!ev) continue;
+                const uint64_t contentEnd = uint64_t(ev->back().timeUs) + 1;
+                const uint64_t winLen = std::min<uint64_t>(c.lenUs ? c.lenUs : ~0ull, contentEnd);
+                size_t n = 0;
+                while (n < ev->size() && uint64_t(ev->at(n).timeUs) < winLen) ++n;
+                merged.reserve(merged.size() + n);
+                for (size_t k = 0; k < n; ++k) {
+                    Event e2 = ev->at(k);
+                    e2.timeUs += c.startUs;
+                    merged.push_back(e2);
+                }
+            }
+            std::stable_sort(merged.begin(), merged.end(),
+                             [](const Event& a, const Event& b) { return a.timeUs < b.timeUs; });
+            size_t pos = 0;
+            while (pos < merged.size()) {
+                ChunkOut& ch = chunks.back();
+                const size_t room = opt.chunkEvents - std::min<uint64_t>(ch.expanded, opt.chunkEvents);
+                if (room == 0) { sealChunk(); continue; }
+                const size_t take = std::min(room, merged.size() - pos);
+                if (ch.opCount == 0) {
+                    ch.firstEvent = expandedTotal;
+                    ch.firstTimeUs = merged[pos].timeUs;
+                }
+                writeLiteralAbs(ch.payload, merged.data(), take, pos);
+                ch.opCount++;
+                ch.expanded += uint32_t(take);
+                ch.lastTimeUs = merged[pos + take - 1].timeUs;
+                for (size_t k = pos; k < pos + take; ++k)
+                    if (merged[k].side == 1) ++playerNotes; else ++opponentNotes;
+                expandedTotal += take;
+                literalEvents += take;
+                maxEndUs = std::max(maxEndUs, ch.lastTimeUs);
+                pos += take;
+                if (ch.expanded >= opt.chunkEvents) sealChunk();
+            }
+        }
+        g = h;
+    }
+    sealChunk();
+
+    if (expandedTotal == 0) {
+        err = "no chart notes in the project";
+        return false;
     }
 
-    // ---- write -----------------------------------------------------------
-    const uint64_t indexOff = kHeaderSize;
-    const uint64_t indexSize = chunks.size() * kIndexEntrySize;
-    const uint64_t metaOffAbs = indexOff + indexSize;
-    const uint64_t patOffAbs = metaOffAbs + metaStored.size();
-    uint64_t chunkOffAbs = patOffAbs + patStored.size();
+    // ---- meta -------------------------------------------------------------
+    Chart meta;
+    meta.title = project.title;
+    meta.keys = 4;
+    meta.speed = std::min(6.0, std::max(0.5, bpm / 50.0));
+    meta.tempo.push_back({0.0, bpm, 0.0});
+    meta.focus.push_back({0.0, 1});
+    const double songMs = double(maxEndUs) / 1000.0;
+    const double sectionMs = 4.0 * 60000.0 / bpm;
+    for (double t = 0; t < songMs; t += sectionMs)
+        meta.sections.push_back({t, true, false, false, 4.0, bpm});
+    meta.lengthMs = songMs;
+    meta.playerNotes = playerNotes;
+    meta.opponentNotes = opponentNotes;
+    meta.rawNoteCount = expandedTotal;
+    const std::string mj = chartMetaJson(meta);
 
-    Buf hdr;
-    hdr.raw(kMagic, 4);
-    hdr.u32(kVersion);
-    hdr.u32(0);                     // flags
-    hdr.u32(0);                     // reserved (keyCount lives in meta)
-    hdr.u32(0);                     // reserved
-    hdr.u64(n);                     // logicalEventCount (expanded)
-    hdr.u64(chunks.size());
-    hdr.u64(patterns.size());
-    hdr.u64(indexOff);
-    hdr.u64(indexSize);
-    hdr.u64(metaOffAbs);
-    hdr.u64(metaComp);
-    hdr.u64(metaRaw);
-    hdr.u64(patOffAbs);
-    hdr.u64(patComp);
-    hdr.u64(patRaw);
-    hdr.u32(0);                     // crc placeholder at byte 108
-    hdr.u32(0);                     // reserved
-    hdr.padTo(kHeaderSize);
-    uint32_t hcrc = crcOf(hdr.b.data(), kHeaderSize);
-    hdr.b[108] = char(hcrc); hdr.b[109] = char(hcrc >> 8);
-    hdr.b[110] = char(hcrc >> 16); hdr.b[111] = char(hcrc >> 24);
-
-    Buf idx;
-    uint64_t coff = chunkOffAbs;
-    for (size_t k = 0; k < chunks.size(); ++k) {
-        const ChunkOut& c = chunks[k];
-        idx.u64(c.firstEvent);
-        idx.i64(c.firstTimeUs);
-        idx.i64(c.lastTimeUs);
-        idx.u64(coff);
-        idx.u32(uint32_t(cf[k].blob.size()));
-        idx.u32(uint32_t(cf[k].rawSize));
-        idx.u32(c.expanded);
-        idx.u32(c.opCount);
-        idx.u32(cf[k].crc);
-        idx.u32(cf[k].compressed ? 1u : 0u);
-        coff += cf[k].blob.size();
-    }
-
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) { err = "cannot write " + path; return false; }
-    bool ok = std::fwrite(hdr.b.data(), 1, hdr.b.size(), f) == hdr.b.size() &&
-              std::fwrite(idx.b.data(), 1, idx.b.size(), f) == idx.b.size() &&
-              std::fwrite(metaStored.data(), 1, metaStored.size(), f) == metaStored.size() &&
-              std::fwrite(patStored.data(), 1, patStored.size(), f) == patStored.size();
-    for (size_t k = 0; ok && k < cf.size(); ++k)
-        ok = std::fwrite(cf[k].blob.data(), 1, cf[k].blob.size(), f) == cf[k].blob.size();
-    std::fclose(f);
-    if (!ok) { err = "write failed: " + path; return false; }
-
-    if (statsOut) {
-        statsOut->version = kVersion;
-        statsOut->flags = 0;
-        statsOut->keyCount = 0;
-        statsOut->logicalEvents = n;
-        statsOut->chunkCount = chunks.size();
-        statsOut->patternCount = patterns.size();
-        statsOut->literalEvents = literalEvents;
-        statsOut->storedBytes = storedBytes;
-        statsOut->rawBytes = rawBytes;
-    }
-    return true;
+    return writeRaidDone(path, patSection, chunks, expandedTotal, literalEvents,
+                         defs.size(), mj, opt, statsOut, err);
 }
 
 // ------------------------------------------------------------ reading -----

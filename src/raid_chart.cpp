@@ -130,6 +130,8 @@ std::vector<Event> chartEvents(const Chart& c) {
     return out;
 }
 
+std::string chartMetaJson(const Chart& c) { return metaJson(c, nullptr); }
+
 bool saveChart(const std::string& path, const Chart& chart,
                const EncodeOptions& opt, Info* statsOut, std::string& err) {
     // Two passes would be needed to embed final stats in meta; instead write

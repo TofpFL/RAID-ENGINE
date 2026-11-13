@@ -48,6 +48,7 @@ enum : uint8_t {
     kTitle = 0xC2,
     kPlugName = 0xC9,
     kNoteData = 0xE0,
+    kPlaylist = 0xE9,   // arrangement clips: packed 32/60-byte records
 };
 
 constexpr size_t kNoteSize = 24;
@@ -192,7 +193,28 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                 case kPatName:
                     if (prevId == kPatStart) pattern(int(prevValue)).name = flString(data, len);
                     break;
-                case kNoteData: {
+                case kPlaylist: {
+                // Records are 60 bytes in FL 21+ files, 32 before; a blob
+                // divisible by 60 uses the new size (PyFLP's rule).
+                const size_t rec = len % 60 == 0 && len >= 60 ? 60 : 32;
+                for (size_t k = 0; k + rec <= len; k += rec) {
+                    const unsigned char* r = data + k;
+                    const int32_t pos = int32_t(rd32(r));
+                    const int32_t patBase = int16_t(rd16(r + 4));
+                    const int32_t itemIdx = int16_t(rd16(r + 6));
+                    const int32_t clipLen = int32_t(rd32(r + 8));
+                    const int32_t trackRvidx = int16_t(rd16(r + 12));
+                    const int pattern = itemIdx - patBase;
+                    if (pattern <= 0 || pos < 0 || clipLen <= 0) continue;  // channel/audio clips
+                    FlpPlaylistItem it;
+                    it.pattern = pattern;
+                    it.track = trackRvidx > 0 ? 500 - trackRvidx : 0;
+                    it.startTick = uint32_t(pos);
+                    it.lengthTicks = uint32_t(clipLen);
+                    out.playlist.push_back(it);
+                }
+                break;
+            }            case kNoteData: {
                     FlpPattern& p = pattern(prevId == kPatStart ? int(prevValue) : 0);
                     for (size_t k = 0; k + kNoteSize <= len; k += kNoteSize) {
                         const unsigned char* r = data + k;

@@ -40,6 +40,8 @@
 
 #include "chart.hpp"
 
+namespace gh { struct FlpProject; }
+
 namespace gh::raid {
 
 constexpr uint32_t kVersion = 1;
@@ -102,6 +104,16 @@ struct EncodeOptions {
 bool writeRaid(const std::string& path, const std::vector<Event>& events,
                std::string_view metaJson, const EncodeOptions& opt,
                Info* statsOut, std::string& err);
+
+// Encodes an FL Studio project directly: every pattern's chart notes become
+// pattern-table definitions (stored once, split into blocks that fit the
+// decoder's per-chunk expansion bound) and each playlist clip becomes a
+// pattern-instance op on the timeline — the file decodes as one contiguous
+// chart, exactly like a materialized JSON chart, without ever building it.
+// Projects without a playlist arrangement lay their chart patterns end to
+// end. `song.flp#N` single-pattern mode stays on the Chart path instead.
+bool writeRaidFlp(const std::string& path, const FlpProject& project,
+                  const EncodeOptions& opt, Info* statsOut, std::string& err);
 
 // ---------------------------------------------------------------- reader --
 

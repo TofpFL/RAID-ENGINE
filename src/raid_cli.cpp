@@ -17,23 +17,43 @@
 
 #include "chart.hpp"
 #include "chart_stream.hpp"
+#include "flp_import.hpp"
 #include "raid.hpp"
 #include "raid_chart.hpp"
 
 using namespace gh;
 
 static int convert(const std::string& in, const std::string& out) {
-    Chart c;
-    std::string err;
-    if (!loadChartFile(in, "", c, err)) {
-        std::printf("load failed: %s\n", err.c_str());
-        return 1;
-    }
     raid::EncodeOptions opt;
     raid::Info info;
-    if (!raid::saveChart(out, c, opt, &info, err)) {
-        std::printf("encode failed: %s\n", err.c_str());
-        return 1;
+    std::string err;
+
+    // Whole .flp/.fsc projects encode directly: patterns are stored once as
+    // pattern-table definitions and playlist clips place them on the
+    // timeline — the file decodes as one contiguous chart. A `#N` suffix
+    // still selects a single pattern through the Chart path.
+    std::string flpFile;
+    int flpPat = -1;
+    if (flpChartPath(in, flpFile, flpPat) && flpPat < 0) {
+        FlpProject p;
+        if (!readFlpFile(flpFile, p, err)) {
+            std::printf("load failed: %s\n", err.c_str());
+            return 1;
+        }
+        if (!raid::writeRaidFlp(out, p, opt, &info, err)) {
+            std::printf("encode failed: %s\n", err.c_str());
+            return 1;
+        }
+    } else {
+        Chart c;
+        if (!loadChartFile(in, "", c, err)) {
+            std::printf("load failed: %s\n", err.c_str());
+            return 1;
+        }
+        if (!raid::saveChart(out, c, opt, &info, err)) {
+            std::printf("encode failed: %s\n", err.c_str());
+            return 1;
+        }
     }
     std::printf("%s -> %s\n", in.c_str(), out.c_str());
     std::printf("  logical events : %llu\n", (unsigned long long)info.logicalEvents);

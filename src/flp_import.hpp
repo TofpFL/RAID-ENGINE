@@ -27,6 +27,12 @@ struct FlpNote {
     uint8_t velocity = 100, flags = 0;
 };
 
+struct FlpPlaylistItem {
+    int pattern = 0;        // FL pattern number (item_index - pattern_base)
+    int track = 0;          // playlist track
+    uint32_t startTick = 0, lengthTicks = 0;
+};
+
 struct FlpPattern {
     int number = 0;
     std::string name;
@@ -42,6 +48,7 @@ struct FlpProject {
     // plugin name). flpToChart matches "Opp"/"Player" here: notes on those
     // channels chart by channel, every key, instead of the FPC pitch windows.
     std::map<uint32_t, std::vector<std::string>> channelNames;
+    std::vector<FlpPlaylistItem> playlist;  // arrangement clips, in file order
     std::vector<FlpPattern> patterns;
 };
 

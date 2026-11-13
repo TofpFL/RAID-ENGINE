@@ -14,6 +14,7 @@
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
+#include "raid.hpp"
 #include "scene.hpp"
 #include "song_scan.hpp"
 
@@ -499,6 +500,75 @@ std::string makeFlpNamed() {
     return f + ev;
 }
 
+// An FL project with a playlist arrangement: three patterns placed at
+// ticks, two of whose event spans overlap (merged literals on encode).
+std::string makeFlpPlaylist() {
+    std::string ev;
+    auto word = [&](uint8_t id, uint16_t v) { ev += char(id); ev += char(v & 255); ev += char(v >> 8); };
+    auto dword = [&](uint8_t id, uint32_t v) {
+        ev += char(id);
+        for (int i = 0; i < 4; ++i) ev += char((v >> (8 * i)) & 255);
+    };
+    auto array = [&](uint8_t id, const std::string& data) {
+        ev += char(id);
+        size_t n = data.size();
+        do {
+            uint8_t c = uint8_t(n & 0x7F);
+            n >>= 7;
+            if (n) c |= 0x80;
+            ev += char(c);
+        } while (n);
+        ev += data;
+    };
+    auto notes = [](const std::vector<std::tuple<uint32_t, uint32_t, uint32_t>>& v) {
+        std::string d;
+        for (const auto& [t, dur, pitch] : v) {
+            std::string r(24, '\0');
+            for (int i = 0; i < 4; ++i) r[size_t(i)] = char((t >> (8 * i)) & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(8 + i)] = char((dur >> (8 * i)) & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(12 + i)] = char((pitch >> (8 * i)) & 255);
+            r[21] = char(100);
+            d += r;
+        }
+        return d;
+    };
+    dword(0x9C, 150000);  // 150 BPM, ppqn 96 -> 4166.67 us per tick
+    word(0x40, 0);
+    array(0xC9, std::string("F\0P\0C\0\0\0", 8));  // UTF-16LE "FPC"
+    word(0x41, 1);
+    array(0xE0, notes({{0, 24, 60}, {96, 24, 61}, {192, 24, 48}}));
+    word(0x41, 2);
+    array(0xE0, notes({{0, 24, 62}, {96, 24, 49}}));
+    word(0x41, 3);
+    array(0xE0, notes({{0, 24, 60}, {96, 24, 63}}));
+    // Playlist: 32-byte records {i32 pos, i16 patBase=20480, i16 itemIdx,
+    // i32 len, i16 trackRvidx=499 (track 1)}.
+    std::string pl;
+    for (const auto& [pat, st, ln] : {std::tuple<int, int, int>{1, 0, 576},
+                                     {std::tuple<int, int, int>{3, 96, 480}},
+                                     {std::tuple<int, int, int>{2, 576, 288}}}) {
+        std::string r(32, '\0');
+        auto p32 = [&](int off, uint32_t x) { for (int i = 0; i < 4; ++i) r[size_t(off + i)] = char((x >> (8 * i)) & 255); };
+        auto p16 = [&](int off, uint16_t x) { r[size_t(off)] = char(x & 255); r[size_t(off + 1)] = char(x >> 8); };
+        p32(0, uint32_t(st));
+        p16(4, 20480);
+        p16(6, uint16_t(20480 + pat));
+        p32(8, uint32_t(ln));
+        p16(12, 499);
+        pl += r;
+    }
+    array(0xE9, pl);
+    std::string f = "FLhd";
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
+    u32(6);
+    f += std::string("\0\0\x02\0", 4);
+    f += char(96);
+    f += char(0);
+    f += "FLdt";
+    u32(uint32_t(ev.size()));
+    return f + ev;
+}
+
 void testFlStudio() {
     FlpProject p;
     std::string err;
@@ -558,6 +628,42 @@ void testFlStudio() {
     const SongEntry* e = byTitle(s, "Forge Test");
     SCHECK(e && e->diffs.size() == 2 && e->diffs[0] == "Easy (FL Studio)" && e->diffs[1] == "Hard (FL Studio)");
     fs::remove_all(base);
+
+    // A project with a playlist encodes straight to .raid: patterns become
+    // pattern-table definitions, clips become instances on the timeline, and
+    // overlapping clips merge into sorted literals — one contiguous chart.
+    FlpProject pp;
+    SCHECK(readFlp(makeFlpPlaylist(), pp, err));
+    SCHECK(pp.playlist.size() == 3 && pp.playlist[0].pattern == 1 && pp.playlist[0].startTick == 0 &&
+           pp.playlist[1].pattern == 3 && pp.playlist[2].pattern == 2 && pp.playlist[2].startTick == 576);
+    const fs::path raidPath = fs::temp_directory_path() / "gh_flp_playlist.raid";
+    raid::Info rinfo;
+    SCHECK(raid::writeRaidFlp(str(raidPath), pp, raid::EncodeOptions{}, &rinfo, err));
+    SCHECK(rinfo.logicalEvents == 7);
+    raid::Reader rd;
+    SCHECK(rd.open(str(raidPath), err));
+    std::vector<raid::Event> evs;
+    SCHECK(rd.range(0, 3000000, evs, err));
+    // 150 BPM / 96 ppqn -> 4166.67 us a tick: pat1@0 + pat3@96 ticks overlap,
+    // pat2@576 ticks is isolated (a pattern instance).
+    const int64_t T96 = 400000, T192 = 800000, T576 = 2400000, T672 = 2800000;
+    SCHECK(evs.size() == 7);
+    if (evs.size() == 7) {
+        SCHECK(evs[0].timeUs == 0 && evs[0].lane == 0 && evs[0].side == 0);
+        SCHECK(evs[1].timeUs == T96 && evs[1].lane == 1 && evs[1].side == 0);
+        SCHECK(evs[2].timeUs == T96 && evs[2].lane == 0 && evs[2].side == 0);  // pat3's first note
+        SCHECK(evs[3].timeUs == T192 && evs[3].lane == 0 && evs[3].side == 1);
+        SCHECK(evs[4].timeUs == T192 && evs[4].lane == 3 && evs[4].side == 0);  // pat3's second note
+        SCHECK(evs[5].timeUs == T576 && evs[5].lane == 2 && evs[5].side == 0);
+        SCHECK(evs[6].timeUs == T672 && evs[6].lane == 1 && evs[6].side == 1);
+    }
+    std::vector<raid::Reader::OpSegment> segs;
+    SCHECK(rd.opLog(0, 3000000, segs, err));
+    int kinds = 0;
+    for (const auto& s : segs) kinds += s.kind == 2 ? 1 : 0;
+    SCHECK(kinds == 1);  // only the isolated pat2 clip stayed a pattern instance
+    rd.close();
+    fs::remove(raidPath);
 }
 
 }  // namespace
@@ -573,6 +679,15 @@ int printFlp(int argc, char** argv, int first) {
         }
         std::printf("%s: ppqn %d, bpm %.3f, title '%s', chart channel %d, %zu patterns\n", argv[i], p.ppqn, p.bpm,
                     p.title.c_str(), p.chartChannel, p.patterns.size());
+        if (!p.playlist.empty()) {
+            std::printf("  playlist: %zu clips\n", p.playlist.size());
+            for (size_t i = 0; i < p.playlist.size() && i < 40; ++i)
+                std::printf("    clip %zu: pat %d track %d @ %.2f s len %.2f s\n", i,
+                            p.playlist[i].pattern, p.playlist[i].track,
+                            p.playlist[i].startTick / double(p.ppqn) * 60.0 / p.bpm,
+                            p.playlist[i].lengthTicks / double(p.ppqn) * 60.0 / p.bpm);
+            if (p.playlist.size() > 40) std::printf("    ...\n");
+        }
         for (const FlpPattern& pat : p.patterns) {
             size_t chart = 0, onChannel = 0;
             for (const FlpNote& n : pat.notes) {
