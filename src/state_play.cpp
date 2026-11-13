@@ -62,6 +62,7 @@ std::string psychFcLabel(const Session& s) {
 PlayState::PlayState(PlayRequest r) : req_(std::move(r)) {}
 
 PlayState::~PlayState() {
+    patternLog_.reset();  // noteStream_ is still alive here
     stopRendering();
     if (uiFromMod_) app().psychUiForSong({});  // the interface as it was
     stopPauseMusic();
@@ -325,6 +326,7 @@ void PlayState::setup() {
     noteStream_ = prep_.stream;
     streamMirror_ = prep_.mirrored;
     streamFailed_ = false;
+    startPatternLog();
     cfg_.ghostTapping = a.settings.ghostTapping;
     cfg_.botplay = !req_.story && a.mods.botplay;
     cfg_.practice = !req_.story && a.mods.practice;
@@ -464,6 +466,7 @@ void PlayState::restart() {
         session_.setTotals(chart_.playerNotes, chart_.opponentNotes);
         fedUs_ = std::numeric_limits<int64_t>::min() / 4;
         prefetchUs_ = fedUs_;
+        startPatternLog();  // fresh log for the replayed run
     }
     popups_.clear();
     fx_.clear();
@@ -555,6 +558,28 @@ void PlayState::pumpNotes() {
     if (endUs >= prefetchUs_) {
         noteStream_->prefetch(endUs, endUs + int64_t(kPrefetchMs * 1000.0));
         prefetchUs_ = endUs + int64_t(kPrefetchMs * 500.0);
+    }
+    if (patternLog_) {
+        std::string lerr;
+        if (!patternLog_->tick(endUs, lerr)) {
+            debug_.push_back({"pattern log: " + lerr, {255, 80, 80, 255}, app().now});
+            patternLog_.reset();
+        }
+    }
+}
+
+void PlayState::startPatternLog() {
+    App& a = app();
+    patternLog_.reset();
+    if (req_.story || !a.mods.patternLog || !noteStream_) return;
+    patternLog_ = std::make_unique<raid::PatternLogger>();
+    const std::string lp = a.userDir + "raid_pattern_log.txt";
+    std::string lerr;
+    if (patternLog_->open(noteStream_->reader(), lp, lerr))
+        debug_.push_back({"pattern log -> " + lp, {120, 220, 255, 255}, a.now});
+    else {
+        debug_.push_back({"pattern log failed: " + lerr, {255, 80, 80, 255}, a.now});
+        patternLog_.reset();
     }
 }
 

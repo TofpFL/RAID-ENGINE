@@ -198,6 +198,9 @@ struct Ctx {
 struct Env {
     const std::vector<char>* blob = nullptr;   // pattern section payload
     const std::vector<PatternRec>* pats = nullptr;
+    // patHasInst[i]: pattern i's op stream contains pattern ops (it is not
+    // a leaf). Only used by the op-log walker; emitOps ignores it.
+    const std::vector<uint8_t>* hasInst = nullptr;
 };
 // (blob->size() bounds every PatternRec.off + len)
 
@@ -330,6 +333,167 @@ bool emitOps(Cur& cur, const Env& env, const PatternRec* pat, const Ctx& ctx,
                         ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta};
                 Cur cc{env.blob->data() + child.off, env.blob->data() + child.off + child.len};
                 if (!emitOps(cc, env, &child, sub, depth + 1, eo, err)) return false;
+            }
+        } else {
+            err = "unknown op kind";
+            return false;
+        }
+    }
+    return cur.ok;
+}
+
+// -------------------------------------------------- op-log walker ---------
+// Mirrors emitOps but records segments instead of events. Only LEAF ops
+// produce segments: literal runs always, pattern instances only when the
+// pattern's own op stream contains no further pattern ops. Patterns that
+// merely wrap other patterns are traversed (per repeat, with the same
+// time/pitch/lane transforms emitOps applies) but not logged, so the
+// resulting segment stream is a flat "what is sounding" timeline.
+
+// Skips a literal op's column data after its u32 count: the time column
+// (n varints) plus 6 property columns of n varints each.
+bool skipLiteralBody(Cur& cur, uint32_t n, std::string& err) {
+    for (uint32_t k = 0; k < n; ++k) {
+        (void)cur.var();
+        if (!cur.ok) { err = "truncated literal"; return false; }
+    }
+    for (int col = 0; col < 6; ++col)
+        for (uint32_t k = 0; k < n; ++k) {
+            (void)cur.var();
+            if (!cur.ok) { err = "truncated literal"; return false; }
+        }
+    return true;
+}
+
+// Scans one pattern definition's top-level ops (cur at its opCount) and
+// reports whether any op is a pattern instance. Used to flag non-leaf
+// patterns for the op-log walker. `found` is only meaningful on success.
+bool opsContainInst(Cur& cur, bool& found, std::string& err) {
+    found = false;
+    uint32_t opCount = uint32_t(cur.u32());
+    if (!cur.ok || opCount > (1u << 22)) { err = "bad op count"; return false; }
+    for (uint32_t o = 0; o < opCount; ++o) {
+        uint8_t kind = cur.u8();
+        if (!cur.ok) { err = "truncated op"; return false; }
+        if (kind == kOpLiteralAbs || kind == kOpLiteralRel) {
+            uint32_t n = uint32_t(cur.u32());
+            if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
+            if (!skipLiteralBody(cur, n, err)) return false;
+        } else if (kind == kOpPattern) {
+            found = true;
+            return true;
+        } else {
+            err = "unknown op kind";
+            return false;
+        }
+    }
+    return cur.ok;
+}
+
+struct WalkOut {
+    std::vector<Reader::OpSegment>* segs;
+    uint32_t chunk = 0;
+    uint64_t produced = 0;   // expanded events accounted for (== emitOps' eo.produced)
+    uint64_t limit = 0;      // chunk's declared expanded count
+    uint64_t visits = 0;     // op visits, capped against hostile nesting
+};
+
+bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
+                 bool emit, std::string& err) {
+    uint32_t n = uint32_t(cur.u32());
+    if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
+    if (wo.produced + n > wo.limit) { err = "chunk expands beyond its declared size"; return false; }
+    int64_t t = relative ? ctx.timeBase : 0;
+    if (relative) {
+        if (!addTime(t, cur.var(), err)) return false;
+    } else {
+        t = cur.zig();
+    }
+    if (!cur.ok) { err = "truncated literal"; return false; }
+    if (t < 0) { err = "negative event time"; return false; }
+    const int64_t t0 = t;
+    for (uint32_t k = 1; k < n; ++k) {
+        uint64_t d = cur.var();
+        if (!cur.ok) { err = "truncated literal"; return false; }
+        if (!addTime(t, d, err)) return false;
+    }
+    // Property columns (length, pitch, lane, attr, type, stack): n varints
+    // each — zigzag and varint consume identically, values unneeded here.
+    for (int col = 0; col < 6; ++col)
+        for (uint32_t k = 0; k < n; ++k) {
+            (void)cur.var();
+            if (!cur.ok) { err = "truncated literal"; return false; }
+        }
+    if (emit) {
+        Reader::OpSegment s;
+        s.startUs = t0; s.endUs = t; s.chunk = wo.chunk;
+        s.kind = 0; s.count = n;
+        wo.segs->push_back(s);
+    }
+    wo.produced += n;
+    return true;
+}
+
+// `emit` is false while walking inside a leaf pattern instance: events are
+// still counted (produced/visits bounds apply) but no segments are
+// recorded, so a pattern's own literal content doesn't double-cover the
+// pattern segment that represents it.
+bool walkOps(Cur& cur, const Env& env, const Ctx& ctx, int depth,
+             WalkOut& wo, bool emit, std::string& err) {
+    if (depth > kMaxDepth) { err = "pattern nesting too deep"; return false; }
+    uint32_t opCount = uint32_t(cur.u32());
+    if (!cur.ok || opCount > (1u << 22)) { err = "bad op count"; return false; }
+    for (uint32_t o = 0; o < opCount; ++o) {
+        if (++wo.visits > (1ull << 25)) { err = "op log too large"; return false; }
+        uint8_t kind = cur.u8();
+        if (!cur.ok) { err = "truncated op"; return false; }
+        if (kind == kOpLiteralAbs) {
+            if (!walkLiteral(cur, false, ctx, wo, emit, err)) return false;
+        } else if (kind == kOpLiteralRel) {
+            if (depth == 0) { err = "relative literal outside a pattern"; return false; }
+            if (!walkLiteral(cur, true, ctx, wo, emit, err)) return false;
+        } else if (kind == kOpPattern) {
+            uint32_t pid = uint32_t(cur.u32());
+            uint32_t reps = uint32_t(cur.u32());
+            int64_t anchor = cur.zig();
+            int64_t pitchDelta = cur.zig();
+            int64_t laneDelta = cur.zig();
+            if (!cur.ok) { err = "truncated pattern op"; return false; }
+            if (!env.pats || pid >= env.pats->size()) { err = "bad pattern id"; return false; }
+            const PatternRec& child = (*env.pats)[pid];
+            if (child.len < 4 || child.off > env.blob->size() ||
+                child.len > env.blob->size() - child.off ||
+                child.spanUs > (1ull << 50) ||
+                (child.spanUs && uint64_t(reps) > (1ull << 50) / child.spanUs) ||
+                anchor < -(int64_t(1) << 50) || anchor > (int64_t(1) << 50) ||
+                pitchDelta < -kFieldBound || pitchDelta > kFieldBound ||
+                laneDelta < -kFieldBound || laneDelta > kFieldBound) {
+                err = "pattern transform out of range";
+                return false;
+            }
+            if (reps > wo.limit) { err = "pattern repeat count too large"; return false; }
+            const bool leaf = !env.hasInst || pid >= env.hasInst->size() ||
+                              (*env.hasInst)[pid] == 0;
+            if (leaf && emit) {
+                const int64_t startUs = ctx.timeBase + anchor;
+                int64_t endUs = startUs + int64_t(reps) * int64_t(child.spanUs);
+                if (endUs < startUs) endUs = INT64_MAX;
+                Reader::OpSegment s;
+                s.startUs = startUs; s.endUs = endUs; s.chunk = wo.chunk;
+                s.kind = 2; s.count = pid; s.aux = reps;
+                s.pitchDelta = int32_t(pitchDelta); s.laneDelta = int32_t(laneDelta);
+                wo.segs->push_back(s);
+            }
+            // Leaf instances are walked with emit=false: their expanded
+            // events still count toward produced/visits, but their literal
+            // content stays hidden behind the pattern segment.
+            const bool childEmit = emit && !leaf;
+            for (uint32_t r = 0; r < reps; ++r) {
+                Ctx sub{ctx.timeBase + anchor + int64_t(r) * int64_t(child.spanUs),
+                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta};
+                Cur cc{env.blob->data() + child.off,
+                       env.blob->data() + child.off + child.len};
+                if (!walkOps(cc, env, sub, depth + 1, wo, childEmit, err)) return false;
             }
         } else {
             err = "unknown op kind";
@@ -901,6 +1065,7 @@ struct Reader::Impl {
     std::mutex patMutex_;
     std::vector<char> patternBlob_;
     std::vector<PatternRec> patterns_;
+    std::vector<uint8_t> patHasInst_;  // pattern ops contain nested instances
 
     // FILE* has one shared seek position: every seek+read is serialized here.
     // Decompression and pattern expansion run outside this lock.
@@ -1058,12 +1223,11 @@ struct Reader::Impl {
         return true;
     }
 
-    bool loadPatterns(std::string& err) {
-        if (patternsLoaded_.load(std::memory_order_acquire)) return true;
-        std::lock_guard<std::mutex> lk(patMutex_);
-        if (patternsLoaded_.load(std::memory_order_relaxed)) return true;
-        patternsLoaded_.store(true, std::memory_order_relaxed);  // fail once, stay failed
-        if (patRaw_ == 0) { patterns_.clear(); return true; }
+    // Parses the pattern table. Caller must hold patMutex_. The loaded flag
+    // is only published after this returns, so concurrent decodes never see
+    // a half-filled patterns_/patHasInst_.
+    bool loadPatternsImpl(std::string& err) {
+        if (patRaw_ == 0) { patterns_.clear(); patHasInst_.clear(); return true; }
         if (!readSection(patOff_, patStored_, patRaw_, patStored_ != 0, patternBlob_, err))
             return false;
         const size_t n = patternBlob_.size();
@@ -1094,8 +1258,32 @@ struct Reader::Impl {
             patterns_.push_back(p);
         }
         if (!c.ok || c.p != patternBlob_.data() + n - 4) { err = "trailing pattern data"; return false; }
-        patternsLoaded_.store(true, std::memory_order_release);
+        // Flag patterns whose op stream nests further instances; the op-log
+        // walker uses this to emit only leaf segments. A pattern whose ops
+        // fail to parse is flagged non-leaf — decoding it errors properly.
+        patHasInst_.assign(patterns_.size(), 0);
+        for (size_t i = 0; i < patterns_.size(); ++i) {
+            const PatternRec& p = patterns_[i];
+            Cur pc{patternBlob_.data() + p.off, patternBlob_.data() + p.off + p.len};
+            bool found = false;
+            std::string scanErr;
+            if (!opsContainInst(pc, found, scanErr))
+                patHasInst_[i] = 1;
+            else
+                patHasInst_[i] = found ? 1 : 0;
+        }
         return true;
+    }
+
+    bool loadPatterns(std::string& err) {
+        if (patternsLoaded_.load(std::memory_order_acquire)) return true;
+        std::lock_guard<std::mutex> lk(patMutex_);
+        if (patternsLoaded_.load(std::memory_order_relaxed)) return true;
+        // Done once, win or fail: a failed parse stays failed rather than
+        // being retried by every later decode.
+        const bool ok = loadPatternsImpl(err);
+        patternsLoaded_.store(true, std::memory_order_release);
+        return ok;
     }
 
     // Decodes one chunk's expanded events, appending to out. Serialized by
@@ -1129,6 +1317,37 @@ struct Reader::Impl {
         uint64_t declared = cur.u64();
         if (!cur.ok || cur.p != cur.end || declared != eo.produced || eo.produced != e.expanded) {
             out.resize(before);
+            err = "chunk event count mismatch";
+            return false;
+        }
+        return true;
+    }
+
+    // Walks a chunk's op stream without materializing events, recording
+    // leaf segments (literals and innermost pattern instances) via walkOps.
+    // Pattern identity only survives here — expanded events lose it.
+    bool chunkOps(const ChunkEnt& e, size_t chunkIdx, std::vector<Reader::OpSegment>& out,
+                  std::string& err) {
+        DecodeGuard guard(decSem_);
+        std::vector<char> payload;
+        const bool compressed = (e.flags & 1) != 0;
+        if (!readSection(e.offset, compressed ? e.storedSize : 0, e.rawSize, compressed, payload, err))
+            return false;
+        if (payload.size() < 12 || crcOf(payload.data(), payload.size()) != e.crc) {
+            err = "chunk checksum mismatch";
+            return false;
+        }
+        if (!loadPatterns(err)) return false;
+
+        Cur cur{payload.data(), payload.data() + payload.size()};
+        Env env{&patternBlob_, &patterns_, &patHasInst_};
+        Ctx ctx{};
+        WalkOut wo{&out, uint32_t(chunkIdx), 0, e.expanded, 0};
+        if (!walkOps(cur, env, ctx, 0, wo, true, err)) return false;
+        // trailer: u64 expandedCount — same validation as decodeChunk.
+        uint64_t declared = cur.u64();
+        if (!cur.ok || cur.p != cur.end || declared != wo.produced ||
+            wo.produced != e.expanded) {
             err = "chunk event count mismatch";
             return false;
         }
@@ -1283,6 +1502,22 @@ bool Reader::range(int64_t startUs, int64_t endUs, std::vector<Event>& out,
     return true;
 }
 
+bool Reader::opLog(int64_t startUs, int64_t endUs, std::vector<OpSegment>& out,
+                   std::string& err) {
+    if (!impl_) { err = "not open"; return false; }
+    Impl& im = *impl_;
+    if (endUs <= startUs || im.chunks_.empty()) return true;
+    const auto& chunks = im.chunks_;
+    size_t lo = 0, hi = chunks.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (chunks[mid].lastTimeUs >= startUs) hi = mid; else lo = mid + 1;
+    }
+    for (size_t i = lo; i < chunks.size() && chunks[i].firstTimeUs < endUs; ++i)
+        if (!im.chunkOps(chunks[i], i, out, err)) return false;
+    return true;
+}
+
 bool Reader::chunkTimeRange(size_t i, int64_t& firstUs, int64_t& lastUs) const {
     if (!impl_ || i >= impl_->chunks_.size()) return false;
     firstUs = impl_->chunks_[i].firstTimeUs;
@@ -1304,6 +1539,77 @@ std::future<bool> Reader::chunkEventsAsync(size_t i, std::vector<Event>* out) {
         std::string err;
         return im->chunkEvents(i, *out, err);
     });
+}
+
+// -------------------------------------------------------- pattern log ----
+
+bool PatternLogger::open(Reader& rd, const std::string& path, std::string& err) {
+    close();
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { err = "cannot open pattern log file"; return false; }
+    rd_ = &rd;
+    f_ = f;
+    path_ = path;
+    winStartUs_ = 0;
+    prevHorizonUs_ = -1;
+    written_.clear();
+    prevPatId_ = -1;
+    instances_ = changes_ = 0;
+    std::fprintf(f_, "# RAID pattern log\n");
+    return true;
+}
+
+void PatternLogger::close() {
+    if (f_) {
+        std::string err;
+        (void)tick(INT64_MAX, err);  // flush any tail the playhead never reached
+        std::fprintf(f_, "# end: %llu pattern instances, %llu pattern->pattern changes\n",
+                     (unsigned long long)instances_, (unsigned long long)changes_);
+        std::fclose(f_);
+        f_ = nullptr;
+    }
+    rd_ = nullptr;
+    written_.clear();
+}
+
+bool PatternLogger::tick(int64_t horizonUs, std::string& err) {
+    if (!f_) return true;
+    if (horizonUs <= prevHorizonUs_) return true;
+    std::vector<Reader::OpSegment> segs;
+    // Only chunks overlapping the new stretch are walked; the boundary
+    // chunk is re-read but its already-logged segments are skipped by the
+    // per-chunk ordinal in written_.
+    if (!rd_->opLog(winStartUs_, horizonUs, segs, err)) return false;
+    uint32_t lastChunk = UINT32_MAX, pos = 0;
+    for (const Reader::OpSegment& s : segs) {
+        if (s.chunk != lastChunk) { lastChunk = s.chunk; pos = 0; }
+        uint32_t& w = written_[s.chunk];
+        ++pos;
+        if (pos <= w) continue;
+        w = pos;
+        if (s.kind == 2) {
+            ++instances_;
+            const bool change = prevPatId_ >= 0 && int64_t(s.count) != prevPatId_;
+            if (change) {
+                ++changes_;
+                std::fprintf(f_, ">>> pattern change #%lld -> #%u\n",
+                             (long long)prevPatId_, s.count);
+            }
+            prevPatId_ = int64_t(s.count);
+            std::fprintf(f_,
+                         "pat#%-6u x%-4u chunk %-3u [%10.1f - %10.1f ms]  pitch%+d lane%+d\n",
+                         s.count, s.aux, s.chunk, double(s.startUs) / 1000.0,
+                         double(s.endUs) / 1000.0, s.pitchDelta, s.laneDelta);
+        } else {
+            prevPatId_ = -1;  // literals break pattern-to-pattern adjacency
+            std::fprintf(f_, "lit      chunk %-3u [%10.1f - %10.1f ms]  %u events\n",
+                         s.chunk, double(s.startUs) / 1000.0,
+                         double(s.endUs) / 1000.0, s.count);
+        }
+    }
+    winStartUs_ = horizonUs;
+    prevHorizonUs_ = horizonUs;
+    return true;
 }
 
 }  // namespace gh::raid

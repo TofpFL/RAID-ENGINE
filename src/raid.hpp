@@ -31,9 +31,11 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <future>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "chart.hpp"
@@ -156,6 +158,29 @@ public:
     bool range(int64_t startUs, int64_t endUs, std::vector<Event>& out,
                std::string& err, std::vector<uint64_t>* indices = nullptr);
 
+    // One stretch of a chunk's op stream, in playback order. Only LEAF
+    // ops produce segments: literal runs always, and pattern instances
+    // whose definitions contain no further pattern ops — patterns that
+    // merely wrap other patterns are traversed but not logged. Pattern
+    // identity only exists here — expanded events lose it — so this is
+    // the API for "which pattern is playing when" logging and analysis.
+    struct OpSegment {
+        int64_t startUs = 0, endUs = 0;  // covered time range
+        uint32_t chunk = 0;              // chunk index
+        uint8_t kind = 0;                // 0 = literal run, 2 = pattern instance
+        uint32_t count = 0;              // literal: event count; pattern: patternId
+        uint32_t aux = 0;                // pattern: repeatCount (0 for literals)
+        int32_t pitchDelta = 0, laneDelta = 0;  // pattern transforms
+    };
+
+    // Walks the op streams of chunks overlapping [startUs, endUs) and appends
+    // their segments in order — literals AND pattern instances, so callers
+    // can see exactly where one pattern ends and another begins. Decodes the
+    // chunk payloads but does not materialize events; memory stays bounded
+    // by one chunk payload at a time.
+    bool opLog(int64_t startUs, int64_t endUs, std::vector<OpSegment>& out,
+               std::string& err);
+
     // First/last event time of chunk i (for prefetch planning).
     bool chunkTimeRange(size_t i, int64_t& firstUs, int64_t& lastUs) const;
     // Time of the last event in the file (0 when empty).
@@ -198,6 +223,47 @@ private:
     std::shared_ptr<Impl> impl_;
     int decTotal_ = 2;
     uint64_t memBudget_ = 128ull << 20;
+};
+
+// Incremental op-stream logger. Call tick(horizonUs) as playback advances;
+// it walks only the chunks covering newly-played time and appends each
+// literal run / pattern instance to `path` in playback order, marking every
+// pattern->pattern change. Pattern identity exists only in the op stream
+// (expanded events lose it), so this is the tool for "which pattern is
+// playing when". Memory stays bounded: it never materializes events, and
+// already-logged chunks are skipped by a per-chunk ordinal.
+class PatternLogger {
+public:
+    PatternLogger() = default;
+    ~PatternLogger() { close(); }
+    PatternLogger(const PatternLogger&) = delete;
+    PatternLogger& operator=(const PatternLogger&) = delete;
+
+    // Opens `path` for writing (truncates any previous log). `rd` must
+    // outlive the logger.
+    bool open(Reader& rd, const std::string& path, std::string& err);
+    // Flushes the tail and closes the file.
+    void close();
+
+    // Logs every op segment starting before horizonUs that has not been
+    // logged yet. horizonUs must be non-decreasing (song time in us);
+    // close() flushes the remainder.
+    bool tick(int64_t horizonUs, std::string& err);
+
+    uint64_t patternInstances() const { return instances_; }
+    uint64_t patternChanges() const { return changes_; }
+    bool isOpen() const { return f_ != nullptr; }
+    const std::string& path() const { return path_; }
+
+private:
+    Reader* rd_ = nullptr;
+    FILE* f_ = nullptr;
+    std::string path_;
+    int64_t winStartUs_ = 0;
+    int64_t prevHorizonUs_ = -1;
+    std::unordered_map<uint32_t, uint32_t> written_;  // chunk -> segments logged
+    int64_t prevPatId_ = -1;  // last pattern id; -1 right after a literal
+    uint64_t instances_ = 0, changes_ = 0;
 };
 
 // Quick magic check without parsing the index.

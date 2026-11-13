@@ -40,6 +40,9 @@ struct Modifiers {
     // 1 that times scrollValue, 2 scrollValue whatever the chart says.
     int scrollType = 0;
     double scrollValue = 1.0;
+    // .raid charts only: log which encoded pattern plays when, to
+    // <userDir>/raid_pattern_log.txt (see raid::PatternLogger).
+    bool patternLog = false;
 };
 
 struct PlayRequest {

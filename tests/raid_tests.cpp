@@ -3,8 +3,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -139,6 +142,93 @@ void testPatternCompression() {
     RCHECK(bad == 0);
     rd.close();  // Windows: an open FILE* blocks filesystem::remove
     std::filesystem::remove(path);
+}
+
+void testOpLog() {
+    // Two different 4-note motifs alternating, plus unique filler notes:
+    // exercises literal runs, pattern instances and pattern->pattern
+    // transitions in the op stream.
+    std::vector<raid::Event> ev;
+    auto note = [&](int64_t t, int lane, int side) {
+        raid::Event e;
+        e.timeUs = t; e.lane = uint8_t(lane); e.side = uint8_t(side);
+        e.stack = 1;
+        ev.push_back(e);
+    };
+    for (int rep = 0; rep < 40; ++rep) {  // enough expanded events for several chunks
+        const int64_t base = rep * 1000000;  // 1 s per repeat
+        for (int k = 0; k < 4; ++k) note(base + k * 50000, k % 4, k % 2);       // motif A
+        note(base + 300000, 1, 0);                                            // filler literal
+        for (int k = 0; k < 4; ++k) note(base + 400000 + k * 50000, (k + 2) % 4, (k + 1) % 2);  // motif B
+    }
+    // Unique-spacing tail: cannot collapse into patterns, so it forces
+    // extra literal chunks and makes the windowed opLog subset check real.
+    for (int i = 0; i < 300; ++i)
+        note(45000000 + int64_t(i) * 9973 + (i % 7) * 13, i % 4, i % 2);
+    const std::string path = tmpPath("gh_raid_oplog.raid");
+    raid::EncodeOptions opt;
+    opt.chunkEvents = 32;  // several chunks so windowed opLog is meaningful
+    raid::Info info;
+    std::string err;
+    RCHECK(raid::writeRaid(path, ev, "{}", opt, &info, err));
+    RCHECK(info.patternCount >= 1);
+
+    raid::Reader rd;
+    RCHECK(rd.open(path, err));
+    std::vector<raid::Reader::OpSegment> segs;
+    RCHECK(rd.opLog(0, INT64_MAX, segs, err));
+    RCHECK(!segs.empty());
+    uint32_t pats = 0, lits = 0;
+    bool sawLit = false, sawPat = false;
+    for (const raid::Reader::OpSegment& s : segs) {
+        RCHECK(s.startUs <= s.endUs);
+        RCHECK(s.chunk < info.chunkCount);
+        if (s.kind == 2) {
+            ++pats; sawPat = true;
+            RCHECK(s.count < info.patternCount);
+            RCHECK(s.aux >= 1);
+        } else {
+            RCHECK(s.kind == 0);
+            ++lits; sawLit = true;
+            RCHECK(s.count > 0);
+        }
+    }
+    RCHECK(sawPat);
+
+    // A narrow early window must return a strict subset of segments.
+    std::vector<raid::Reader::OpSegment> early;
+    RCHECK(rd.opLog(0, 15000000, early, err));
+    RCHECK(!early.empty() && early.size() < segs.size());
+
+    // PatternLogger: tick in uneven slices must produce exactly the same
+    // segment set as one full pass, with correct change markers.
+    const std::string lp = tmpPath("gh_raid_patlog.txt");
+    raid::PatternLogger log;
+    RCHECK(log.open(rd, lp, err));
+    RCHECK(log.tick(7000000, err));
+    RCHECK(log.tick(23000000, err));
+    RCHECK(log.tick(99000000000, err));
+    log.close();
+    RCHECK(log.patternInstances() == pats);
+
+    std::ifstream in(lp);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    size_t patLines = 0, litLines = 0, changes = 0, pos = 0;
+    while ((pos = text.find("pat#", pos)) != std::string::npos) { ++patLines; pos += 4; }
+    pos = 0;
+    while ((pos = text.find("\nlit ", pos)) != std::string::npos) { ++litLines; pos += 5; }
+    pos = 0;
+    while ((pos = text.find(">>> pattern change", pos)) != std::string::npos) { ++changes; pos += 3; }
+    RCHECK(patLines == pats);
+    RCHECK(litLines == lits);
+    RCHECK(changes == log.patternChanges());
+    RCHECK(log.patternChanges() <= pats);
+    in.close();  // Windows: an open ifstream locks the file for remove()
+    rd.close();
+    std::filesystem::remove(path);
+    std::filesystem::remove(lp);
 }
 
 void testPitchTransform() {
@@ -703,6 +793,7 @@ void testSessionStreaming() {
 void runRaidTests() {
     testRoundtrip();
     testPatternCompression();
+    testOpLog();
     testPitchTransform();
     testStreamingRange();
     testChartStream();

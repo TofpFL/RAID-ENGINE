@@ -213,6 +213,10 @@ private:
     std::shared_ptr<raid::ChartStream> noteStream_;
     bool streamMirror_ = false, streamFailed_ = false;
     int64_t fedUs_ = 0, prefetchUs_ = 0;
+    // Pattern-log modifier (.raid only): appends op-stream segments to
+    // <userDir>/raid_pattern_log.txt as the playhead advances.
+    std::unique_ptr<raid::PatternLogger> patternLog_;
+    void startPatternLog();
     Stage stage_;
     CharacterState left_, right_;
     Color leftColor_{}, rightColor_{};

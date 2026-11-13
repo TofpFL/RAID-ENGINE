@@ -48,6 +48,8 @@ public:
     bool isOpen() const { return reader_.isOpen(); }
 
     const Chart& chart() const { return chart_; }
+    // The underlying streaming reader (opLog, pattern logging, etc.).
+    Reader& reader() { return reader_; }
     uint64_t logicalEvents() const { return reader_.logicalEvents(); }
     // Chart length in ms (last event time), 0 when the file is empty.
     double lengthMs() const { return double(reader_.durationUs()) / 1000.0; }

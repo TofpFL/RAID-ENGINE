@@ -5,9 +5,15 @@
 //   raid_engine verify <file.raid>                   decode every chunk, count events
 //   raid_engine window <file.raid> <startMs> <endMs> events in a time window
 //   raid_engine meta <file.raid>                     the chart metadata (JSON)
+//   raid_engine patterns <file.raid> [startMs] [endMs] op-stream log: which
+//                                                    pattern plays when
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <string>
+#include <vector>
 
 #include "chart.hpp"
 #include "chart_stream.hpp"
@@ -107,6 +113,48 @@ static int meta(const std::string& path) {
     return 0;
 }
 
+static int patterns(const std::string& path, const char* a, const char* b) {
+    raid::Reader rd;
+    std::string err;
+    if (!rd.open(path, err)) {
+        std::printf("open failed: %s\n", err.c_str());
+        return 1;
+    }
+    const int64_t lo = a ? int64_t(std::atof(a) * 1000.0) : 0;
+    const int64_t hi = b ? int64_t(std::atof(b) * 1000.0) : INT64_MAX;
+    std::vector<raid::Reader::OpSegment> segs;
+    if (!rd.opLog(lo, hi, segs, err)) {
+        std::printf("op log failed: %s\n", err.c_str());
+        return 1;
+    }
+    uint64_t lits = 0, pats = 0, ppChanges = 0;
+    std::set<uint32_t> used;
+    int64_t prevPat = -1;  // patternId of the previous pattern segment
+    for (const raid::Reader::OpSegment& s : segs) {
+        if (s.kind == 2) {
+            ++pats;
+            used.insert(s.count);
+            if (prevPat >= 0 && int64_t(s.count) != prevPat) ++ppChanges;
+            prevPat = int64_t(s.count);
+            std::printf("  pat#%-6u x%-4u chunk %-3u [%10.1f - %10.1f ms]  pitch%+d lane%+d\n",
+                        s.count, s.aux, s.chunk, double(s.startUs) / 1000.0,
+                        double(s.endUs) / 1000.0, s.pitchDelta, s.laneDelta);
+        } else {
+            ++lits;
+            prevPat = -1;  // a literal breaks pattern-to-pattern adjacency
+            std::printf("  lit      chunk %-3u [%10.1f - %10.1f ms]  %u events\n",
+                        s.chunk, double(s.startUs) / 1000.0,
+                        double(s.endUs) / 1000.0, s.count);
+        }
+    }
+    std::printf("  segments: %zu (%llu literal runs, %llu pattern instances)\n",
+                segs.size(), (unsigned long long)lits, (unsigned long long)pats);
+    std::printf("  pattern->pattern changes: %llu   distinct patterns: %zu\n",
+                (unsigned long long)ppChanges, used.size());
+    rd.close();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 3) {
@@ -115,7 +163,8 @@ int main(int argc, char** argv) {
                     "  raid_engine info <file.raid>\n"
                     "  raid_engine verify <file.raid>\n"
                     "  raid_engine window <file.raid> <startMs> <endMs>\n"
-                    "  raid_engine meta <file.raid>\n");
+                    "  raid_engine meta <file.raid>\n"
+                    "  raid_engine patterns <file.raid> [startMs] [endMs]\n");
         return argc < 2 ? 2 : 1;
     }
     const std::string cmd = argv[1];
@@ -124,6 +173,9 @@ int main(int argc, char** argv) {
     if (cmd == "verify" && argc >= 3) return verify(argv[2]);
     if (cmd == "window" && argc >= 5) return window(argv[2], argv[3], argv[4]);
     if (cmd == "meta" && argc >= 3) return meta(argv[2]);
+    if (cmd == "patterns" && argc >= 3)
+        return patterns(argv[2], argc >= 4 ? argv[3] : nullptr,
+                        argc >= 5 ? argv[4] : nullptr);
     std::printf("unknown or incomplete command\n");
     return 2;
 }

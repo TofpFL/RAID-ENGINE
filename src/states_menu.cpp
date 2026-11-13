@@ -352,6 +352,7 @@ public:
                     m.scrollValue = std::round((m.scrollValue + step * (dir ? dir : 1)) / step) * step;
                     m.scrollValue = m.scrollType == 1 ? clampv(m.scrollValue, 0.25, 5.0) : clampv(m.scrollValue, 0.5, 10.0);
                 }
+                if (modSel_ == 6) m.patternLog = !m.patternLog;
             }
             if (in.back() || in.pressed(KEY_TAB)) modsOpen_ = false;
             return;
@@ -497,8 +498,9 @@ public:
             if (m.mirror) ms += "  Opponent";
             if (m.scrollType == 1) ms += TextFormat("  Scroll x%.2f", m.scrollValue);
             if (m.scrollType == 2) ms += TextFormat("  Scroll %.1f", m.scrollValue);
+            if (m.patternLog) ms += "  PatLog";
             gfx::text(FontId::Ui, ms, 1035, 586, 22,
-                      (m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0) ? kGold : fade(kIvory, 0.5f), Align::Center);
+                      (m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0 || m.patternLog) ? kGold : fade(kIvory, 0.5f), Align::Center);
         }
         if (a.library.customCount() == 0) {
             const std::string tip = a.touchMode
@@ -560,9 +562,10 @@ private:
             std::string("Practice (no death)   ") + (m.practice ? "ON" : "OFF"),
             std::string("Play as the opponent   ") + (m.mirror ? "ON" : "OFF"), std::string("Scroll speed   ") + scrollTypes[m.scrollType],
             m.scrollType == 0 ? std::string("Scroll value   -")
-                              : std::string(TextFormat(m.scrollType == 1 ? "Scroll value   x%.2f" : "Scroll value   %.1f", m.scrollValue))};
+                              : std::string(TextFormat(m.scrollType == 1 ? "Scroll value   x%.2f" : "Scroll value   %.1f", m.scrollValue)),
+            std::string("Pattern log (.raid)   ") + (m.patternLog ? "ON" : "OFF")};
         for (int i = 0; i < kModRows; ++i)
-            gfx::text(FontId::Ui, rows[i], 640, 222.0f + i * 50, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
+            gfx::text(FontId::Ui, rows[i], 640, 210.0f + i * 46, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
                       Align::Center, 1.5f);
         gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 532, 18,
                   fade(kIvory, 0.6f), Align::Center);
@@ -576,7 +579,7 @@ private:
     std::string pendingId_, previewId_;
     bool previewPlaying_ = false;
     bool modsOpen_ = false;
-    static constexpr int kModRows = 6;
+    static constexpr int kModRows = 7;
     int modSel_ = 0;
     bool importing_ = false;
     std::string note_;
