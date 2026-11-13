@@ -1,0 +1,5 @@
+// Application icon: raylib uses the exe's IDI_ICON1 resource for the window
+// title bar, taskbar button and Explorer icon.
+#include <windows.h>
+
+IDI_ICON1 ICON "../../RAID_File_Icon.ico"

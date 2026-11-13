@@ -251,6 +251,7 @@ if(GH_BUILD_GAME)
     else()
       target_sources(godshand PRIVATE src/windows/godshand.rc)
     endif()
+    target_sources(godshand PRIVATE src/windows/godshand_icon.rc)  # RAID_File_Icon.ico
   endif()
   target_link_libraries(godshand PRIVATE gh_core raylib)
   target_compile_definitions(godshand PRIVATE GH_VERSION="${PROJECT_VERSION}")
