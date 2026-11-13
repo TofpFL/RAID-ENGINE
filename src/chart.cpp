@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 
 #include "chart_stream.hpp"
@@ -12,14 +13,32 @@
 namespace gh {
 
 bool readTextFile(const std::string& path, std::string& out) {
+#if defined(_WIN32)
+    // Paths are UTF-8; _wfopen needs UTF-16 (video.cpp's toPath does the same).
+    const std::wstring w = std::filesystem::path(std::u8string(path.begin(), path.end())).wstring();
+    FILE* f = _wfopen(w.c_str(), L"rb");
+#else
     FILE* f = std::fopen(path.c_str(), "rb");
+#endif
     if (!f) return false;
+#if defined(_WIN32)
+    // ftell's long is 32-bit: files past 2 GiB need the 64-bit variants.
+    if (_fseeki64(f, 0, SEEK_END) != 0) { std::fclose(f); return false; }
+    const long long sz = _ftelli64(f);
+    _fseeki64(f, 0, SEEK_SET);
+#else
     std::fseek(f, 0, SEEK_END);
-    long sz = std::ftell(f);
+    const long sz = std::ftello(f);
     std::fseek(f, 0, SEEK_SET);
+#endif
     if (sz < 0) { std::fclose(f); return false; }
     out.resize(size_t(sz));
-    size_t rd = sz > 0 ? std::fread(out.data(), 1, size_t(sz), f) : 0;
+    size_t rd = 0;
+    while (rd < size_t(sz)) {
+        const size_t got = sz > 0 ? std::fread(out.data() + rd, 1, size_t(sz) - rd, f) : 0;
+        if (got == 0) break;
+        rd += got;
+    }
     std::fclose(f);
     out.resize(rd);
     return true;
