@@ -124,6 +124,13 @@ if(GH_BUILD_TESTS)
   add_test(NAME core COMMAND gh_tests)
 endif()
 
+# Standalone RAID Engine CLI (no raylib): convert/info/verify/window/meta.
+add_executable(raid_engine src/raid_cli.cpp)
+target_link_libraries(raid_engine PRIVATE gh_core)
+if(WIN32)
+  target_sources(raid_engine PRIVATE raid_engine.rc)  # embeds RAID_File_Icon.ico
+endif()
+
 # ---- the game ----------------------------------------------------------------
 if(GH_BUILD_GAME)
   # Fonts (SIL OFL) ship in assets/fonts; copies of the source without them
