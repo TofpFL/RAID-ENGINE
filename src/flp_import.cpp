@@ -118,100 +118,119 @@ int flpNamedSide(const FlpNamedChannels& n, uint32_t ch) {
 }  // namespace
 
 bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
-    out = FlpProject();
     const auto* b = reinterpret_cast<const unsigned char*>(bytes.data());
     const size_t n = bytes.size();
     if (n < 22 || std::memcmp(b, "FLhd", 4) != 0) { err = "not an FL Studio file"; return false; }
     const uint32_t headLen = rd32(b + 4);
-    if (headLen >= 6) out.ppqn = std::max<int>(1, rd16(b + 12));
+    const int ppqn = headLen >= 6 ? std::max<int>(1, rd16(b + 12)) : 96;
+    // FL 2025+ writes event 0xAC as a byte where the classic table says
+    // dword; the header's channel count tells the two framings apart.
+    const int wantChannels = headLen >= 6 ? int(rd16(b + 10)) : -1;
     size_t i = 8 + size_t(headLen);
     if (i + 8 > n || std::memcmp(b + i, "FLdt", 4) != 0) { err = "FL Studio file without data"; return false; }
     const size_t end = std::min(n, i + 8 + size_t(rd32(b + i + 4)));
-    i += 8;
-    int prevId = -1;
-    uint32_t prevValue = 0, lastChannel = 0;
-    bool fpcFound = false, chanCtx = false;
-    auto pattern = [&](int number) -> FlpPattern& {
-        for (FlpPattern& p : out.patterns)
-            if (p.number == number) return p;
-        out.patterns.push_back(FlpPattern{number, {}, {}});
-        return out.patterns.back();
+    const size_t dataStart = i + 8;
+
+    // One pass over the event stream; returns the channel-block count so the
+    // caller can tell a desynced framing from a good one.
+    auto parsePass = [&](bool acByte) -> size_t {
+        out = FlpProject();
+        out.ppqn = ppqn;
+        i = dataStart;
+        int prevId = -1;
+        uint32_t prevValue = 0, lastChannel = 0;
+        size_t chanEvents = 0;
+        bool fpcFound = false, chanCtx = false;
+        auto pattern = [&](int number) -> FlpPattern& {
+            for (FlpPattern& p : out.patterns)
+                if (p.number == number) return p;
+            out.patterns.push_back(FlpPattern{number, {}, {}});
+            return out.patterns.back();
+        };
+        while (i < end) {
+            const uint8_t id = b[i++];
+            uint32_t value = 0;
+            const unsigned char* data = nullptr;
+            size_t len = 0;
+            if (id < 64 || (acByte && id == 0xAC)) {
+                if (i + 1 > end) break;
+                value = b[i];
+                i += 1;
+            } else if (id < 128) {
+                if (i + 2 > end) break;
+                value = rd16(b + i);
+                i += 2;
+            } else if (id < 192) {
+                if (i + 4 > end) break;
+                value = rd32(b + i);
+                i += 4;
+            } else {
+                size_t shift = 0;
+                for (;;) {  // length: 7 bits per byte, high bit = more
+                    if (i >= end) break;
+                    const uint8_t c = b[i++];
+                    len |= size_t(c & 0x7F) << shift;
+                    shift += 7;
+                    if (!(c & 0x80) || shift > 28) break;
+                }
+                if (i + len > end) break;
+                data = b + i;
+                i += len;
+            }
+            switch (id) {
+                case kGenChannel: lastChannel = value; chanCtx = true; ++chanEvents; break;
+                case kPatStart: chanCtx = false; break;
+                case kTempo: out.bpm = value / 1000.0; break;
+                case kOldTempo: if (out.bpm <= 0) out.bpm = value; break;
+                case kTitle: out.title = flString(data, len); break;
+                case kPlugName:
+                    if (!fpcFound && flString(data, len) == "FPC") {
+                        out.chartChannel = int(lastChannel);
+                        fpcFound = true;
+                    }
+                    break;
+                case kPatName:
+                    if (prevId == kPatStart) pattern(int(prevValue)).name = flString(data, len);
+                    break;
+                case kNoteData: {
+                    FlpPattern& p = pattern(prevId == kPatStart ? int(prevValue) : 0);
+                    for (size_t k = 0; k + kNoteSize <= len; k += kNoteSize) {
+                        const unsigned char* r = data + k;
+                        FlpNote note;
+                        note.time = rd32(r);
+                        note.channel = rd16(r + 6);
+                        note.duration = rd32(r + 8);
+                        note.pitch = rd32(r + 12);
+                        note.flags = r[19];
+                        note.velocity = r[21];
+                        p.notes.push_back(note);
+                    }
+                    break;
+                }
+                default: break;
+            }
+            // Text events inside a channel's definition block are its names
+            // (channel name, plugin name); pattern names never reach here.
+            if (chanCtx && data && id >= 0xC0 && id <= 0xCF) {
+                std::string nm = flString(data, len);
+                if (!nm.empty()) {
+                    auto& v = out.channelNames[lastChannel];
+                    if (v.empty() || v.back() != nm) v.push_back(nm);
+                }
+            }
+            prevId = id;
+            prevValue = value;
+        }
+        std::sort(out.patterns.begin(), out.patterns.end(), [](const FlpPattern& a, const FlpPattern& c) { return a.number < c.number; });
+        return chanEvents;
     };
-    while (i < end) {
-        const uint8_t id = b[i++];
-        uint32_t value = 0;
-        const unsigned char* data = nullptr;
-        size_t len = 0;
-        if (id < 64) {
-            if (i + 1 > end) break;
-            value = b[i];
-            i += 1;
-        } else if (id < 128) {
-            if (i + 2 > end) break;
-            value = rd16(b + i);
-            i += 2;
-        } else if (id < 192) {
-            if (i + 4 > end) break;
-            value = rd32(b + i);
-            i += 4;
-        } else {
-            size_t shift = 0;
-            for (;;) {  // length: 7 bits per byte, high bit = more
-                if (i >= end) break;
-                const uint8_t c = b[i++];
-                len |= size_t(c & 0x7F) << shift;
-                shift += 7;
-                if (!(c & 0x80) || shift > 28) break;
-            }
-            if (i + len > end) break;
-            data = b + i;
-            i += len;
-        }
-        switch (id) {
-            case kGenChannel: lastChannel = value; chanCtx = true; break;
-            case kPatStart: chanCtx = false; break;
-            case kTempo: out.bpm = value / 1000.0; break;
-            case kOldTempo: if (out.bpm <= 0) out.bpm = value; break;
-            case kTitle: out.title = flString(data, len); break;
-            case kPlugName:
-                if (!fpcFound && flString(data, len) == "FPC") {
-                    out.chartChannel = int(lastChannel);
-                    fpcFound = true;
-                }
-                break;
-            case kPatName:
-                if (prevId == kPatStart) pattern(int(prevValue)).name = flString(data, len);
-                break;
-            case kNoteData: {
-                FlpPattern& p = pattern(prevId == kPatStart ? int(prevValue) : 0);
-                for (size_t k = 0; k + kNoteSize <= len; k += kNoteSize) {
-                    const unsigned char* r = data + k;
-                    FlpNote note;
-                    note.time = rd32(r);
-                    note.channel = rd16(r + 6);
-                    note.duration = rd32(r + 8);
-                    note.pitch = rd32(r + 12);
-                    note.flags = r[19];
-                    note.velocity = r[21];
-                    p.notes.push_back(note);
-                }
-                break;
-            }
-            default: break;
-        }
-        // Text events inside a channel's definition block are its names
-        // (channel name, plugin name); pattern names never reach here.
-        if (chanCtx && data && id >= 0xC0 && id <= 0xCF) {
-            std::string nm = flString(data, len);
-            if (!nm.empty()) {
-                auto& v = out.channelNames[lastChannel];
-                if (v.empty() || v.back() != nm) v.push_back(nm);
-            }
-        }
-        prevId = id;
-        prevValue = value;
-    }
-    std::sort(out.patterns.begin(), out.patterns.end(), [](const FlpPattern& a, const FlpPattern& c) { return a.number < c.number; });
+
+    const size_t classic = parsePass(false);
+    if (wantChannels < 0 || classic == size_t(wantChannels)) return true;
+    // Classic framing desynced: FL 2025+ writes 0xAC as a byte event.
+    const size_t quirky = parsePass(true);
+    if (wantChannels < 0 || quirky == size_t(wantChannels)) return true;
+    parsePass(false);  // neither framing validated: keep the classic result
     return true;
 }
 
