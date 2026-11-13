@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <utility>
 
 #include "common.hpp"
 
@@ -56,19 +55,64 @@ constexpr size_t kNoteSize = 24;
 bool isSpecial(uint32_t pitch) { return pitch == 53 || pitch == 54 || pitch == 56 || pitch == 57 || pitch == 58; }
 bool isChartPitch(uint32_t pitch) { return (pitch >= 48 && pitch <= 51) || (pitch >= 60 && pitch <= 63); }
 
-// Channels named "Opp"/"Player" chart by channel instead of the FPC pitch
-// windows: {opponent, player} channel indices, -1 when absent.
-std::pair<int, int> flpNamedChannels(const FlpProject& p) {
-    int opp = -1, player = -1;
+// A channel named "Opp", "Opponent" or "Player" - optionally with a 1-50
+// index like "Opp3" or "Player 12" - charts by channel instead of the FPC
+// pitch windows; singing and atonal instruments sharing the prefix all
+// land on the one side.
+bool flpSideName(const std::string& nm, int& side) {
+    std::string low;
+    low.reserve(nm.size());
+    for (char c : nm) low += char(std::tolower((unsigned char)c));
+    static const char* kBase[] = {"opponent", "player", "opp"};
+    static const int kSide[] = {0, 1, 0};
+    for (size_t b = 0; b < 3; ++b) {
+        const std::string base = kBase[b];
+        if (low == base) {
+            side = kSide[b];
+            return true;
+        }
+        if (low.size() <= base.size() || low.compare(0, base.size(), base) != 0) continue;
+        std::string rest = low.substr(base.size());
+        const size_t a = rest.find_first_not_of(' '), z = rest.find_last_not_of(' ');
+        if (a == std::string::npos) continue;
+        rest = rest.substr(a, z - a + 1);
+        if (rest.empty() ||
+            !std::all_of(rest.begin(), rest.end(), [](char c) { return std::isdigit((unsigned char)c); }))
+            continue;
+        const int idx = std::atoi(rest.c_str());
+        if (idx >= 1 && idx <= 50) {
+            side = kSide[b];
+            return true;
+        }
+    }
+    return false;
+}
+
+struct FlpNamedChannels {
+    std::vector<uint32_t> opp, player;  // sorted, unique
+};
+
+FlpNamedChannels flpNamedChannels(const FlpProject& p) {
+    FlpNamedChannels r;
     for (const auto& [ch, names] : p.channelNames)
         for (const std::string& nm : names) {
-            std::string low;
-            low.reserve(nm.size());
-            for (char c : nm) low += char(std::tolower((unsigned char)c));
-            if (low == "opp" || low == "opponent") opp = int(ch);
-            else if (low == "player" || low == "player1") player = int(ch);
+            int side = -1;
+            if (flpSideName(nm, side)) (side == 0 ? r.opp : r.player).push_back(ch);
         }
-    return {opp, player};
+    auto dedupe = [](std::vector<uint32_t>& v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    };
+    dedupe(r.opp);
+    dedupe(r.player);
+    return r;
+}
+
+// 0 = opponent channel, 1 = player channel, -1 = not a chart-side channel.
+int flpNamedSide(const FlpNamedChannels& n, uint32_t ch) {
+    if (std::binary_search(n.opp.begin(), n.opp.end(), ch)) return 0;
+    if (std::binary_search(n.player.begin(), n.player.end(), ch)) return 1;
+    return -1;
 }
 
 }  // namespace
@@ -183,8 +227,7 @@ std::vector<int> flpChartPatterns(const FlpProject& p, bool strict) {
     for (const FlpPattern& pat : p.patterns) {
         size_t onChannel = 0, sniffKeys = 0, lanes = 0;
         for (const FlpNote& n : pat.notes) {
-            const bool onNamed = (named.first >= 0 && n.channel == uint16_t(named.first)) ||
-                                 (named.second >= 0 && n.channel == uint16_t(named.second));
+            const bool onNamed = flpNamedSide(named, n.channel) >= 0;
             if (!onNamed && n.channel != p.chartChannel) continue;
             ++onChannel;
             if (onNamed) {  // a named channel charts every key
@@ -223,11 +266,8 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
 
     const auto named = flpNamedChannels(p);
     std::vector<FlpNote> notes;
-    for (const FlpNote& n : pat->notes) {
-        const bool onNamed = (named.first >= 0 && n.channel == uint16_t(named.first)) ||
-                             (named.second >= 0 && n.channel == uint16_t(named.second));
-        if (onNamed || n.channel == p.chartChannel) notes.push_back(n);
-    }
+    for (const FlpNote& n : pat->notes)
+        if (flpNamedSide(named, n.channel) >= 0 || n.channel == p.chartChannel) notes.push_back(n);
     // By time; at the same time the section markers come first (SNIFF).
     std::stable_sort(notes.begin(), notes.end(), [](const FlpNote& a, const FlpNote& b) {
         if (a.time != b.time) return a.time < b.time;
@@ -259,14 +299,13 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
             case 56: continue;  // a tempo change: SNIFF asks for the new tempo, the chart keeps one
             default: break;
         }
-        const bool onOpp = named.first >= 0 && n.channel == uint16_t(named.first);
-        const bool onPlayer = named.second >= 0 && n.channel == uint16_t(named.second);
+        const int nside = flpNamedSide(named, n.channel);
         int side;
         uint8_t lane;
-        if (onOpp || onPlayer) {
+        if (nside >= 0) {
             // A named channel charts every key; pitch % 4 is C-anchored, so
             // the C3-D#3 / C4-D#4 windows land on the same lanes as before.
-            side = onOpp ? 0 : 1;
+            side = nside;
             lane = uint8_t(n.pitch & 3);
         } else {
             if (!isChartPitch(n.pitch)) continue;

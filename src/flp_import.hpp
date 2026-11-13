@@ -2,8 +2,10 @@
 // (SiIva Note Importer For FNF, https://github.com/JordanSantiagoYT/SNIFF)
 // reads them: the notes of one pattern of the FPC channel (the first channel
 // without one), with C3-D#3 (pitches 48-51) as the player's lanes and C4-D#4
-// (60-63) as the opponent's. A channel named "Opp" or "Player" instead charts
-// all of its notes by channel (every key, pitch % 4 lanes). F3 (53) and F#3 (54) point the camera at the
+// (60-63) as the opponent's. Channels named "Opp"/"Opponent"/"Player" -
+// optionally indexed 1-50 like "Opp3" or "Player 12", so singing and atonal
+// instruments share the one side - instead chart all of their notes by
+// channel (every key, pitch % 4 lanes). F3 (53) and F#3 (54) point the camera at the
 // player or the opponent from that section on; A3 (57) and A#3 (58) give the
 // section's opponent or player notes their alt animation. A note held for a
 // beat or more, or played softly (velocity under 64), becomes a hold.

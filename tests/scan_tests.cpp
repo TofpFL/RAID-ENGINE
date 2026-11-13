@@ -469,13 +469,25 @@ std::string makeFlpNamed() {
     array(0xC9, utf16("Opp"));
     word(0x40, 2);
     array(0xC9, utf16("3x Osc"));
+    word(0x40, 3);
+    array(0xC9, utf16("Opp2"));
+    word(0x40, 4);
+    array(0xC9, utf16("Player 7"));
+    word(0x40, 5);
+    array(0xC9, utf16("PlayerX"));
+    word(0x40, 6);
+    array(0xC9, utf16("Opp0"));
     word(0x41, 1);
     array(0xC1, utf16("both"));
     word(0x41, 1);
     array(0xE0, notes({{0, 0, 72},     // Player channel, C5: outside the windows -> player lane 0
                        {96, 1, 65},    // Opp channel, F4 -> opponent lane 1
                        {192, 1, 50},   // Opp channel, D#3: a player-window pitch, still opponent lane 2
-                       {288, 2, 60}}));  // another channel: not the chart
+                       {288, 2, 60},   // another channel: not the chart
+                       {384, 3, 60},   // "Opp2": same opponent side, lane 0
+                       {480, 4, 62},   // "Player 7": same player side, lane 2
+                       {576, 5, 60},   // "PlayerX": not an index, ignored
+                       {672, 6, 60}}));  // "Opp0": index 0 is out of range, ignored
     std::string f = "FLhd";
     auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
     u32(6);
@@ -519,18 +531,20 @@ void testFlStudio() {
     SCHECK(flpChartPath("song.FSC", file, pat) && pat == -1);
     SCHECK(!flpChartPath("song.json", file, pat));
 
-    // Channels named "Player"/"Opp" chart every key by channel.
+    // Channels named "Player"/"Opp" (indexed 1-50 too) chart every key by channel.
     FlpProject pn;
     SCHECK(readFlp(makeFlpNamed(), pn, err));
-    SCHECK(pn.channelNames.size() == 3);
+    SCHECK(pn.channelNames.size() == 7);
     SCHECK(flpChartPatterns(pn, true) == std::vector<int>({1}));
     Chart cn;
     SCHECK(flpToChart(pn, -1, cn, err));
-    SCHECK(cn.notes.size() == 3 && cn.playerNotes == 1 && cn.opponentNotes == 2);
-    if (cn.notes.size() == 3) {
+    SCHECK(cn.notes.size() == 5 && cn.playerNotes == 2 && cn.opponentNotes == 3);
+    if (cn.notes.size() == 5) {
         SCHECK(cn.notes[0].side == 1 && cn.notes[0].lane == 0);  // C5 on "Player"
         SCHECK(cn.notes[1].side == 0 && cn.notes[1].lane == 1);  // F4 on "Opp"
         SCHECK(cn.notes[2].side == 0 && cn.notes[2].lane == 2);  // D#3 on "Opp": channel wins over the window
+        SCHECK(cn.notes[3].side == 0 && cn.notes[3].lane == 0);  // C4 on "Opp2": same side
+        SCHECK(cn.notes[4].side == 1 && cn.notes[4].lane == 2);  // D4 on "Player 7": same side
     }
 
     // Through the chart loader and the song scan.
