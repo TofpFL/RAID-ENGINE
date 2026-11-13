@@ -290,6 +290,27 @@ static void testSession() {
     s.init(c, fast);
     s.press(0, 1060);  // 60 ms song time = 40 ms real -> Divine
     CHECK(s.counts[kDivine] == 1);
+
+    // Psych's options: hit windows, Rating Offset and Safe Frames.
+    SessionConfig tight;
+    tight.windows[kDivine] = 15;  // Sick! window 15 ms: 20 ms late is a Good
+    s.init(c, tight);
+    s.press(0, 1020);
+    CHECK(s.counts[kGrace] == 1 && s.counts[kDivine] == 0);
+    SessionConfig late;
+    late.windows[kDivine] = 15;
+    late.ratingOffset = 20;  // "you have to hit later": 20 ms late is on time
+    s.init(c, late);
+    s.press(0, 1020);
+    CHECK(s.counts[kDivine] == 1);
+    SessionConfig safe;
+    safe.windows[kSinful] = 2.0 / 60.0 * 1000.0;  // Safe Frames 2: 33 ms either side
+    s.init(c, safe);
+    s.press(0, 1040);  // too late to hit
+    s.release(0, 1050);
+    CHECK(s.counts[kDivine] + s.counts[kGrace] + s.counts[kMortal] + s.counts[kSinful] == 0);
+    s.update(1100);
+    CHECK(s.misses == 1);
 }
 
 static void testComposer(bool audio, const char* wavDir) {

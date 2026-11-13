@@ -124,6 +124,24 @@ private:
     void drawLoading();
     void drawDebugLog();
     bool hudShown(const char* name, float* alpha = nullptr) const;
+    // Psych's HUD objects (healthBar, iconP1, iconP2, scoreTxt, timeBar,
+    // timeTxt, botplayTxt): they start where Psych 0.7.3 puts them, scripts
+    // read and change them, and the HUD is drawn where they are. The engine
+    // does to them what Psych's PlayState does each frame (icons' bop and
+    // place, the score's zoom, the time text, BOTPLAY's blink, the time bar's
+    // fade-in) before onUpdatePost.
+    struct PsychHudLayout {
+        Rectangle bar{};  // healthBar.png's place
+        float inset = 3, scoreY = 0, timeTxtY = 0, timeBarY = 0, botY = 0;
+        Vector2 timeBarSize{400, 19};
+    };
+    PsychHudLayout psychHudLayout() const;
+    void initHudObjects();
+    void updateHudObjects(double dt);
+    std::string psychScoreLine() const;
+    void updateScoreText(bool miss);  // Psych's updateScore: preUpdateScore, the text, onUpdateScore
+    scene::Sprite* hudObject(const char* name) const;  // nullptr outside Psych songs
+    Vector2 hudMoved(const char* name) const;           // how far scripts moved it from Psych's place
     double scrollSpeed() const;
 
     // ---- Psych mode (play_psych.cpp)
@@ -251,6 +269,11 @@ private:
     bool finished_ = false, songStarted_ = false, countdownStarted_ = false, endRequested_ = false;
     double songStartAt_ = -1;  // when the song started (Psych's time bar fades in)
     double scoreBopAt_ = -10;  // last note you hit (Psych's score text zoom)
+    std::map<std::string, Vector2, std::less<>> hudHome_;  // the HUD objects' places at the start
+    float iconHomeX_[2] = {0, 0};     // where the engine put iconP2 (0) and iconP1 (1) this frame
+    std::string scoreEngineText_, timeEngineText_, botEngineText_;  // what the engine wrote in them
+    bool scoreDirty_ = false, scoreDirtyMiss_ = false, scoreBopping_ = false, timeFadeDone_ = false;
+    double botplaySine_ = 0;
     size_t eventIdx_ = 0;
     std::deque<DebugLine> debug_;
     std::unique_ptr<scene::Scene> scene_ = std::make_unique<scene::Scene>();

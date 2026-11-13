@@ -412,6 +412,7 @@ void panelBox(float y0, float y1) {
 
 void feedUi(Ui& ui) {
     App& a = app();
+    SceneRenderer::smoothScaling = a.settings.antialiasing;
     ui.in = &a.input;
     ui.mouse = gfx::toCanvas(GetMousePosition());
     ui.click = a.input.mousePressed(MOUSE_BUTTON_LEFT) && !(a.touchMode && a.touch.covers(GetMousePosition()));

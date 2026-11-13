@@ -28,6 +28,12 @@ bool Replay::save(const std::string& path) const {
     f << "GHREPLAY 1\n";
     f << "song=" << songId << "\ndiff=" << diff << "\ntitle=" << title << "\ndate=" << date << "\n";
     f << "rate=" << rate << "\nmirror=" << mirror << "\nghost=" << ghostTapping << "\nkeys=" << keys << "\n";
+    {
+        char w[160];
+        std::snprintf(w, sizeof w, "windows=%.4f,%.4f,%.4f,%.4f\nratingOffset=%.4f\n", windows[0], windows[1], windows[2], windows[3],
+                      ratingOffset);
+        f << w;
+    }
     f << "score=" << score << "\nacc=" << acc << "\nmisses=" << misses << "\nevents=" << events.size() << "\n";
     char buf[64];
     for (const ReplayEvent& e : events) {
@@ -56,6 +62,8 @@ bool Replay::load(const std::string& path) {
         else if (k == "mirror") mirror = v == "1";
         else if (k == "ghost") ghostTapping = v == "1";
         else if (k == "keys") keys = std::atoi(v.c_str());
+        else if (k == "windows") std::sscanf(v.c_str(), "%lf,%lf,%lf,%lf", &windows[0], &windows[1], &windows[2], &windows[3]);
+        else if (k == "ratingOffset") ratingOffset = std::atof(v.c_str());
         else if (k == "score") score = std::atoll(v.c_str());
         else if (k == "acc") acc = std::atof(v.c_str());
         else if (k == "misses") misses = std::atoll(v.c_str());

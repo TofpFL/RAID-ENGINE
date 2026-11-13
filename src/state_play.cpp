@@ -129,6 +129,15 @@ void PlayState::update(double dt) {
     fx_.update(float(dt));
     if (phase_ == Phase::Paused) { updatePause(); return; }
     if (phase_ == Phase::Dead) { updateDead(); return; }
+    // Psych's Auto Pause: the song pauses when the window loses focus (Android
+    // pauses on its own when the app goes to the background).
+    if (a.settings.autoPause && phase_ == Phase::Playing && !rendering_ && !a.autoRun.enabled && !platform::kAndroid &&
+        IsWindowReady() && !IsWindowFocused()) {
+        if (!(scripts_ && scripts_->callStops("onPause"))) {
+            pause();
+            return;
+        }
+    }
     if (psych_ && updateVideos(dt)) return;  // a cutscene holds the game
     if (psych_ && substate_.active) {
         const std::string name = substate_.name;
@@ -266,6 +275,7 @@ void PlayState::update(double dt) {
 void PlayState::draw() {
     App& a = app();
     const double now = a.now;
+    SceneRenderer::smoothScaling = a.settings.antialiasing;
     if (phase_ == Phase::Loading || phase_ == Phase::Error) {
         drawLoading();
         return;
@@ -324,11 +334,19 @@ void PlayState::setup() {
     cfg_.botplay = !req_.story && a.mods.botplay;
     cfg_.practice = !req_.story && a.mods.practice;
     cfg_.rate = rate_;
+    // Psych's hit windows, Safe Frames (frames of 1/60 s) and Rating Offset.
+    cfg_.windows[kDivine] = a.settings.sickWindow;
+    cfg_.windows[kGrace] = a.settings.goodWindow;
+    cfg_.windows[kMortal] = a.settings.badWindow;
+    cfg_.windows[kSinful] = a.settings.safeFrames / 60.0 * 1000.0;
+    cfg_.ratingOffset = a.settings.ratingOffset;
     playerLeft_ = !req_.story && a.mods.mirror;
     if (replaying_) {
         cfg_.botplay = false;
         cfg_.practice = true;  // a replay never ends early
         cfg_.ghostTapping = playback_.ghostTapping;
+        for (int k = 0; k < kRatingCount; ++k) cfg_.windows[k] = playback_.windows[k];  // judged as it was played
+        cfg_.ratingOffset = playback_.ratingOffset;
         playerLeft_ = playback_.mirror;
     }
     // Rendering mode: the song plays by itself and is recorded from here on.
@@ -530,6 +548,14 @@ void PlayState::handleInput() {
             openChartEditor();
             return;
         }
+        // R: Psych's Reset button, an instant loss (unless R is a lane, Options:
+        // Disable reset button, practice mode, a replay or before the song starts).
+        if (e.down && e.code == KEY_R && !keyReserved(e.code) && !a.settings.noReset && !replaying_ && !cfg_.practice && !rendering_ &&
+            songMs_ >= 0 && !cutscene_) {
+            session_.setHealth(0);
+            session_.dead = true;
+            return;
+        }
         if (e.code <= 0 || e.code >= Input::kMaxCodes || replaying_) continue;
         const int lane = keyLane_[size_t(e.code)];
         if (lane < 0) continue;
@@ -648,6 +674,7 @@ void PlayState::splash(int side, int lane) {
     ring.p = p;
     ring.kind = 2;
     ring.c = c;
+    ring.c.a = (unsigned char)(255 * clampv(app().settings.splashAlpha, 0.0f, 1.0f));  // Options: note splash opacity
     ring.size = noteSize() * 0.75f;
     ring.life = ring.maxLife = 0.3f;
     fx_.add(ring);
@@ -658,6 +685,7 @@ void PlayState::splash(int side, int lane) {
         s.v = {std::cos(ang) * sp, std::sin(ang) * sp};
         s.kind = 1;
         s.c = gfx::brighten(c, 0.3f);
+        s.c.a = ring.c.a;
         s.size = 3.5f;
         s.life = s.maxLife = gfx::randf(0.2f, 0.35f);
         fx_.add(s);
@@ -690,6 +718,8 @@ void PlayState::handleNoteEvents() {
                     lastHitsound_ = now;
                 }
                 if (psych_) psychNoteHit(ev, false);
+                scoreDirty_ = true;
+                scoreDirtyMiss_ = false;
                 break;
             }
             case GameEvent::PlayerMiss:
@@ -703,6 +733,7 @@ void PlayState::handleNoteEvents() {
                 }
                 popup("MISS", kMissColor, "");
                 if (psych_) psychMiss(ev, ev.type == GameEvent::GhostMiss);
+                scoreDirty_ = scoreDirtyMiss_ = true;
                 break;
             case GameEvent::PlayerMine:
                 charOf(1).miss(dir, now);
@@ -720,6 +751,11 @@ void PlayState::handleNoteEvents() {
         }
     }
     if (psych_ && !evs.empty()) updateStatGlobals();
+    // Psych's updateScore: scoreTxt's text, once a frame however many notes were judged.
+    if (psych_ && scoreDirty_) {
+        updateScoreText(scoreDirtyMiss_);
+        scoreDirty_ = false;
+    }
 }
 
 void PlayState::processChartEvents() {
@@ -964,6 +1000,8 @@ void PlayState::finish() {
         record_.mirror = playerLeft_;
         record_.ghostTapping = cfg_.ghostTapping;
         record_.keys = chart_.keys;
+        for (int k = 0; k < kRatingCount; ++k) record_.windows[k] = cfg_.windows[k];
+        record_.ratingOffset = cfg_.ratingOffset;
         record_.score = r.score;
         record_.acc = r.acc;
         record_.misses = r.misses;
@@ -1161,115 +1199,314 @@ bool PlayState::hudShown(const char* name, float* alpha) const {
     return it->second->visible && it->second->alpha > 0.002f;
 }
 
+// ------------------------------------------------------- Psych HUD objects --
+
+scene::Sprite* PlayState::hudObject(const char* name) const {
+    if (!psych_ || !scene_) return nullptr;
+    auto it = scene_->hud.find(name);
+    return it == scene_->hud.end() ? nullptr : it->second.get();
+}
+
+Vector2 PlayState::hudMoved(const char* name) const {
+    const scene::Sprite* o = hudObject(name);
+    auto it = hudHome_.find(name);
+    if (!o || it == hudHome_.end()) return {0, 0};
+    return {o->x - it->second.x, o->y - it->second.y};
+}
+
+// Psych 0.7.3's places: healthBar.png centred with its top at 89% of the
+// height (11% in downscroll), the score text 40 pixels under it (36 in 0.6),
+// the time text 19 pixels down (FlxG.height - 44 in downscroll) with the time
+// bar a quarter of its height lower, BOTPLAY 55 under the time bar (78 over
+// it in downscroll).
+PlayState::PsychHudLayout PlayState::psychHudLayout() const {
+    const Settings& s = app().settings;
+    const PsychUi& ui = psychUi();
+    PsychHudLayout L;
+    const Vector2 hb = ui.healthBarSize();
+    const bool picture = hb.x > 0;
+    const Vector2 size = picture ? hb : Vector2{601, 19};
+    L.bar = {(gfx::W - size.x) * 0.5f, gfx::H * (s.downscroll ? 0.11f : 0.89f), size.x, size.y};
+    L.inset = picture ? ui.barInset() : 3.0f;
+    L.scoreY = L.bar.y + (picture && !ui.barOnTop() ? 36.0f : 40.0f);
+    L.timeTxtY = s.downscroll ? gfx::H - 44.0f : 19.0f;
+    L.timeBarY = L.timeTxtY + (ui.lineHeight(32) + 4) * 0.25f;
+    L.botY = s.downscroll ? L.timeBarY - 78 : L.timeBarY + 55;
+    L.timeBarSize = ui.timeBarSize();
+    return L;
+}
+
+void PlayState::initHudObjects() {
+    const Settings& s = app().settings;
+    const PsychHudLayout L = psychHudLayout();
+    auto put = [&](const char* name, float x, float y, float w, float h) {
+        scene::Sprite* o = hudObject(name);
+        if (!o) return;
+        o->x = x;
+        o->y = y;
+        o->width = o->frameW = w;
+        o->height = o->frameH = h;
+        o->centerOrigin();
+        hudHome_[name] = {x, y};
+    };
+    put("healthBar", L.bar.x, L.bar.y, L.bar.width, L.bar.height);
+    put("healthBarBG", L.bar.x, L.bar.y, L.bar.width, L.bar.height);
+    put("iconP1", 0, L.bar.y - 75, 150, 150);
+    put("iconP2", 0, L.bar.y - 75, 150, 150);
+    put("scoreTxt", 0, L.scoreY, gfx::W, psychUi().lineHeight(20) * 2 + 4);
+    put("timeBar", (gfx::W - L.timeBarSize.x) * 0.5f, L.timeBarY, L.timeBarSize.x, L.timeBarSize.y);
+    put("timeBarBG", (gfx::W - L.timeBarSize.x) * 0.5f, L.timeBarY, L.timeBarSize.x, L.timeBarSize.y);
+    put("timeTxt", 42 + gfx::W * 0.5f - 248, L.timeTxtY, 400, psychUi().lineHeight(32) + 4);
+    put("botplayTxt", 400, L.botY, gfx::W - 800, psychUi().lineHeight(32) + 4);
+    // What Psych's options do to them (Hide HUD, health bar opacity, time bar type).
+    for (const char* n : {"healthBar", "iconP1", "iconP2"})
+        if (scene::Sprite* o = hudObject(n)) {
+            o->visible = !s.hideHud;
+            o->alpha = s.healthBarAlpha;
+        }
+    if (scene::Sprite* o = hudObject("healthBarBG")) o->visible = !s.hideHud;
+    if (scene::Sprite* o = hudObject("scoreTxt")) o->visible = !s.hideHud;
+    if (scene::Sprite* o = hudObject("iconP1")) o->flipX = true;
+    for (const char* n : {"timeBar", "timeTxt"})
+        if (scene::Sprite* o = hudObject(n)) {
+            o->visible = s.timeBar != 3;
+            o->alpha = 0;  // until the song starts
+        }
+    if (scene::Sprite* o = hudObject("timeBarBG")) o->visible = s.timeBar != 3;
+    if (scene::Sprite* o = hudObject("timeTxt"); o && s.timeBar == 2)
+        o->text.text = timeEngineText_ = songNameShown_.empty() ? chart_.title : songNameShown_;
+    if (scene::Sprite* o = hudObject("botplayTxt")) {
+        o->visible = cfg_.botplay || replaying_;
+        o->text.text = botEngineText_ = replaying_ ? "REPLAY" : "BOTPLAY";
+    }
+    updateHudObjects(0);
+    updateScoreText(false);
+}
+
+// What Psych's PlayState.update does to the HUD objects before onUpdatePost.
+void PlayState::updateHudObjects(double dt) {
+    const Settings& s = app().settings;
+    const double now = app().now;
+    // updateIconsScale: back to 1 (exp(-9 t)); updateIconsPosition: beside the
+    // bar's split (health 50% = the middle).
+    scene::Sprite* p1 = hudObject("iconP1");
+    scene::Sprite* p2 = hudObject("iconP2");
+    const float k = float(std::exp(-dt * 9.0 * rate_));
+    for (scene::Sprite* ic : {p1, p2})
+        if (ic) ic->scaleX = ic->scaleY = 1.0f + (ic->scaleX - 1.0f) * k;
+    if (const scene::Sprite* bar = hudObject("healthBar")) {
+        const float inset = psychUi().healthBarSize().x > 0 ? psychUi().barInset() : 3.0f;
+        const float hp = healthShown_ / 2.0f, leftFrac = playerLeft_ ? hp : 1.0f - hp;
+        const float center = bar->x + inset + (bar->width - 2 * inset) * leftFrac;
+        if (p1) p1->x = iconHomeX_[1] = center + (150 * p1->scaleX - 150) * 0.5f - 26;
+        if (p2) p2->x = iconHomeX_[0] = center - 150 * p2->scaleX * 0.5f - 52;
+    }
+    // doScoreBop: 1.075, back to 1 in 0.2 s.
+    if (scene::Sprite* st = hudObject("scoreTxt"); st && s.scoreZoom) {
+        const double t = now - scoreBopAt_;
+        if (t >= 0 && t < 0.2) {
+            st->scaleX = st->scaleY = float(1.075 - 0.075 * t / 0.2);
+            scoreBopping_ = true;
+        } else if (scoreBopping_) {
+            st->scaleX = st->scaleY = 1;
+            scoreBopping_ = false;
+        }
+    }
+    // The time bar and text fade in for 0.5 s when the song starts (circOut);
+    // the time text is written every frame.
+    if (songStartAt_ >= 0 && !timeFadeDone_) {
+        const float t = std::min(1.0f, float(now - songStartAt_) / 0.5f);
+        const float in = std::sqrt(std::max(0.0f, 1.0f - (t - 1.0f) * (t - 1.0f)));
+        for (const char* n : {"timeBar", "timeTxt"})
+            if (scene::Sprite* o = hudObject(n)) o->alpha = in;
+        timeFadeDone_ = t >= 1.0f;
+    }
+    if (scene::Sprite* tt = hudObject("timeTxt"); tt && s.timeBar != 2) {
+        const double cur = std::max(0.0, songMs_);
+        const double calc = s.timeBar == 1 ? cur : std::max(0.0, shownLengthMs() - cur);
+        tt->text.text = timeEngineText_ = fmtTime(std::floor(calc / 1000.0));
+    }
+    // BOTPLAY: fading out and back in over a second, then a second fully shown.
+    if (scene::Sprite* bt = hudObject("botplayTxt"); bt && bt->visible) {
+        botplaySine_ += 180.0 * dt;
+        bt->alpha = std::clamp(1.0f - float(std::sin(kPi * botplaySine_ / 180.0)), 0.0f, 1.0f);
+    }
+}
+
+std::string PlayState::psychScoreLine() const {
+    // Psych 0.7.3's updateScore: "Score: 1200 | Misses: 0 | Rating: Sick! (98.5%) - SFC".
+    const long long judged = session_.judged() + session_.misses;
+    std::string line = "Score: " + std::to_string(session_.score) + " | Misses: " + std::to_string(session_.misses) + " | Rating: " +
+                       (ratingNameOverride_.empty() ? psychRatingName(session_.accuracy(), judged) : ratingNameOverride_);
+    if (judged > 0) {
+        // CoolUtil.floorDecimal(percent, 2), written as Haxe writes a Float.
+        std::string pct = TextFormat("%.2f", std::floor(session_.accuracy() * 10000.0) / 100.0);
+        while (!pct.empty() && pct.back() == '0') pct.pop_back();
+        if (!pct.empty() && pct.back() == '.') pct.pop_back();
+        line += " (" + pct + "%) - " + (ratingFcOverride_.empty() ? psychFcLabel(session_) : ratingFcOverride_);
+    }
+    return line;
+}
+
+void PlayState::updateScoreText(bool miss) {
+    scene::Sprite* st = hudObject("scoreTxt");
+    if (!st) return;
+    // On spam charts the scripts hear it once a frame at most (Options: Lua note callbacks).
+    const bool calls = scripts_ && app().settings.luaNoteCallbacks;
+    if (calls && scripts_->callStops("preUpdateScore", {scene::Value(miss)})) return;
+    st->text.text = scoreEngineText_ = psychScoreLine();
+    if (calls) scripts_->call("onUpdateScore", {scene::Value(miss)});
+}
+
+// Draws what `draw` draws turned by `angle` degrees and scaled around `c`, as
+// Flixel turns and scales a sprite around its middle.
+template <class F>
+void turned(Vector2 c, float angle, float sx, float sy, F&& draw) {
+    const bool t = angle != 0 || sx != 1 || sy != 1;
+    if (t) {
+        rlDrawRenderBatchActive();
+        rlPushMatrix();
+        rlTranslatef(c.x, c.y, 0);
+        if (angle != 0) rlRotatef(angle, 0, 0, 1);
+        rlScalef(sx, sy, 1);
+        rlTranslatef(-c.x, -c.y, 0);
+    }
+    draw();
+    if (t) {
+        rlDrawRenderBatchActive();
+        rlPopMatrix();
+    }
+}
+
 // The HUD. With the Psych Engine interface it is laid out as Psych 0.7.3's
-// PlayState does it: healthBar.png centred with its top at 89% of the height
-// (11% in downscroll), the icons on its top edge beside the split, the score
-// text 40 pixels under it, the time text and bar at the top, BOTPLAY under
-// them. The game's own look otherwise.
+// PlayState does it (psychHudLayout); in Psych songs each piece is drawn where
+// its object is (scripts move, turn, scale and fade them). The game's own look
+// otherwise, moved as far as scripts moved the objects.
 void PlayState::drawHud() {
     App& a = app();
     const Settings& s = a.settings;
     const double now = a.now;
     const PsychUi& ui = psychUi();
-    const bool look = ui.active();  // the Psych Engine interface
-    const bool hide = s.hideHud;    // Psych's Hide HUD: health bar, icons, score line
+    const bool look = ui.active();             // the Psych Engine interface
+    const bool hideOwn = s.hideHud && !psych_;  // in Psych songs the objects carry Hide HUD
+    const bool psychText = look && ui.font();
     // health bar
     const Vector2 hbs = ui.healthBarSize();
     const bool psychBar = hbs.x > 0;
-    const Rectangle frame = psychBar ? Rectangle{(gfx::W - hbs.x) * 0.5f, gfx::H * (s.downscroll ? 0.11f : 0.89f), hbs.x, hbs.y}
-                                     : Rectangle{335, s.downscroll ? 77.0f : 635.0f, 610, 28};
+    const Rectangle home = psychBar ? Rectangle{(gfx::W - hbs.x) * 0.5f, gfx::H * (s.downscroll ? 0.11f : 0.89f), hbs.x, hbs.y}
+                                    : Rectangle{335, s.downscroll ? 77.0f : 635.0f, 610, 28};
+    Vector2 barMoved = hudMoved("healthBar");
+    if (barMoved.x == 0 && barMoved.y == 0) barMoved = hudMoved("healthBarBG");  // Psych 0.6 scripts move the picture
+    const Rectangle frame{home.x + barMoved.x, home.y + barMoved.y, home.width, home.height};
     const float inset = psychBar ? ui.barInset() : 5.0f;
     const float bx = frame.x + inset, by = frame.y + inset, bw = frame.width - 2 * inset, bh = frame.height - 2 * inset;
     const float hp = healthShown_ / 2.0f;
     const float leftFrac = playerLeft_ ? hp : 1.0f - hp;
-    const float split = bx + bw * leftFrac;      // Psych's barCenter
-    const float barOpacity = s.healthBarAlpha;  // Options: health bar opacity (the icons too)
+    const float split = bx + bw * leftFrac;  // Psych's barCenter
+    // Health bar opacity: Psych songs start healthBar and the icons at that alpha.
+    const float barOpacity = psych_ ? 1.0f : s.healthBarAlpha;
+    const scene::Sprite* barObj = hudObject("healthBar");
     float barAlpha = 1, bgAlpha = 1;
-    if (!hide && hudShown("healthBar", &barAlpha)) {
+    if (!hideOwn && hudShown("healthBar", &barAlpha)) {
         if (!hudShown("healthBarBG", &bgAlpha)) bgAlpha = 0;  // Psych 0.6 scripts fade the picture on its own
         barAlpha *= barOpacity;
-        if (barAlpha > 0.002f && !ui.healthBar(frame, leftColor_, rightColor_, leftFrac, barAlpha, barAlpha * bgAlpha)) {
-            DrawRectangleRounded(frame, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha * bgAlpha));
-            DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
-            DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
-            DrawRectangleRec({bx, by, bw, bh * 0.35f}, Color{255, 255, 255, (unsigned char)(40 * barAlpha)});
-        }
+        if (barAlpha > 0.002f)
+            turned({frame.x + frame.width * 0.5f, frame.y + frame.height * 0.5f}, barObj ? barObj->angle : 0.0f, barObj ? barObj->scaleX : 1.0f,
+                   barObj ? barObj->scaleY : 1.0f, [&] {
+                       if (ui.healthBar(frame, leftColor_, rightColor_, leftFrac, barAlpha, barAlpha * bgAlpha)) return;
+                       DrawRectangleRounded(frame, 0.6f, 8, fade(Color{8, 4, 14, 230}, barAlpha * bgAlpha));
+                       DrawRectangleRec({bx, by, split - bx, bh}, fade(leftColor_, barAlpha));
+                       DrawRectangleRec({split, by, bx + bw - split, bh}, fade(rightColor_, barAlpha));
+                       DrawRectangleRec({bx, by, bw, bh * 0.35f}, Color{255, 255, 255, (unsigned char)(40 * barAlpha)});
+                   });
     }
     const bool playerLosing = session_.health < 0.4, oppLosing = session_.health > 1.6;
     // Psych: 150-pixel icons centred on the bar's top edge, beside the split,
-    // growing to 1.2 on each beat and easing back (exp(-9 t)).
+    // growing to 1.2 on each beat and easing back (exp(-9 t)). In Psych songs
+    // the icon objects carry that (updateHudObjects).
     float bop = 1;
-    if (look && songStarted_) {
+    if (look && songStarted_ && !psych_) {
         const double beat = std::floor(chart_.beatAt(songMs_));
         if (beat >= 1) bop = 1.0f + 0.2f * float(std::exp(-0.009 * std::max(0.0, songMs_ - chart_.msAtBeat(beat))));
     }
     const float isz = 86.0f * (1.0f + 0.12f * beatPulse_);
-    for (int i = 0; i < 2 && !hide; ++i) {  // 0 = left (opponent side), 1 = right
+    for (int i = 0; i < 2 && !hideOwn; ++i) {  // 0 = left (opponent side), 1 = right
+        const char* name = i == 0 ? "iconP2" : "iconP1";
         float ia = 1;
-        if (!hudShown(i == 0 ? "iconP2" : "iconP1", &ia)) continue;
+        if (!hudShown(name, &ia)) continue;
         ia *= barOpacity;
         if (ia <= 0.002f) continue;
-        const Vector2 pos = look ? Vector2{i == 0 ? split - 75.0f * bop + 23.0f : split + 75.0f * bop - 26.0f, frame.y}
-                                 : Vector2{split + (i == 0 ? -36.0f : 36.0f), by + bh * 0.5f};
+        const scene::Sprite* io = hudObject(name);
+        Vector2 pos;
+        float scale = bop;
+        if (io && look) {  // where the object is: its middle is 75 pixels in, whatever its scale
+            pos = {io->x + 75, io->y + 75};
+            scale = io->scaleX;
+        } else {
+            pos = look ? Vector2{i == 0 ? split - 75.0f * bop + 23.0f : split + 75.0f * bop - 26.0f, frame.y}
+                       : Vector2{split + (i == 0 ? -36.0f : 36.0f), by + bh * 0.5f};
+            if (io) {
+                pos.x += io->x - iconHomeX_[i] - barMoved.x;
+                pos.y += io->y - hudHome_[name].y - barMoved.y;
+            }
+        }
+        const float angle = io ? io->angle : 0.0f;
+        const bool flip = io ? io->flipX : i == 1;
         const bool losing = i == 0 ? (playerLeft_ ? playerLosing : oppLosing) : (playerLeft_ ? oppLosing : playerLosing);
         if (psych_ && hasPsychIcon_[i] && iconTex_[i].id) {
             const int frames = std::max(1, iconFrames_[i]);
             const float fw = float(iconTex_[i].width) / float(frames), fh = float(iconTex_[i].height);
             const int fi = losing && frames > 1 ? 1 : 0;
-            const float dw = look ? fw * bop : isz * 1.6f, dh = dw * fh / fw;
-            Rectangle src{fw * float(fi), 0, i == 1 ? -fw : fw, fh};
-            DrawTexturePro(iconTex_[i], src, {pos.x, pos.y, dw, dh}, {dw * 0.5f, dh * 0.5f}, 0, fade(WHITE, ia));
+            const float dw = look ? fw * scale : isz * 1.6f, dh = dw * fh / fw;
+            Rectangle src{fw * float(fi), 0, flip ? -fw : fw, fh};
+            DrawTexturePro(iconTex_[i], src, {pos.x, pos.y, dw, dh}, {dw * 0.5f, dh * 0.5f}, angle, fade(WHITE, ia));
         } else {
             const CharacterState& cs = i == 0 ? left_ : right_;
-            drawIcon(cs.id, cs.tint, pos, look ? 115.0f * bop : isz, losing, now);
+            turned(pos, angle, 1, 1, [&] { drawIcon(cs.id, cs.tint, pos, look ? 115.0f * scale : isz, losing, now); });
         }
     }
     // score line (Psych: 40 pixels under the bar's top; 36 in 0.6)
     float scoreAlpha = 1;
-    const bool scoreShown = !hide && hudShown("scoreTxt", &scoreAlpha);
-    const float scoreTop = frame.y + (psychBar && !ui.barOnTop() ? 36.0f : 40.0f);
-    const bool psychText = look && ui.font();
+    const bool scoreShown = !hideOwn && hudShown("scoreTxt", &scoreAlpha);
+    const scene::Sprite* so = hudObject("scoreTxt");
+    const Vector2 scoreMoved = hudMoved("scoreTxt");
+    const float scoreTop = home.y + (psychBar && !ui.barOnTop() ? 36.0f : 40.0f) + scoreMoved.y;
+    const float scoreX = gfx::W * 0.5f + scoreMoved.x;
     if (scoreShown) {
         std::string line = "Score " + fmtThousands(session_.score) + "   |   Misses " + fmtThousands(session_.misses) +
                            "   |   " + TextFormat("%.2f%%", session_.accuracy() * 100.0) + " (" +
                            (ratingNameOverride_.empty() ? session_.rank() : ratingNameOverride_) + ")";
         const std::string cl = ratingFcOverride_.empty() ? session_.clearLabel() : ratingFcOverride_;
         if (!cl.empty()) line += "   |   " + cl;
-        if (ui.active()) {  // Psych Engine's own score line
-            line = "Score: " + std::to_string(session_.score) + " | Misses: " + std::to_string(session_.misses) + " | Rating: " +
-                   (ratingNameOverride_.empty() ? psychRatingName(session_.accuracy(), session_.judged() + session_.misses)
-                                                : ratingNameOverride_);
-            if (session_.judged() + session_.misses > 0)
-                line += TextFormat(" (%.2f%%) - %s", session_.accuracy() * 100.0,
-                                   (ratingFcOverride_.empty() ? psychFcLabel(session_) : ratingFcOverride_).c_str());
-        }
-        if (psych_) {
-            auto it = scene_->hud.find("scoreTxt");
-            if (it != scene_->hud.end() && !it->second->text.text.empty()) line = it->second->text.text;
-        }
+        if (look) line = so ? scoreEngineText_ : psychScoreLine();  // Psych Engine's own score line
+        if (so && !so->text.text.empty() && so->text.text != scoreEngineText_) line = so->text.text;  // a script wrote it
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         // Long numbers (spam charts) shrink the line to fit instead of running off screen.
         constexpr float kMaxLineW = gfx::W - 40.0f;
-        if (psychText) {
-            // vcr.ttf 20 with a black outline; with "Score text zoom on hit" it
-            // grows to 1.075 on each note you hit and eases back in 0.2 s, around
-            // the middle of its box (two lines high: Psych ends it with a line break).
-            float size = 20;
-            const float w = ui.textWidth(line, size);
-            if (w > kMaxLineW) size *= kMaxLineW / w;
-            float zoom = 1;
-            if (s.scoreZoom && now - scoreBopAt_ < 0.2) zoom = 1.075f - 0.075f * float((now - scoreBopAt_) / 0.2);
-            const float mid = scoreTop + ui.lineHeight(size) + 2;
-            ui.text(line, gfx::W / 2, mid + (scoreTop + 2 - mid) * zoom - 2, size * zoom, fade(WHITE, scoreAlpha), 0, 1.25f * zoom);
-        } else {
-            float size = 24;
-            const float w = gfx::measure(FontId::Ui, line, size).x;
-            if (w > kMaxLineW) size *= kMaxLineW / w;
-            gfx::text(FontId::Ui, line, gfx::W / 2, by + 36, size, fade(WHITE, scoreAlpha), Align::Center, 2.0f);
-        }
+        turned({scoreX, scoreTop + 12}, so ? so->angle : 0.0f, 1, 1, [&] {
+            if (psychText) {
+                // vcr.ttf 20 with a black outline; with "Score text zoom on hit" it
+                // grows to 1.075 on each note you hit and eases back in 0.2 s, around
+                // the middle of its box (two lines high: Psych ends it with a line break).
+                float size = 20;
+                const float w = ui.textWidth(line, size);
+                if (w > kMaxLineW) size *= kMaxLineW / w;
+                float zoom = 1;
+                if (so) zoom = so->scaleX;
+                else if (s.scoreZoom && now - scoreBopAt_ < 0.2) zoom = 1.075f - 0.075f * float((now - scoreBopAt_) / 0.2);
+                const float mid = scoreTop + ui.lineHeight(size) + 2;
+                ui.text(line, scoreX, mid + (scoreTop + 2 - mid) * zoom - 2, size * zoom, fade(WHITE, scoreAlpha), 0, 1.25f * zoom);
+            } else {
+                float size = 24;
+                const float w = gfx::measure(FontId::Ui, line, size).x;
+                if (w > kMaxLineW) size *= kMaxLineW / w;
+                gfx::text(FontId::Ui, line, scoreX, home.y + 5 + 36 + scoreMoved.y, size, fade(WHITE, scoreAlpha), Align::Center, 2.0f);
+            }
+        });
     }
     // Note counter (Options, Note counter): notes hit so far out of the chart's
     // total, for your side, or both sides added up the way H-Slice shows them
-    // ("opponent + yours = both").
+    // ("opponent + yours = both"); it follows the score line.
     if (s.noteCounter > 0 && scoreShown) {
         std::string line;
         if (s.noteCounter == 2) {
@@ -1289,29 +1526,37 @@ void PlayState::drawHud() {
             float size = 16;
             const float w = ui.textWidth(line, size);
             if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
-            ui.text(line, gfx::W / 2, scoreTop + 22, size, fade(WHITE, scoreAlpha), 0, 1.0f);
+            ui.text(line, scoreX, scoreTop + 22, size, fade(WHITE, scoreAlpha), 0, 1.0f);
         } else {
             float size = 18;
             const float w = gfx::measure(FontId::Ui, line, size).x;
             if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
-            gfx::text(FontId::Ui, line, gfx::W / 2, by + 60, size, fade(kIvory, 0.9f * scoreAlpha), Align::Center, 1.5f);
+            gfx::text(FontId::Ui, line, scoreX, home.y + 5 + 60 + scoreMoved.y, size, fade(kIvory, 0.9f * scoreAlpha), Align::Center, 1.5f);
         }
     }
     // Psych's time text: vcr.ttf 32 in a 400-pixel box at x 434 (STRUM_X +
     // FlxG.width / 2 - 248), 19 pixels down (FlxG.height - 44 in downscroll);
     // the time bar a quarter of the text's height under its top.
-    const float timeTop = s.downscroll ? gfx::H - 44.0f : 19.0f;
-    const float timeBarTop = timeTop + (ui.lineHeight(32) + 4) * 0.25f;
-    float botAlpha = 1;
-    if ((cfg_.botplay || replaying_) && s.botplayText && hudShown("botplayTxt", &botAlpha)) {
+    const PsychHudLayout L = psychHudLayout();
+    if (const scene::Sprite* bo = hudObject("botplayTxt")) {
+        // Psych songs: the object (BOTPLAY, or what a script wrote and showed).
+        float botAlpha = 1;
+        const bool engineText = bo->text.text == botEngineText_;
+        if (hudShown("botplayTxt", &botAlpha) && (s.botplayText || !engineText) && !bo->text.text.empty()) {
+            const Vector2 c{bo->x + bo->width * 0.5f, bo->y};
+            turned({c.x, c.y + 16}, bo->angle, bo->scaleX, bo->scaleY, [&] {
+                if (!(psychText && ui.text(bo->text.text, c.x, c.y, 32, fade(WHITE, botAlpha), 0, 1.25f)))
+                    gfx::text(FontId::Title, bo->text.text, c.x, c.y + 66, 40, fade(kGold, botAlpha), Align::Center, 2.0f);
+            });
+        }
+    } else if ((cfg_.botplay || replaying_) && s.botplayText) {
         const char* label = replaying_ ? "REPLAY" : "BOTPLAY";
         // Psych: under the time bar (above it in downscroll), fading out and
         // back in over a second, then a second fully shown.
         const float al = std::clamp(1.0f - float(std::sin(kPi * (now - loadStart_))), 0.0f, 1.0f);
-        if (!(psychText && ui.text(label, gfx::W / 2, s.downscroll ? timeBarTop - 78 : timeBarTop + 55, 32, fade(WHITE, al * botAlpha), 0,
-                                   1.25f)))
-            gfx::text(FontId::Title, label, gfx::W / 2, s.downscroll ? 560 : 150, 40,
-                      fade(kGold, (0.55f + 0.35f * std::sin(float(now) * 3.0f)) * botAlpha), Align::Center, 2.0f);
+        if (!(psychText && ui.text(label, gfx::W / 2, L.botY, 32, fade(WHITE, al), 0, 1.25f)))
+            gfx::text(FontId::Title, label, gfx::W / 2, s.downscroll ? 560 : 150, 40, fade(kGold, 0.55f + 0.35f * std::sin(float(now) * 3.0f)),
+                      Align::Center, 2.0f);
     }
     if (s.touchControls && !a.touchMode && !replaying_) {
         const float half = std::min(112.0f, 500.0f / float(chart_.keys)) * 0.5f;
@@ -1322,14 +1567,16 @@ void PlayState::drawHud() {
         }
     }
     if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && scoreShown))
-        gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, by + 62, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
+        gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, home.y + 67, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
     if (rate_ != 1.0) gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
 
     // song progress (Options: time left, time elapsed, song name or off)
     float tbAlpha = 1, ttAlpha = 1, tbgAlpha = 1;
     const bool tbShown = hudShown("timeBar", &tbAlpha), ttShown = hudShown("timeTxt", &ttAlpha);
     if (!hudShown("timeBarBG", &tbgAlpha)) tbgAlpha = 0;
-    if (s.timeBar != 3 && (tbShown || ttShown)) {
+    const scene::Sprite* tbo = hudObject("timeBar");
+    const scene::Sprite* tto = hudObject("timeTxt");
+    if ((psych_ || s.timeBar != 3) && (tbShown || ttShown)) {
         const float prog = float(clampv(songMs_ / std::max(1.0, shownLengthMs()), 0.0, 1.0));
         // Psych counts the song's own time (a faster rate does not shorten it);
         // the game's own look counts the real time left.
@@ -1337,31 +1584,43 @@ void PlayState::drawHud() {
         const double remain = std::max(0.0, (shownLengthMs() - songMs_) / 1000.0 / div);
         const double elapsed = std::max(0.0, songMs_ / 1000.0 / div);
         const std::string name = songNameShown_.empty() ? chart_.title : songNameShown_;
+        const bool songName = s.timeBar == 2;
+        std::string timeText = songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain);
+        if (tto && !tto->text.text.empty() && (look || tto->text.text != timeEngineText_)) timeText = tto->text.text;
+        const Vector2 tbMoved = hudMoved("timeBar"), ttMoved = hudMoved("timeTxt");
         const bool custom = timeBarBack_.a || timeBarFill_.a;  // setTimeBarColors()
         if (!custom && look) {
-            // Psych: hidden until the song starts, then fading in for 0.5 s (circOut).
-            const float t = songStartAt_ < 0 ? 0.0f : std::min(1.0f, float(now - songStartAt_) / 0.5f);
-            const float in = std::sqrt(std::max(0.0f, 1.0f - (t - 1.0f) * (t - 1.0f)));
-            const Vector2 tbs = ui.timeBarSize();
-            if (tbShown) ui.timeBar({(gfx::W - tbs.x) * 0.5f, timeBarTop, tbs.x, tbs.y}, prog, in * tbAlpha, in * tbAlpha * tbgAlpha);
-            const bool songName = s.timeBar == 2;  // Psych: 24 pixels, 3 lower
-            if (ttShown && !(psychText && ui.text(songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain), 42 + gfx::W / 2 - 248 + 200,
-                                                  songName ? timeTop + 3 : timeTop, songName ? 24.0f : 32.0f,
-                                                  fade(WHITE, in * ttAlpha), 0, 2.0f)))
-                gfx::text(FontId::Ui, songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain), gfx::W / 2, timeTop, 28,
-                          fade(WHITE, in * ttAlpha), Align::Center, 2.0f);
+            // Psych: hidden until the song starts, then fading in for 0.5 s
+            // (circOut); in Psych songs the objects carry that.
+            float in = 1;
+            if (!psych_) {
+                const float t = songStartAt_ < 0 ? 0.0f : std::min(1.0f, float(now - songStartAt_) / 0.5f);
+                in = std::sqrt(std::max(0.0f, 1.0f - (t - 1.0f) * (t - 1.0f)));
+            }
+            const Vector2 tbs = L.timeBarSize;
+            const Rectangle tframe{(gfx::W - tbs.x) * 0.5f + tbMoved.x, L.timeBarY + tbMoved.y, tbs.x, tbs.y};
+            if (tbShown)
+                turned({tframe.x + tframe.width * 0.5f, tframe.y + tframe.height * 0.5f}, tbo ? tbo->angle : 0.0f, tbo ? tbo->scaleX : 1.0f,
+                       tbo ? tbo->scaleY : 1.0f, [&] { ui.timeBar(tframe, prog, in * tbAlpha, in * tbAlpha * tbgAlpha); });
+            const float tx = 42 + gfx::W / 2 - 248 + 200 + ttMoved.x, ty = (songName ? L.timeTxtY + 3 : L.timeTxtY) + ttMoved.y;
+            if (ttShown)
+                turned({tx, ty + 16}, tto ? tto->angle : 0.0f, tto ? tto->scaleX : 1.0f, tto ? tto->scaleY : 1.0f, [&] {
+                    if (!(psychText && ui.text(timeText, tx, ty, songName ? 24.0f : 32.0f, fade(WHITE, in * ttAlpha), 0, 2.0f)))
+                        gfx::text(FontId::Ui, timeText, tx, ty, 28, fade(WHITE, in * ttAlpha), Align::Center, 2.0f);
+                });
         } else {
-            const float ty = s.downscroll ? gfx::H - 26.0f : 12.0f;
+            const float ty = (s.downscroll ? gfx::H - 26.0f : 12.0f) + tbMoved.y;
             if (tbShown) {
-                DrawRectangleRounded({440, ty, 400, 14}, 0.8f, 8, fade(timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200}, tbAlpha));
-                DrawRectangleRounded({442, ty + 2, 396 * prog, 10}, 0.8f, 8,
+                DrawRectangleRounded({440 + tbMoved.x, ty, 400, 14}, 0.8f, 8, fade(timeBarBack_.a ? timeBarBack_ : Color{8, 4, 14, 200}, tbAlpha));
+                DrawRectangleRounded({442 + tbMoved.x, ty + 2, 396 * prog, 10}, 0.8f, 8,
                                      fade(timeBarFill_.a ? timeBarFill_ : gfx::mix(leftColor_, WHITE, 0.3f), tbAlpha));
             }
             std::string label = name + "  -  " + req_.diff;
             if (s.timeBar != 2) label += "  -  " + fmtTime(s.timeBar == 1 ? elapsed : remain);
+            if (tto && !tto->text.text.empty() && tto->text.text != timeEngineText_) label = tto->text.text;
             if (ttShown)
-                gfx::text(FontId::Ui, label, gfx::W / 2, s.downscroll ? ty - 26 : ty + 14, 20, fade(WHITE, 0.85f * ttAlpha), Align::Center,
-                          1.5f);
+                gfx::text(FontId::Ui, label, gfx::W / 2 + ttMoved.x, (s.downscroll ? gfx::H - 52.0f : 26.0f) + ttMoved.y, 20,
+                          fade(WHITE, 0.85f * ttAlpha), Align::Center, 1.5f);
         }
     }
 }
@@ -1397,8 +1656,10 @@ void PlayState::drawUnderNotes() {
                 if (rs.x <= 0) continue;
                 const float rk = std::floor(rs.x * 0.7f) / rs.x;
                 const float rvx = -irange(0, 10), rvy = -irange(140, 175);
-                const float rx = gfx::W * 0.35f - 40.0f + rvx * tau;
-                const float ry = (gfx::H - rs.y) * 0.5f - 60.0f + rvy * tau + 0.5f * 550.0f * tau * tau;
+                // Psych's comboOffset (Options: rating / combo position): x right, y up.
+                const float* off = s.comboOffset;
+                const float rx = gfx::W * 0.35f - 40.0f + off[0] + rvx * tau;
+                const float ry = (gfx::H - rs.y) * 0.5f - 60.0f - off[1] + rvy * tau + 0.5f * 550.0f * tau * tau;
                 const float ra = tau < p.beat ? 1.0f : std::max(0.0f, 1.0f - (tau - p.beat) / 0.2f);
                 if (ra > 0.002f) ui.ratingAt(std::min(p.rating, 3), rx, ry, rk, ra * comboAlpha);
                 std::string digits = std::to_string(std::max(0LL, p.combo));
@@ -1410,16 +1671,16 @@ void PlayState::drawUnderNotes() {
                     const Vector2 ns = ui.numSize(d);
                     if (ns.x <= 0 || da <= 0.002f) continue;
                     const float nk = std::floor(ns.x * 0.5f) / ns.x;
-                    const float x = gfx::W * 0.35f + 43.0f * float(i) - 90.0f + vx * tau;
-                    const float y = (gfx::H - ns.y) * 0.5f + 80.0f + vy * tau + 0.5f * ay * tau * tau;
+                    const float x = gfx::W * 0.35f + 43.0f * float(i) - 90.0f + off[2] + vx * tau;
+                    const float y = (gfx::H - ns.y) * 0.5f + 80.0f - off[3] + vy * tau + 0.5f * ay * tau * tau;
                     ui.numAt(d, x, y, nk, da * comboAlpha);
                 }
                 if (!p.timing.empty() && ra > 0.002f)
                     ui.text(p.timing, rx + rs.x * rk * 0.5f, ry - 22.0f, 20, fade(WHITE, ra * comboAlpha), 0, 1.25f);
             }
         } else {
-            const float px = s.middlescroll ? 1030.0f : gfx::W / 2;
-            const float py = s.downscroll ? 400.0f : 300.0f;
+            const float px = (s.middlescroll ? 1030.0f : gfx::W / 2) + s.comboOffset[0];
+            const float py = (s.downscroll ? 400.0f : 300.0f) - s.comboOffset[1];
             const Popup& p = popups_.back();
             const float age = float(now - p.t0);
             if (age <= 0.7f) {

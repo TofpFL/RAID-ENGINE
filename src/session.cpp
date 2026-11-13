@@ -17,6 +17,8 @@ const RatingInfo& ratingInfo(Rating r) { return kRatings[r < kRatingCount ? r : 
 void Session::init(const Chart& chart, const SessionConfig& cfg) {
     cfg_ = cfg;
     if (!(cfg_.rate > 0)) cfg_.rate = 1.0;
+    for (double& w : cfg_.windows)
+        if (!(w > 0)) w = 1.0;
     keys_ = chart.keys;
     for (int s = 0; s < 2; ++s)
         for (int l = 0; l < 9; ++l) {
@@ -67,10 +69,11 @@ void Session::addHealth(double v) {
 void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
     std::vector<LaneNote>& v = lanes_[1][lane];
     LaneNote& n = v[idx];
-    const double err = bot ? 0.0 : (songMs - n.t) / cfg_.rate;
+    // Psych judges |strumTime - songPosition + ratingOffset| / playbackRate.
+    const double err = bot ? 0.0 : (songMs - n.t - cfg_.ratingOffset) / cfg_.rate;
     Rating r = kSinful;
     for (int i = 0; i < kRatingCount; ++i)
-        if (std::fabs(err) <= kRatings[i].windowMs) { r = Rating(i); break; }
+        if (std::fabs(err) <= cfg_.windows[i]) { r = Rating(i); break; }
 
     long long& ah = activeHold_[1][lane];
     if (ah >= 0 && size_t(ah) != idx) {
@@ -136,8 +139,8 @@ void Session::press(int lane, double songMs) {
     held_[lane] = true;
     if (cfg_.botplay || (autoLanes_ >> lane & 1u)) return;
     std::vector<LaneNote>& v = lanes_[1][lane];
-    const double win = kMissWindowMs * cfg_.rate;
-    const double mineWin = kRatings[kDivine].windowMs * cfg_.rate;
+    const double win = cfg_.windows[kSinful] * cfg_.rate;  // Safe Frames
+    const double mineWin = cfg_.windows[kDivine] * cfg_.rate;
     long long best = -1, mine = -1;
     for (size_t j = cursor_[1][lane]; j < v.size() && v[j].t <= songMs + win; ++j) {
         const LaneNote& n = v[j];
@@ -208,7 +211,7 @@ void Session::release(int lane, double songMs) {
 void Session::update(double songMs) {
     const double dt = lastMs_ > -1e17 ? std::max(0.0, songMs - lastMs_) : 0.0;
     lastMs_ = songMs;
-    const double win = kMissWindowMs * cfg_.rate;
+    const double win = cfg_.windows[kSinful] * cfg_.rate;
     for (int lane = 0; lane < keys_; ++lane) {
         // ---- player side
         std::vector<LaneNote>& v = lanes_[1][lane];

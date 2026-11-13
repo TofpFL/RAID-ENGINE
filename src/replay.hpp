@@ -19,6 +19,10 @@ struct Replay {
     double rate = 1.0;
     bool mirror = false, ghostTapping = true;
     int keys = 4;
+    // The judgement the run was played with (Psych's hit windows and rating
+    // offset); older replays have none and were played with these.
+    double windows[4] = {45.0, 90.0, 135.0, 166.0};
+    double ratingOffset = 0;
     long long score = 0;
     double acc = 0;
     long long misses = 0;

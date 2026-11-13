@@ -65,6 +65,23 @@ bool Settings::load(const std::string& path) {
         else if (k == "comboStacking") comboStacking = b;
         else if (k == "opponentNotes") opponentNotes = b;
         else if (k == "pauseMusic") pauseMusic = clampv(int(d), 0, 2);
+        else if (k == "sickWindow") sickWindow = clampv(float(d), 15.0f, 45.0f);
+        else if (k == "goodWindow") goodWindow = clampv(float(d), 15.0f, 90.0f);
+        else if (k == "badWindow") badWindow = clampv(float(d), 15.0f, 135.0f);
+        else if (k == "safeFrames") safeFrames = clampv(float(d), 2.0f, 10.0f);
+        else if (k == "ratingOffset") ratingOffset = clampv(float(d), -30.0f, 30.0f);
+        else if (k == "autoPause") autoPause = b;
+        else if (k == "noReset") noReset = b;
+        else if (k == "antialiasing") antialiasing = b;
+        else if (k == "splashAlpha") splashAlpha = clampv(float(d), 0.0f, 1.0f);
+        else if (k == "comboOffset") std::sscanf(v.c_str(), "%f,%f,%f,%f", &comboOffset[0], &comboOffset[1], &comboOffset[2], &comboOffset[3]);
+        else if (k == "noteSkin") noteSkin = v;
+        else if (k == "noteColors") {
+            unsigned c[12] = {};
+            if (std::sscanf(v.c_str(), "%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x", &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8],
+                            &c[9], &c[10], &c[11]) == 12)
+                for (int i = 0; i < 12; ++i) noteColors[i / 3][i % 3] = c[i] & 0xFFFFFFu;
+        }
         else if (k == "psychFolder") psychFolder = v;
         else if (k == "fullscreen") fullscreen = b;
         else if (k == "showTimings") showTimings = b;
@@ -82,6 +99,16 @@ bool Settings::load(const std::string& path) {
     return true;
 }
 
+static std::string noteColorText(const Settings& s) {
+    std::string out;
+    char b[8];
+    for (int i = 0; i < 12; ++i) {
+        std::snprintf(b, sizeof b, "%06X", unsigned(s.noteColors[i / 3][i % 3] & 0xFFFFFFu));
+        out += (i ? "," : "") + std::string(b);
+    }
+    return out;
+}
+
 bool Settings::save(const std::string& path) const {
     std::ofstream f(path);
     if (!f) return false;
@@ -97,7 +124,10 @@ bool Settings::save(const std::string& path) const {
       << "\nluaErrors=" << luaErrors << "\nluaWarnings=" << luaWarnings << "\nhitPopups=" << hitPopups
       << "\ntimeBar=" << timeBar << "\nhealthBarAlpha=" << healthBarAlpha << "\nhideHud=" << hideHud << "\nscoreZoom=" << scoreZoom
       << "\nbotplayText=" << botplayText << "\ncomboStacking=" << comboStacking << "\nopponentNotes=" << opponentNotes
-      << "\npauseMusic=" << pauseMusic
+      << "\npauseMusic=" << pauseMusic << "\nsickWindow=" << sickWindow << "\ngoodWindow=" << goodWindow << "\nbadWindow=" << badWindow
+      << "\nsafeFrames=" << safeFrames << "\nratingOffset=" << ratingOffset << "\nautoPause=" << autoPause << "\nnoReset=" << noReset
+      << "\nantialiasing=" << antialiasing << "\nsplashAlpha=" << splashAlpha << "\ncomboOffset=" << comboOffset[0] << "," << comboOffset[1]
+      << "," << comboOffset[2] << "," << comboOffset[3] << "\nnoteSkin=" << noteSkin << "\nnoteColors=" << noteColorText(*this)
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol

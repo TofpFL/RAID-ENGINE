@@ -644,6 +644,21 @@ void testReplayDeterminism() {
     run(b, back.events);
     PCHECK(a.score == b.score && a.misses == b.misses && a.counts == b.counts && a.maxCombo == b.maxCombo);
     PCHECK(replayFileName("custom:My Mod/song", "Hard", "best") == "custom_my_mod_song-hard-best.ghr");
+    // The judgement it was played with (Psych's windows, Rating Offset) goes with it.
+    rec.windows[0] = 20;
+    rec.windows[3] = 100;
+    rec.ratingOffset = -12.5;
+    PCHECK(rec.save(path));
+    Replay judged;
+    PCHECK(judged.load(path) && pnear(judged.windows[0], 20) && pnear(judged.windows[1], 90) && pnear(judged.windows[3], 100) &&
+           pnear(judged.ratingOffset, -12.5));
+    // An older replay (no judgement lines) was played with the defaults.
+    {
+        std::ofstream old(std::filesystem::path(path), std::ios::binary);
+        old << "GHREPLAY 1\nsong=custom:x\ndiff=Hard\nrate=1\nevents=0\n";
+    }
+    Replay older;
+    PCHECK(older.load(path) && pnear(older.windows[0], 45) && pnear(older.windows[3], 166) && pnear(older.ratingOffset, 0));
     std::filesystem::remove(path);
 }
 

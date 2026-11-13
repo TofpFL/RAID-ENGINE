@@ -148,6 +148,9 @@ void App::psychUiForSong(const std::vector<std::string>& modRoots) {
 void App::applyPsychUi() {
     PsychUi& ui = psychUi();
     ui.unload();
+    ui.setNoteSkin(settings.noteSkin);       // Psych's Note Skins option
+    ui.setPalette(settings.noteColors);      // and its Note Colors
+    ui.setSmooth(settings.antialiasing);
     psychReport.clear();
     psychFolderInUse.clear();
     if (settings.psychUi) {
@@ -337,6 +340,7 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "calibration") state_ = makeCalibration();
     else if (autoRun.state == "modpacks") state_ = makeModPacks();
     else if (autoRun.state == "editors") state_ = makeEditorMenu();
+    else if (autoRun.state == "note-colors") state_ = makeNoteColors();
     else if (autoRun.state == "character-editor") state_ = makeCharacterEditor();
     else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "event-editor") state_ = makeEventEditor();
@@ -539,7 +543,15 @@ void App::drawFpsPanel() {
         cpuAt_ = wall;
         memNow_ = sysinfo::processMemory();
         memPeak_ = std::max<unsigned long long>(sysinfo::peakProcessMemory(), memNow_);
-        if (s.fpsUsage) sysUsed_ = sysinfo::systemMemoryUsed();
+        if (s.fpsUsage) {
+            sysUsed_ = sysinfo::systemMemoryUsed();
+            const sysinfo::GpuUse g = sysinfo::gpuUse();
+            gpuBusy_ = g.busy;
+            gpuReady_ = g.ready;
+            vramUsed_ = g.memUsed;
+            vramTotal_ = g.memTotal;
+            vramFree_ = g.memFree;
+        }
         statsAt_ = now;
     }
     std::vector<std::pair<std::string, Color>> lines;
@@ -562,6 +574,16 @@ void App::drawFpsPanel() {
         std::string l = TextFormat("CPU %.0f%% of %d threads", cpuUse_, hw.threads);
         if (hw.totalRam) l += "   RAM " + (sysUsed_ ? sysinfo::formatBytes(sysUsed_) + " / " : std::string()) + sysinfo::formatBytes(hw.totalRam);
         lines.push_back({l, dim});
+        // The graphics card: how busy it is and its memory, as far as the
+        // system and the driver say (Windows' GPU counters, AMD and NVIDIA on
+        // Linux, macOS, Adreno and Mali phones; NVIDIA's and AMD's OpenGL for
+        // the memory).
+        std::string gl = gpuBusy_ >= 0 ? TextFormat("GPU %.0f%%", gpuBusy_) : std::string("GPU");
+        if (vramUsed_ && vramTotal_) gl += "   VRAM " + sysinfo::formatBytes(vramUsed_) + " / " + sysinfo::formatBytes(vramTotal_);
+        else if (vramUsed_) gl += "   VRAM " + sysinfo::formatBytes(vramUsed_) + " in use";
+        else if (vramFree_) gl += "   VRAM " + sysinfo::formatBytes(vramFree_) + " free";
+        if (gl == "GPU") gl += gpuReady_ ? " use: not reported by this system" : " ...";
+        lines.push_back({gl, dim});
     }
     if (s.fpsHardware) {
         lines.push_back({hw.cpu, dim});

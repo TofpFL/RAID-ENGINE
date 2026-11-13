@@ -27,6 +27,18 @@ uint64_t peakProcessMemory();  // the most it has held (0: unknown)
 uint64_t systemMemoryUsed();   // bytes in use on the whole system (0: unknown)
 double processCpuSeconds();    // processor time the game has used, all its threads together
 
+// The graphics card's use: how busy it is (0 to 100, -1 when the system does
+// not say: Windows' GPU counters, AMD's and NVIDIA's on Linux, macOS, some
+// Android phones) and its video memory in use and in all (bytes, 0 unknown).
+// The memory comes from the card's own OpenGL extensions where there are
+// some, so this is called from the thread that draws.
+struct GpuUse {
+    double busy = -1;
+    uint64_t memUsed = 0, memTotal = 0, memFree = 0;  // memFree: AMD's OpenGL only says that
+    bool ready = false;  // false until the system has been asked (the first half second)
+};
+GpuUse gpuUse();
+
 // "512.3 MB", "1.25 GB"
 std::string formatBytes(uint64_t bytes);
 

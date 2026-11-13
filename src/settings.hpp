@@ -1,6 +1,7 @@
 // Persistent options, key bindings and best scores (plain text files).
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -21,7 +22,7 @@ struct Settings {
     // More in the FPS counter (JS Engine's RAM and debug info, and more):
     bool fpsMemory = false;      // the game's memory and its peak
     bool fpsFrameTimes = false;  // update, draw and worst frame times, with a graph
-    bool fpsUsage = false;       // processor use and the system's memory
+    bool fpsUsage = false;       // processor and graphics card use, the system's and the card's memory
     bool fpsHardware = false;    // processor, graphics card, OpenGL and system names
     bool lowDetail = false;
     bool vsync = false;
@@ -56,6 +57,24 @@ struct Settings {
     bool comboStacking = true;  // ratings and combo numbers pile up (OFF: only the latest)
     bool opponentNotes = true;  // OFF: the opponent's receptors and notes are hidden
     int pauseMusic = 2;         // Psych interface's pause menu song: 0 none, 1 Breakfast, 2 Tea Time
+    // Psych's judgement options (Gameplay): hit windows (ms), Safe Frames
+    // (the furthest a note can be hit: frames of 1/60 s) and Rating Offset.
+    float sickWindow = 45, goodWindow = 90, badWindow = 135;
+    float safeFrames = 10;
+    float ratingOffset = 0;
+    bool autoPause = true;      // the song pauses when the window loses focus
+    bool noReset = false;       // Psych's "Disable Reset Button" (R kills you during a song)
+    bool antialiasing = true;   // smooth scaling of mod pictures (OFF: sharp pixels, as Psych's option)
+    float splashAlpha = 0.6f;   // note splash opacity
+    // Psych's "Adjust Delay and Combo": rating x/y, combo digits x/y (pixels; y up).
+    float comboOffset[4] = {0, 0, 0, 0};
+    std::string noteSkin;       // Psych interface: images/noteSkins/NOTE_assets-<skin>.png ("" = default)
+    // Psych interface's note colours (colour-template skins): per direction
+    // (left, down, up, right) the main colour, the highlight and the outline.
+    uint32_t noteColors[4][3] = {{0xC24B99, 0xFFFFFF, 0x3C1F56},
+                                 {0x00FFFF, 0xFFFFFF, 0x1542B7},
+                                 {0x12FA05, 0xFFFFFF, 0x0A4447},
+                                 {0xF9393F, 0xFFFFFF, 0x651038}};
     std::string psychFolder;   // a Psych Engine / JS Engine copy to take that interface from
     bool fullscreen = false;
     bool showTimings = true;

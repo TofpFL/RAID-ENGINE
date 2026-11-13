@@ -36,6 +36,8 @@ public:
     void drawFiltered(scene::Scene& sc, const std::vector<scene::ShaderPtr>& filters, const RenderTexture2D& src,
                       Rectangle dest);
     std::vector<std::string> errors;  // shader problems, shown by the play state
+    // Psych's Anti-Aliasing option: OFF draws every picture with sharp pixels.
+    static inline bool smoothScaling = true;
 
 private:
     struct CompiledShader {

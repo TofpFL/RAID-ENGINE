@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.6.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.6.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -253,10 +253,13 @@ if(GH_BUILD_GAME)
     target_link_options(godshand PRIVATE -static -static-libgcc -static-libstdc++)
   endif()
   if(APPLE)
-    target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+    target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL" "-framework CoreFoundation")
+  endif()
+  if(UNIX AND NOT APPLE AND NOT ANDROID)
+    target_link_libraries(godshand PRIVATE ${CMAKE_DL_LIBS})  # the FPS counter asks NVIDIA's library, when there is one
   endif()
   if(WIN32)
-    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32)  # the folder dialog; the FPS counter's graphics card name
+    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32 pdh)  # the folder dialog; the FPS counter's graphics card
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/

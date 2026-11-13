@@ -5,6 +5,7 @@
 // the game's own look.
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,13 @@ public:
     // (Paths looks in the current mod first).
     int load(const std::string& folder, std::string& report, const std::vector<std::string>& firstRoots);
     void unload();
+    // Before load(): Psych's "Note Skins" option (images/noteSkins/NOTE_assets-<skin>.png,
+    // "" = NOTE_assets) and "Note Colors" (per direction: main, highlight, outline).
+    void setNoteSkin(const std::string& skin) { skin_ = skin; }
+    void setPalette(const uint32_t colors[4][3]);
     bool active() const { return active_; }
+    // Psych's antialiasing option: smooth (bilinear) or sharp scaling of the pictures.
+    void setSmooth(bool smooth);
     void setActive(bool on) { active_ = on; }
 
     // Drawing in canvas units. `size` is a note's width, as in gfx::drawNote.
@@ -85,10 +92,15 @@ private:
     std::vector<Frame> frames(const std::string& prefix) const;
 
     bool active_ = false;
-    std::string root_;
+    std::string root_, skin_;
+    uint32_t palette_[4][3] = {{0xC24B99, 0xFFFFFF, 0x3C1F56},
+                               {0x00FFFF, 0xFFFFFF, 0x1542B7},
+                               {0x12FA05, 0xFFFFFF, 0x0A4447},
+                               {0xF9393F, 0xFFFFFF, 0x651038}};
+    bool smooth_ = true;
     Texture2D notes_{};
     bool template_ = false;  // RGB template skin (recoloured per direction)
-    Shader palette_{};
+    Shader paletteShader_{};
     int locR_ = -1, locG_ = -1, locB_ = -1;
     std::vector<std::pair<std::string, Frame>> atlas_;  // NOTE_assets frames by name
     Texture2D ratings_[4]{}, nums_[10]{}, count_[3]{}, bar_{}, timeBar_{};
@@ -119,5 +131,7 @@ int psychFolderScore(const std::string& folder);
 // Whether a mod's folders hold any piece of the interface (a font, the health
 // bar, a note skin, ratings, sounds...).
 bool hasPsychPieces(const std::vector<std::string>& roots);
+// The note skins a copy has (images/noteSkins/NOTE_assets-<name>.png), by name.
+std::vector<std::string> psychNoteSkins(const std::string& folder);
 
 }  // namespace gh

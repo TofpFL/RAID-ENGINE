@@ -79,12 +79,6 @@ bool fontMetrics(const std::string& path, float& upm, float& ascent, float& desc
 
 const char* kColors[4] = {"purple", "blue", "green", "red"};
 
-// Psych Engine 0.7's default note colours: main, highlight, outline.
-const unsigned kPalette[4][3] = {{0xC24B99, 0xFFFFFF, 0x3C1F56},
-                                 {0x00FFFF, 0xFFFFFF, 0x1542B7},
-                                 {0x12FA05, 0xFFFFFF, 0x0A4447},
-                                 {0xF9393F, 0xFFFFFF, 0x651038}};
-
 // red, green and blue of the template become the three colours.
 const char* kPaletteGl330 = R"GLSL(#version 330
 in vec2 fragTexCoord;
@@ -119,6 +113,47 @@ const char* kArrows[4] = {"arrowLEFT", "arrowDOWN", "arrowUP", "arrowRIGHT"};
 
 }  // namespace
 
+void PsychUi::setPalette(const uint32_t colors[4][3]) {
+    for (int d = 0; d < 4; ++d)
+        for (int k = 0; k < 3; ++k) palette_[d][k] = colors[d][k] & 0xFFFFFFu;
+}
+
+void PsychUi::setSmooth(bool smooth) {
+    smooth_ = smooth;
+    const int filter = smooth ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT;
+    for (Texture2D* t : {&notes_, &bar_, &timeBar_, &alphabet_})
+        if (t->id) SetTextureFilter(*t, filter);
+    for (Texture2D& t : ratings_)
+        if (t.id) SetTextureFilter(t, filter);
+    for (Texture2D& t : nums_)
+        if (t.id) SetTextureFilter(t, filter);
+    for (Texture2D& t : count_)
+        if (t.id) SetTextureFilter(t, filter);
+}
+
+std::vector<std::string> psychNoteSkins(const std::string& folder) {
+    std::vector<std::string> out;
+    if (folder.empty()) return out;
+    std::string root = folder;
+    if (root.back() != '/' && root.back() != '\\') root += '/';
+    namespace fs = std::filesystem;
+    for (const char* sub : {"", "assets/", "assets/shared/", "shared/", "mods/"}) {
+        std::error_code ec;
+        const std::string dir = root + sub + "images/noteSkins";
+        for (const auto& e : fs::directory_iterator(fs::path(std::u8string(dir.begin(), dir.end())), ec)) {
+            const auto u = e.path().filename().u8string();
+            const std::string n(u.begin(), u.end());
+            const std::string pre = "NOTE_assets-";
+            if (n.size() > pre.size() + 4 && n.rfind(pre, 0) == 0 && endsWithI(n, ".png")) {
+                const std::string skin = n.substr(pre.size(), n.size() - pre.size() - 4);
+                if (std::find(out.begin(), out.end(), skin) == out.end()) out.push_back(skin);
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 PsychUi& psychUi() {
     static PsychUi ui;
     return ui;
@@ -141,8 +176,11 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
     int found = 0;
     std::vector<std::string> missing;
 
-    const std::string notePng = findAny(f, {"images/noteskins/NOTE_assets.png", "images/noteSkins/NOTE_assets.png",
-                                            "images/NOTE_assets.png"});
+    std::string notePng;
+    if (!skin_.empty())
+        notePng = findAny(f, {"images/noteSkins/NOTE_assets-" + skin_ + ".png", "images/noteskins/NOTE_assets-" + skin_ + ".png"});
+    if (notePng.empty())
+        notePng = findAny(f, {"images/noteskins/NOTE_assets.png", "images/noteSkins/NOTE_assets.png", "images/NOTE_assets.png"});
     if (!notePng.empty()) {
         std::string xml;
         psych::Atlas atlas;
@@ -163,11 +201,11 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
         // Skins in noteSkins/ (Psych 0.7, JS Engine) are colour templates.
         template_ = notePng.find("oteskins/") != std::string::npos || notePng.find("oteSkins/") != std::string::npos;
         if (template_) {
-            palette_ = LoadShaderFromMemory(nullptr, rlGetVersion() == RL_OPENGL_ES_20 ? kPaletteGles : kPaletteGl330);
-            locR_ = GetShaderLocation(palette_, "r");
-            locG_ = GetShaderLocation(palette_, "g");
-            locB_ = GetShaderLocation(palette_, "b");
-            if (!palette_.id || palette_.id == rlGetShaderIdDefault()) template_ = false;
+            paletteShader_ = LoadShaderFromMemory(nullptr, rlGetVersion() == RL_OPENGL_ES_20 ? kPaletteGles : kPaletteGl330);
+            locR_ = GetShaderLocation(paletteShader_, "r");
+            locG_ = GetShaderLocation(paletteShader_, "g");
+            locB_ = GetShaderLocation(paletteShader_, "b");
+            if (!paletteShader_.id || paletteShader_.id == rlGetShaderIdDefault()) template_ = false;
         }
     }
     if (!notes_.id) missing.push_back("note skin (NOTE_assets)");
@@ -256,6 +294,7 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
     teaTime_ = findAny(f, {"music/tea-time.ogg", "music/tea-time.mp3"});
     if (!teaTime_.empty()) ++found;
 
+    if (!smooth_) setSmooth(false);
     report = std::to_string(found) + " pieces found";
     if (!missing.empty()) {
         report += "; missing: ";
@@ -266,8 +305,8 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
 
 void PsychUi::unload() {
     unloadTex(notes_);
-    if (palette_.id && palette_.id != rlGetShaderIdDefault() && IsWindowReady()) UnloadShader(palette_);
-    palette_ = Shader{};
+    if (paletteShader_.id && paletteShader_.id != rlGetShaderIdDefault() && IsWindowReady()) UnloadShader(paletteShader_);
+    paletteShader_ = Shader{};
     template_ = false;
     for (Texture2D& t : ratings_) unloadTex(t);
     for (Texture2D& t : nums_) unloadTex(t);
@@ -331,12 +370,12 @@ bool PsychUi::drawFrame(const Frame& f, Vector2 c, float scale, float alpha, flo
 
 void PsychUi::beginDir(int dir) const {
     if (!active_ || !template_ || dir < 0 || dir > 3) return;
-    BeginShaderMode(palette_);
+    BeginShaderMode(paletteShader_);
     const int locs[3] = {locR_, locG_, locB_};
     for (int k = 0; k < 3; ++k) {
-        const unsigned c = kPalette[dir][k];
+        const unsigned c = palette_[dir][k];
         const float v[3] = {float((c >> 16) & 255) / 255.0f, float((c >> 8) & 255) / 255.0f, float(c & 255) / 255.0f};
-        if (locs[k] >= 0) SetShaderValue(palette_, locs[k], v, SHADER_UNIFORM_VEC3);
+        if (locs[k] >= 0) SetShaderValue(paletteShader_, locs[k], v, SHADER_UNIFORM_VEC3);
     }
 }
 

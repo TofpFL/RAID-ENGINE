@@ -54,6 +54,11 @@ struct SessionConfig {
     bool botplay = false;
     bool practice = false;
     double rate = 1.0;  // playback rate; windows are constant in real time
+    // Psych's Sick!, Good and Bad hit windows and its Safe Frames window (the
+    // furthest a note can be hit, 10 frames = 166.7 ms), in real-time ms; and
+    // its Rating Offset (positive: you have to hit later to be on time).
+    double windows[kRatingCount] = {45.0, 90.0, 135.0, kMissWindowMs};
+    double ratingOffset = 0;
 };
 
 class Session {

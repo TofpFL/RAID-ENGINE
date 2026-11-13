@@ -255,7 +255,7 @@ void SceneRenderer::drawSprite(const Sprite& s, const Camera& cam) {
         const std::string& file = g.files[f.tex];
         tex = texture(file);
         if (!tex) return;
-        const int want = s.antialiasing ? 1 : 0;
+        const int want = s.antialiasing && smoothScaling ? 1 : 0;
         int& cur = filter_[file];
         if (cur != want) {
             rlDrawRenderBatchActive();
