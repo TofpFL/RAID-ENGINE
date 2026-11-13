@@ -1,169 +1,154 @@
-# God's Hand of Principality and Demise
+# RAID Engine
 
-A rhythm duel in the style of Friday Night Funkin', written from scratch in **C++20**, merged with the best of **PulseForge**:
-it plays Psych Engine mods (Lua and HScript, characters, stages, events, shaders, videos), full Kade/base-game builds and
-spam charts of any size, has a chart editor, charts any song by itself, records replays and installs mods from `.zip`.
+A binary chart format and streaming playback engine for rhythm games, built for
+**extraordinarily dense FNF-style charts — trillions of note events without ever
+loading them into memory**. It targets sustained 120–240 FPS playback, bounded
+RAM regardless of chart length, lossless chart data, and random access.
 
-*Um duelo de ritmo ao estilo de Friday Night Funkin', escrito de raiz em C++20 e unido ao melhor do PulseForge.*
+RAID Engine powers **God's Hand of Principality and Demise** (`godshand`), a
+C++20 Friday Night Funkin'-style rhythm duel with full Psych Engine mod support —
+the game is the reference host; the engine is the point.
 
-**Downloads:** [Releases](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases)
-- Windows / Linux / macOS: extract the zip and run `godshand` (`godshand.exe` on Windows).
-- Android 7+: install `GodsHand-android.apk` (allow installing from that source when asked).
-- `GodsHand-complete-source.zip`: the game plus every library it uses; builds without internet.
+## The `.raid` format (`src/raid.{hpp,cpp}`)
 
-**Mod packs:** release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods), or MOD PACKS (`M`) in Freeplay.
+Versioned 128-byte header, then independently addressable sections:
 
----
+- **Chunk index** — fixed-size entries giving each chunk's time range, event
+  range, offset, sizes and CRC32. Playback binary-searches by time without
+  decoding anything.
+- **Metadata** — deflate+CRC32 JSON: title, difficulty, tempo, sections, focus,
+  note types, `lengthMs`, `playerNotes`/`opponentNotes` totals.
+- **Pattern table** — deflate+CRC32 reusable event sequences with pitch/lane
+  transforms and nesting.
+- **Chunks** — independently compressed op streams. Three op kinds:
+  - *Literal absolute*: columnar storage — delta-varint times, lengths, zigzag
+    pitch, lanes, packed side/kind/flags, types, stacks.
+  - *Literal relative*: the same columns inside pattern definitions, relative
+    to the pattern origin.
+  - *Pattern instance*: `patternId, repeatCount, anchorUs, pitchDelta,
+    laneDelta` — the decoder re-emits the pattern per repeat, transformed.
 
-## Português
+The encoder detects repeated runs (≥8 events), extends consecutive identical
+blocks into repeat counts, and transposes uniform pitch/lane shifts (the
+keyboard-grid case). It reports honest statistics — `logicalEvents` vs
+`literalEvents` vs `patternCount`, raw vs stored bytes — and never fakes a
+compression ratio on incompressible data.
 
-### O que é
-- **Jogo de ritmo tipo FNF**: o adversário canta, tu respondes. Setas a subir (ou a descer), notas longas (*holds*), barra de vida, combo, pontuação, precisão e ranks.
-- **4 músicas originais** sintetizadas em C++ no arranque (bateria, baixo, pads, sinos e vozes "cantadas"), com charts gerados das próprias melodias. Personagens e cenários desenhados em código.
-- **Rápido e preciso**: o relógio da música vem do mixer de áudio, o input é lido ~1000 vezes por segundo com *timestamp* e o julgamento não depende dos FPS.
+Safety: the encoder validates every timestamp, pitch, lane and transform;
+the decoder bounds time accumulation, transform magnitudes, nesting depth,
+chunk expansion (4M events), section sizes (512 MiB), and verifies CRC32 and
+declared counts everywhere. Malformed input cannot cause unbounded allocation,
+time overflow, or excessive recursion (400-iteration fuzz suite).
 
-### Mods
-- **Psych Engine a sério**: personagens (`characters/*.json` + atlas Sparrow), ícones, cores da barra de vida, cenários (`stages/*.json`, incluindo objetos do editor 0.7.3), eventos, tipos de nota e **scripts Lua 5.4** com a API do Psych (≈250 funções: sprites, textos, tweens, timers, câmaras, propriedades, grupos de notas e strums, sons com tempo e *pitch*, dados guardados, *substates*, definições do mod, `Function_Stop`) e modcharts do Kade Engine.
-- **HScript**: `runHaxeCode`, `runHaxeFunction`, `createCallback` e ficheiros `.hx` (em `scripts/`, `stages/`, `data/<música>/`...) com `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`, `new Character(...)` (personagens extra), `MP4Handler`/`VideoHandler`, `FlxG.cameras`, nomes completos `openfl.*`/`flixel.*`/`lime.*`...
-- **Compatível com o JS Engine**: os eventos dele (Set/Tween Camera Zoom, Camera Bopping, Camera Twist, Change Note Multiplier, Fake Song Length, Change Song Name, Credits Popup, Popup, Rainbow Eyesore, Bot Energy...), os efeitos de ecrã (`addChromaticAbberationEffect`, `addVCREffect`, `addWiggleEffect`, `addBloomEffect`, `add3DEffect`... com shaders nossos) e funções como `require`, `saveFile`, `loopTheSong`, `playsAsBF`. A câmara segue o Psych (`camFollowPos` é a posição real, foco por secção com `gfSection`, `isCameraOnForcedPos`); scripts que mudam `FlxG.width` (ex.: *Window Changer*) estreitam a imagem para 4:3.
-- **Shaders**: os `.frag` do Psych/Flixel (`#pragma header`, `flixel_texture2D`) são traduzidos para OpenGL 3.3 e funcionam em sprites (`setSpriteShader`) e em câmaras inteiras (`setFilters` em HScript). Num sprite de `makeGraphic` o shader vê a imagem inteira (coordenadas de 0 a 1), e `os.clock()` conta o tempo real em todos os sistemas, como no Windows: os shaders animados com `iTime` mudam suavemente.
-- **Vídeos**: `startVideo` (cutscenes, ENTER salta) e `makeVideoSprite`. Ficheiros `.mpg` tocam diretamente; `.mp4`/`.webm` são convertidos uma vez com o **ffmpeg** (se estiver instalado ou ao lado do jogo) para `cache/videos/`.
-- **Builds completas do Kade / jogo base** (pasta `assets/` com `shared/`, `week1`...): as personagens e cenários das semanas 1–6 são reconstruídos a partir das imagens do mod.
-- **Qualquer formato de pasta**: mods do Psych, pastas dentro de pastas, charts soltos (agrupados por música, com o áudio procurado em todos os mods), V-Slice, builds completas com os charts em `assets/preload/data/` ou `assets/shared/data/` e o áudio em `assets/songs/` (Psych 0.4–0.7, H-Slice, Psych EK), a pasta `mods/` de uma build com mods lá dentro, `data/charts/<música>/`, charts soltos em `data/`, a build compilada dentro do código-fonte (`export/release/.../bin/`; cópias iguais de um chart aparecem uma vez só, versões diferentes aparecem as duas com a pasta de onde vêm), **charts do PulseForge** (`chart.json` exportado, projetos `.pfchart.json` e *autosaves* do editor) e **pastas só com áudio** (cada música com 30 s ou mais ganha AutoChart; efeitos sonoros curtos ficam de fora). 1 a 9 teclas (`keyCount`, ou `mania` do Dave & Bambi / Kade / Andromeda, Psych Extra Keys e Shaggy: as notas decidem qual numeração o chart usa, e um `mania` que as notas não usam — como o `options.mania` dos charts de spam do JS Engine — dá 4 teclas; sem nada disto o chart tem 4 teclas, como no Psych). Opções → "Extra keys" OFF joga tudo com 4 teclas, como o Psych e o JS Engine.
-- **Charts de spam gigantes**: um chart de 1,5 GB (25 milhões de notas) abre em ~5 s. As notas empilhadas no mesmo milissegundo ficam juntas em memória mas **contam todas** (acertos, combo, pontuação, total no fim), e as notas desenham-se até 1 pixel de distância (com Opções → "Note detail: Adaptive", se o FPS ficar abaixo de 60 com centenas de notas no ecrã, as notas empilhadas a menos de 2–32 px desenham-se uma vez; todas continuam a ser tocadas e contadas). Charts sem número de teclas são de 4 teclas, como no Psych/JS Engine.
-- **Formato `.raid` (RAID Engine)**: charts binários comprimidos com índice de chunks de acesso aleatório, padrões reutilizáveis (sequências repetidas com repetições, deslocamentos de tempo e transformações de pitch/teclado) e eventos únicos em colunas delta+varint+deflate. Os `.raid` abrem como qualquer chart; `gh_tests --raid <chart|flp> <out.raid>` converte (inclusive projetos FL Studio via SNIFF) e mostra o relatório de compressão.
-- **A música começa logo**: o áudio é descodificado enquanto toca (ideia da S2X, que lê o chart enquanto a música corre). Uma música de 3 minutos fica pronta em ~2 ms em vez de 0,75 s, uma de 1 hora em 2,5 ms em vez de 6 s (e gasta 21 MB em vez de 1,2 GB), e a de 8 horas do LONGSONG (Desert Bus) já não fecha o jogo. As músicas compridas guardam em memória só os minutos à volta do ponto em que estão; a pré-visualização do Freeplay também começa logo.
-- **Assets partilhados entre mods**: quando um mod usa uma personagem, cenário, imagem, som, vídeo, shader ou letra que não tem, o jogo procura-o primeiro no resto do próprio pacote e depois em todos os outros mods instalados (os pacotes só de assets, como `lmac-orien-sprites` e `lmac-denpaex-reconstructed`, servem para isto). Um cenário, personagem, tipo de nota ou evento emprestado traz o seu próprio script; os scripts globais do outro mod (`scripts/`) não correm. Exemplo: o *autosave* "18th-Victim" do pacote `pulseforge-created` joga com o cenário, as personagens, os ícones e o áudio do pacote vs dinnerbambi.
-- **Windows**: pastas e ficheiros com nomes em qualquer alfabeto (chinês, japonês, cirílico...) abrem (código UTF-8 no executável, Windows 10 1903 ou mais recente).
-- Os scripts correm isolados (sem `io` nem `os`; `require` só lê módulos do próprio mod, `saveFile` só escreve dentro de `mods/`) e param se entrarem em ciclo infinito.
+## Streaming decoder (`raid::Reader`)
 
-### Os teus mods
-Os mods do PulseForge estão publicados como **pacotes** no release [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) (45 pacotes, 17 GB: os 14 do repositório do PulseForge, 22 vindos da pasta "Drive LMAC" do Google Drive, entre eles hortas edition v3, christmasred edition, Dek v1 / v2, vs Yerep v2, vs Everamii, EZ edition, vs dinnerbambi, SC:Reboot demo, DenpaEx e manny edition v3, e 9 do "Mods for JS Engine": JS Bambi Fansong Charts, funnysongs, BFBL Short Songs, Splitathon 2, Taimuresu RECHARTED, double kill thing YAY!!!, shaggy bleeds, the frame of wiring e LONGSONG, com 803 músicas). No jogo: **Freeplay → `M`** descarrega um pacote ou todos (usa o `curl` do sistema) e instala-os. Também podes descarregar os `.zip` à mão e pô-los em `mods/`.
+- `open()` reads only the header + index — a few KB regardless of chart size.
+- `range(startUs, endUs, out, err, indices)` decodes only overlapping chunks
+  and returns events **with global expanded indices** — stable ids without
+  materialization.
+- `chunkEventsAsync` decodes on worker threads; an LRU chunk cache, a decode
+  semaphore and a configurable memory budget bound concurrent work.
+- Internally refcounted (`shared_ptr<Impl>`): async jobs survive `Reader`
+  destruction, `FILE*` I/O is serialized, the cache is mutex-protected — safe
+  for concurrent `range()` + prefetch + shutdown.
+- `opLog()` walks the encoded op stream (not expanded events) and returns
+  `OpSegment`s: literal runs and **leaf** pattern instances with time ranges,
+  repeat counts and transforms — the only place pattern identity survives.
+- `PatternLogger` ticks with the playhead and appends segments to a file,
+  marking every pattern→pattern change.
 
-### Também
-- **Editor de charts** (Freeplay → `7`), ao estilo do Psych/JS Engine: separadores **Song** (nome, personagens, cenário, BPM, velocidade, teclas), **Section** (lado da câmara, *GF section*, *alt animation*, duração em batidas, BPM; copiar, colar, limpar, trocar lados, espelhar, copiar de uma secção anterior), **Note** (tipo, tempo, *hold*, notas empilhadas; ferramentas de spam: empilhar e preencher a secção em escada, aleatório, zigue-zague...), **Events** (pista de eventos à esquerda, vários eventos no mesmo tempo, lista com os do Psych, do JS Engine e os `custom_events` do mod, com a explicação dos valores) e **Charting** (velocidade de reprodução, volumes, *hitsounds*, metrónomo). Seleção com SHIFT+arrastar, desfazer/refazer. Guarda em JSON do Psych (o original fica como `.bak`); `ENTER` guarda e joga.
-- **AutoChart**: uma pasta só com o áudio (ou um `.mp3`/`.ogg` solto em `songs/`) ganha charts Easy/Normal/Hard gerados a partir da música; abre-os no editor para os afinar.
-- **Replays** (`R` nos resultados), **mods por `.zip`** (põe em `mods/`, `R` no Freeplay), **controlos táteis** (Opções).
-- **Interface do Psych Engine** (Opções → INTERFACE): ao ligá-la, o jogo procura sozinho uma cópia do Psych Engine / JS Engine que já tenhas — engines instaladas como pacotes de mods (JS Engine, H-Slice, EZ edition...) ou uma engine (como a S2X) dentro ou ao lado da pasta do jogo — e usa a mais completa. Também podes escolher a pasta (janela de pastas do sistema, ou arrasta-a para a janela; no Android abre o seletor de pastas; `BACKSPACE` volta à que foi encontrada). O jogo passa a usar as setas, ratings, contagem, barra de vida, letra e sons dessa pasta, mas não traz nenhum desses ficheiros.
-- **Opções novas**: VSync (aplica logo, também no Android), Shaders (desligar ajuda em telemóveis fracos); "Camera zoom on beat" só desliga os *bops* — os eventos de zoom funcionam sempre.
-- **Eventos de zoom como no Psych / JS Engine**: "Add Camera Zoom" soma-se ao zoom e fica até à primeira nota tocada (de qualquer lado); só depois a câmara volta ao zoom normal (o Eons afasta a câmara no início e aproxima-a a cada compasso da introdução).
-- **Interface do Psych mais completa**: com a Interface do Psych ligada, também a barra de tempo (`timeBar.png` e o tempo em `vcr.ttf` 32), o BOTPLAY a piscar, a pontuação que cresce a cada nota, o menu de pausa com as letras do Alphabet do Psych (Resume, Restart Song, Options, Exit to menu), a música `breakfast` e o contador "Blueballed". Opções novas: "Hit popups" (desligar os ratings e números de combo), "Time bar" (tempo restante, tempo decorrido, nome da música ou desligada) e "Health bar opacity".
-- **Volume em todo o jogo**: `-` e `=` (ou `+` do teclado numérico) baixam e sobem o volume geral, `0` silencia logo, como no Flixel/Psych; aparece o volume no topo do ecrã. Num ecrã que use essas teclas (uma pista, a escrever no editor) elas ficam para ele.
-- **A meio de uma música**: `7` abre o editor de charts nessa música e dificuldade; o menu de pausa tem **Opções** (ao sair, a música recomeça, como no Psych).
-- **Opções → DEBUG**: "Lua errors" e "Lua warnings" — sempre, só com `luaDebugMode` (como o Psych) ou desligados. Os `debugPrint` dos scripts aparecem sempre. "Lua note callbacks" OFF deixa de chamar `goodNoteHit`, `opponentNoteHit`, `noteMiss` e `noteMissPress` a cada nota (mais rápido em charts de spam; mods que contam notas ou tiram vida com eles deixam de o fazer), como a opção da S2X.
-- **Rendering mode** (Opções → RENDERING, no PC), como no JS Engine e no H-Slice: a música toca sozinha (botplay) e é gravada num vídeo em `renders/`, frame a frame. O tempo do jogo avança exatamente 1/FPS em cada frame, por isso o vídeo sai fluido mesmo que o computador não consiga desenhar em tempo real; a janela mostra o que está a ser gravado e quanto falta. Escolhes o tamanho (1280x720 a 3840x2160), os frames por segundo (30 a 240), o codificador (x264, x265, VP9/WebM ou os da placa gráfica NVIDIA, AMD e Intel), o bitrate e se leva o som (o instrumental e as vozes, misturados pelo próprio jogo em sincronia com a imagem). Precisa do **ffmpeg** ao lado do jogo ou instalado. `ESC` para a gravação e o vídeo fica com o que já foi gravado. Pela linha de comandos: `godshand --autoplay <música> --render`.
-- **Ecrã de depuração** (`F3` numa música, como o *debug menu* da S2X): chart, relógio (tempo, batida, passo, secção), áudio (blocos descodificados e MB em memória), notas desenhadas, frames por segundo e tempos de atualização/desenho, scripts. `godshand --perf` escreve os tempos de cada segundo na consola.
-- **Editor de charts**: separador **EZ Spam** (como o do JS Engine): spam na secção, daqui até ao fim, na música toda ou num intervalo de secções, com notas por batida, padrão (pista única, escadas, aleatório, zigue-zague, acordes, jacks), lado, notas longas e notas empilhadas; também limpar e desbastar (1 em 2). **FL Studio (SNIFF)**: larga um `.flp` ou `.fsc` no editor e as notas do padrão (C3–D#3 jogador, C4–D#4 adversário, F3/F#3 câmara, A3/A#3 animação alt) passam para o chart; projetos do FL Studio feitos assim dentro dos mods aparecem como músicas (cada padrão é uma dificuldade).
-- **Editores** (menu principal → `7`), como o *Master Editor Menu* do Psych: escolhe o mod com ESQUERDA/DIREITA (é aí que os editores gravam) e abre o editor de charts ou um dos novos:
-  - **Editor de personagens**: o JSON da personagem desenhado como numa música; as animações (com os nomes que a imagem tem, para escolher o prefixo), os offsets com as setas (SHIFT ×10) sobre o fantasma da primeira animação, imagem, escala, flip, antialiasing, ícone e cor da barra de vida (ou a cor do próprio ícone), posição, ponto da câmara e duração do canto. `CTRL+S` grava em `characters/<nome>.json`.
-  - **Editor de cenários**: o JSON do cenário com os seus objetos, os sprites do script Lua e três personagens, que se arrastam com o rato para o lugar; zoom, velocidade da câmara, cenário pixel, esconder a GF, offsets da câmara e o que a câmara mostra em cada personagem. Grava em `stages/<nome>.json`.
-  - **Editor de eventos**: cria eventos para os charts (`custom_events/<nome>.txt` e `.lua`) a partir de modelos (flash, esconder o HUD, tremer, zoom, som, velocidade do scroll) e abre o script no editor de texto do sistema.
-  - Os ficheiros gravados mantêm os campos que os editores não conhecem.
-- **Editor de charts**: o separador EZ Spam passou a ser o do JS Engine (Note Spamming: spam, esticar, deslocar e duplicar notas), os eventos escolhem-se numa lista, compassos ímpares (7/16, 5/4...), copiar e cortar secções inteiras, `SHIFT+A`/`SHIFT+D` saltam 4 secções e o *hitsound* do adversário é igual ao do jogador.
-- **Interface do Psych igual à do 0.7.3**: barra de vida, ícones (150 px no topo da barra, a crescer a cada batida), pontuação, barra e texto do tempo (escondidos até a música começar), BOTPLAY e ratings/números do combo nas posições, tamanhos e animações do PlayState do Psych, e a letra `vcr.ttf` no tamanho certo (saía 14% maior). Opções do Psych: **Hide HUD**, **Score text zoom on hit**, **Botplay text**, **Combo stacking**, **Pause screen song** (None, Breakfast, Tea Time) e **Opponent notes**.
-- **Scripts que fazem fade ao HUD** (`doTweenAlpha` em `scoreTxt`, `timeTxt`, `timeBar`, `healthBarBG`...) fazem mesmo fade, em vez de o HUD desaparecer de repente no fim.
-- **O mod da música primeiro**: a letra, a barra de vida, as notas, os ratings e os sons que o mod da música traz têm prioridade, como no `Paths` do Psych.
-- **Definições na pasta do utilizador**: `%APPDATA%\GodsHand` (Windows), `~/Library/Application Support/GodsHand` (macOS), `~/.local/share/GodsHand` (Linux), a pasta da app (Android). Atualizar o jogo já não as perde (as antigas são copiadas na primeira vez; com um `portable.txt` ao lado do jogo fica tudo na pasta do jogo).
-- **Velocidade do scroll no Freeplay** (`Tab`, modificadores): a do chart, multiplicada, ou constante.
-- **Efeitos do JS Engine iguais aos originais**: `addBlockedGlitchEffect`, `addVCREffect`, `addGrainEffect` e os outros usam o GLSL do `Shaders.hx` do JS Engine (antes eram imitações).
-- **Contador de FPS detalhado** (Opções → GRAPHICS): memória do jogo e o pico, tempos de frame com gráfico, uso do processador e RAM do sistema, nome do processador, da placa gráfica, versão do OpenGL e sistema. Fica vermelho abaixo de metade do limite de FPS, como no Psych.
-- **Contador de notas** (Opções → INTERFACE → "Note counter"): por baixo da pontuação, as notas do teu lado (`Notes 5,678 / 83,290`) ou dos dois lados somados, como no H-Slice (`Notes 1,234 + 5,678 = 6,912 / 166,603`), com o NPS de cada lado separado (adversário / tu). Pontuação, combo, falhas e contagens são de 64 bits (sem limite prático) e os números compridos encolhem para caber no ecrã.
+## Chart bridge + rolling playback window
 
-### Android
-- Instala o `GodsHand-android.apk` (Android 7 ou mais recente; o telemóvel pede para permitir instalar desta origem).
-- **Controlos no ecrã**: setas, OK e VOLTAR nos menus; numa música o ecrã inteiro divide-se nas pistas (toca em qualquer ponto da coluna) e há um botão PAUSA. O botão "voltar" do Android também pausa.
-- **Mods**: Freeplay → **MOD PACKS** descarrega e instala os pacotes; **IMPORT ZIP** abre o explorador de ficheiros e copia os `.zip` que escolheres. A pasta do jogo é `Android/data/com.godshand.game/files/` (`mods/`, `songs/`, `replays/`...).
-- Ao sair da app a música para e o jogo fica em pausa até voltares.
-- Shaders e Lua/HScript funcionam como no PC. Vídeos `.mpg` tocam; `.mp4`/`.webm` precisam do ffmpeg, que não existe no Android.
+- `raid::ChartStream` (`src/raid_chart.*`): a metadata-only `Chart` (notes stay
+  empty; totals and `lengthMs` come from the header/meta) plus `pump()` —
+  windowed events with global indices — and `prefetch()` for worker-side
+  chunk warming.
+- `Session` (`src/session.*`): `appendLaneNote()` feeds events in global time
+  order (per-lane order preserved, so cursors/judgement/holds are untouched);
+  `gcBefore()` drops resolved notes >30 s behind the playhead — lane memory is
+  bounded by note **density**, not chart length.
+- `PlayState` (`src/state_play.cpp`): `.raid` charts pump events up to
+  `songMs + 4 s`, prefetch 16 s ahead, flip sides under mirror mode, and GC
+  each frame. Restart re-inits from the stream frontier.
 
-### Conteúdo
-| Música | Adversário | BPM | Dificuldades |
-|---|---|---|---|
-| Vigil (tutorial) | The Principality | 96 | Easy, Normal, Hard |
-| Principality | The Principality | 118 | Easy, Normal, Hard |
-| Godshand | The Hand | 146 | Easy, Normal, Hard, **Infernal** |
-| Demise | Demise | 176 | Easy, Normal, Hard, **Infernal** |
+## Tooling
 
-Modo **História**, **Freeplay** com pré-visualização, **Opções**, **calibração do offset**, resultados com gráfico de timing e **modificadores** (velocidade 0.5×–2×, botplay, prática, jogar como o adversário).
+**`raid_engine.exe`** — standalone CLI (icon embedded):
 
-### Controlos
-| Ação | Teclas |
-|---|---|
-| Setas (4 teclas) | `D F J K` ou `← ↓ ↑ →` (configurável), comando: D-pad / botões |
-| Pausa | `Enter` / `Esc` |
-| Menu principal | `7` editores (charts, personagens, cenários, eventos) |
-| Freeplay | `Tab` modificadores · `7` editor de charts · `M` pacotes de mods · `R` procurar músicas e mods novos |
-| Numa música | `7` editor de charts nessa música · `F3` ecrã de depuração · `ESC` termina a gravação (Rendering mode) |
-| Volume | `-` / `=` baixar e subir, `0` silenciar |
-| Bot Energy (evento do JS Engine) | segura `Ctrl` (botão BOT no ecrã tátil) |
-| Rever replay | `R` no ecrã de resultados |
-| Ecrã inteiro | `F11` |
+```text
+raid_engine convert <chart|flp|fsc> <out.raid>   # encode (JSON, V-Slice,
+                                                #  PulseForge, FL Studio)
+raid_engine info <file.raid>                     # header + encoder stats
+raid_engine verify <file.raid>                   # full decode, note count
+raid_engine window <file.raid> <startMs> <endMs> # streaming window dump
+raid_engine meta <file.raid>                     # raw metadata JSON
+raid_engine patterns <file.raid> [startMs] [endMs]  # op-stream log: which
+                                                    # pattern plays when
+```
 
-### Compilar
-Precisas de CMake ≥ 3.20 e de um compilador C++20. O raylib 5.5, o Lua 5.4.7, o miniz e o pl_mpeg são descarregados automaticamente
-(o `GodsHand-complete-source.zip` dos releases já os traz em `third_party/` e compila sem internet).
+`gh_tests --raid <chart|flp|fsc> <out.raid>` does the same conversion with the
+compression report.
+
+**In-game pattern log** — Freeplay → TAB → "Pattern log (.raid)" writes
+`<userDir>/raid_pattern_log.txt` during playback, marking every
+pattern→pattern change. On `taimuresu.RAID` (75,819 events → 89 KB, 3.72×):
+4,160 op segments, 3,003 pattern instances, 1,849 pattern→pattern changes.
+
+`.RAID` files have a registered icon (`RAID_File_Icon.ico`, embedded in both
+executables; `tools/register_raid_icon*.ps1` registers the association).
+
+## Converting charts
+
+Input goes through `loadChartFile`: Psych/FNF JSON, V-Slice, PulseForge
+(`chart.json`, `.pfchart.json`, autosaves), and **FL Studio `.flp`/`.fsc`**
+projects via SNIFF pattern detection — lossless conversion to `.raid`.
+
+## Tests & build
+
+Headless suite (`tests/`): roundtrip, pattern/pitch transforms, streaming
+windows, `ChartStream`≡materialized equivalence, session streaming, encoder
+validation, malformed-input fuzz, concurrency + memory budgets, opLog and
+pattern-logger coverage. **6,756 tests, 0 failures.**
+
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-./build/godshand          # Windows: build\Release\godshand.exe (MSVC) ou build\godshand.exe
-```
-Linux precisa de: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev`.
-Para gerar um `.exe` de Windows a partir de Linux: `-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake`.
-Android: com o Android SDK (`platforms;android-34`, `build-tools;34.0.0`, `ndk;27.2.12479018`), um JDK, Ninja e zip,
-`ANDROID_SDK=/caminho/android-sdk android/build_apk.sh` cria `build/GodsHand-android.apk`.
-
-### Porquê assim
-O PulseForge cresceu demasiado (SDK do Discord, streaming de biliões de notas, conteúdo em LFS no próprio repositório) e ficou difícil de manter. Aqui o núcleo pequeno e testado do God's Hand fica como base e o que o PulseForge tinha de melhor foi reescrito por cima, com testes. O conteúdo dos mods vive fora do código: pacotes no release `mods`, gerados uma vez a partir do LFS do PulseForge pelo workflow *Mod packs*, ou copiados de zips feitos com `modpacks/build_packs.py --local` e partilhados no Google Drive (linhas `drive` do `modpacks/packs.txt`).
-
----
-
-## English
-
-**Gameplay** – FNF-style call-and-response. Ratings are **DIVINE / GRACE / MORTAL / SINFUL** (45 / 90 / 135 / 166 ms); a full combo of DIVINEs is a **SANCTIFIED** clear.
-
-**Mods**
-- Psych Engine mods run in a Flixel-style scene: Sparrow/Packer atlases with trimming, Psych and V-Slice characters, stages (including 0.7.3 stage objects), cameras with zoom/shake/flash/fade, FlxEase tweens, timers, and Lua 5.4 with the Psych API (≈250 functions and every common callback, persistent save data, custom substates, mod settings, seekable sounds) plus Kade modchart helpers.
-- HScript: `runHaxeCode`, `runHaxeFunction`, `createCallback` and `.hx` script files, bridged to `game`, `FlxG`, `FlxSprite`, `FlxText`, `FlxTween`, `FlxTimer`, `FlxColor`, `ShaderFilter`, `FlxRuntimeShader`, `new Character(...)`, `MP4Handler`/`VideoHandler`, `FlxG.cameras`, fully qualified `openfl.*`/`flixel.*`/`lime.*` names and more.
-- JS Engine compatibility: its events (Set/Tween Camera Zoom, Camera Bopping, Camera Twist, Change Note Multiplier, Fake Song Length, Change Song Name, Credits Popup, Popup, Rainbow Eyesore, Bot Energy...), its screen effects (`addChromaticAbberationEffect`, `addVCREffect`, `addWiggleEffect`, `addBloomEffect`, `add3DEffect`... as our own shaders) and functions such as `require`, `saveFile`, `loopTheSong`, `playsAsBF`. The camera follows Psych (`camFollowPos` is the real position, per-section focus with `gfSection`, `isCameraOnForcedPos`); scripts that change `FlxG.width` (e.g. *Window Changer*) narrow the picture to 4:3. Of 1048 Lua scripts from JS Engine mods, 984 run without an error in the headless corpus check.
-- Shaders: OpenFL/Flixel fragment shaders are translated to GLSL 330 and run on sprites and whole cameras.
-- Videos: `startVideo` cutscenes and `makeVideoSprite` with pl_mpeg; `.mp4`/`.webm` are converted once with ffmpeg when available.
-- Full Kade/base-game builds: the week 1–6 characters, stages and stage behaviour are rebuilt from the mod's own images.
-- Any folder layout: nested mod folders, loose charts grouped by song with audio found across mods, V-Slice, full builds with charts in `assets/preload/data/` or `assets/shared/data/` and audio in `assets/songs/` (Psych 0.4–0.7, H-Slice, Psych EK), a build's `mods/` folder with mods inside, `data/charts/<song>/`, charts loose in `data/`, a compiled build inside a source tree (`export/release/.../bin/`: identical copies of a chart are offered once; different versions both appear, labelled with their folder), **PulseForge charts** (exported `chart.json`, editor `.pfchart.json` projects and autosaves, streamed when huge) and **audio-only folders** (every track of 30 s or more gets AutoChart; short sound effects are left out). 1–9 keys (`keyCount`, or `mania` from Dave & Bambi / Kade / Andromeda, Psych Extra Keys and Shaggy: the notes decide which numbering a chart uses, and a `mania` the notes do not use — like the `options.mania` of JS Engine spam charts — gives 4 keys; without either a chart has 4 keys, as in Psych; Options → "Extra keys" OFF plays everything with 4 keys), V-Slice.
-- Huge spam charts are streamed: 1.5 GB / 25 million notes load in about 5 s with bounded memory. Notes stacked in one millisecond stay merged in memory but every one of them counts (hits, combo, score, totals), notes are drawn down to one pixel apart (with Options → "Note detail: Adaptive", while the frame rate stays under 60 with hundreds of notes on screen, notes stacked closer than 2–32 px are drawn once; every note is still played and counted), and charts without a key count are 4-key charts, as in Psych and JS Engine.
-- Songs start at once: song audio is decoded while it plays (the S2X engine's idea of reading the chart while the song runs, applied to audio). A 3-minute song is ready in ~2 ms instead of 0.75 s, a 1-hour one in 2.5 ms instead of 6 s (21 MB instead of 1.2 GB), and LONGSONG's 8-hour Desert Bus no longer crashes the game. Long tracks keep only the minutes around the play position in memory; Freeplay previews start at once too.
-- Assets are shared between mods: a character, stage, image, sound, video, shader or font a mod uses but does not have is looked up in the rest of its own pack first, then in every other installed mod (asset-only packs such as `lmac-orien-sprites` and `lmac-denpaex-reconstructed` exist for this). A borrowed stage, character, note type or event brings its own script; the other mod's global scripts (`scripts/`) do not run. For example the "18th-Victim" autosave in `pulseforge-created` plays with the stage, characters, icons and audio of the vs dinnerbambi pack.
-- Windows builds use UTF-8 as their code page (Windows 10 1903+), so folders and files named in any script open.
-- Scripts are sandboxed and stopped if they loop forever.
-
-**Also** – chart editor (Freeplay `7`, or `7` during a song) with Song / Section / Note / Events / Charting / **EZ Spam** tabs (JS Engine-style spam over a section, the rest of the song, the whole song or a range of sections: notes per beat, pattern, side, holds, stacked notes; clear and thin out), an event lane, box selection; **FL Studio charts the SNIFF way** (drop a `.flp`/`.fsc` on the editor; FL Studio chart projects in mods are listed as songs, one difficulty per pattern); in-game mod pack downloader (Freeplay `M`), AutoChart for songs without charts, deterministic replays, `.zip` mod installs, touch controls. Options → INTERFACE switches to the Psych Engine look and sounds, read from a Psych Engine / JS Engine copy the player already has: found by itself among engine builds installed as mod packs (JS Engine, H-Slice, EZ edition...) or an engine (such as S2X) in or next to the game's folder, the most complete first; or a folder the player picks (`BACKSPACE` goes back to the one found). None of those files ship with the game. VSync applies at once (Android too); a Shaders switch helps weak devices. "Add Camera Zoom" adds up and stays until the first note is hit, as in Psych / JS Engine. The Psych interface also covers the time bar, BOTPLAY, the score's zoom on hits, Psych's pause menu (Alphabet letters, `breakfast` music, "Blueballed"); new options for hit popups, the time bar (time left / elapsed / song name / off) and the health bar's opacity. `-` / `=` / `0` change or mute the volume anywhere (Flixel's keys). The pause menu has Options (leaving them restarts the song, as in Psych). Options > DEBUG shows Lua errors and warnings always, only for scripts with `luaDebugMode` (as in Psych), or never; "Lua note callbacks" OFF skips `goodNoteHit`, `opponentNoteHit`, `noteMiss` and `noteMissPress` on every note (faster spam charts, as S2X's option). `F3` during a song shows a debug overlay (chart, clock, audio streaming, notes drawn, frame times, scripts); `godshand --perf` prints frame times every second. **Rendering mode** (Options → RENDERING, desktop), as in JS Engine and H-Slice: songs play by themselves and are recorded to a video in `renders/`, frame by frame. Game time moves exactly 1/fps per frame, so the video is smooth even when the computer cannot draw in real time; the window shows a preview and the progress. Size (1280x720 to 3840x2160), frame rate (30 to 240), encoder (x264, x265, VP9/WebM, or the NVIDIA, AMD and Intel hardware encoders), bitrate, and the song's audio (instrumental and voices, mixed by the game in step with the picture). Needs **ffmpeg** next to the game or installed. `ESC` stops and keeps what was recorded; `godshand --autoplay <song> --render` records from the command line. Shaders on `makeGraphic` sprites see texture coordinates across the whole sprite, and `os.clock()` counts real time on every system. A note counter under the score shows your side or both sides (`opponent + yours = both`, as in H-Slice); score, combo, misses and counts are 64-bit and long numbers shrink to fit.
-
-**1.6.0** – **Editors** (main menu `7`), as Psych's Master Editor Menu: pick the mod they save into with LEFT/RIGHT, then the chart editor or a new **character editor** (a character JSON drawn as songs draw it: animations with the image's own animation names to pick prefixes from, offsets on the arrow keys over a ghost of the first animation, image, scale, flip, antialiasing, health icon and bar colour or the icon's own colour, position, camera point, sing duration; `CTRL+S` saves `characters/<name>.json`), **stage editor** (a stage JSON shown with its objects, its Lua script's sprites and three characters dragged into place with the mouse; zoom, camera speed, pixel stage, hiding the girlfriend, camera offsets and the frame the camera shows on each character; saves `stages/<name>.json`) or **event editor** (custom events, `custom_events/<name>.txt` and `.lua`, from templates: flash, HUD fade, shake, zoom, sound, scroll speed; the script opens in the system's text editor). Saved files keep the fields the editors do not know. The chart editor's EZ Spam tab is now JS Engine's Note Spamming tab (spam, stretch, shift, duplicate), events are picked from a list, odd time signatures (7/16, 5/4...) chart, whole sections copy and cut, `SHIFT+A`/`SHIFT+D` jump 4 sections, and the opponent's hitsound is the player's. The **Psych interface follows Psych 0.7.3's PlayState**: health bar, icons (150 px on the bar's top edge, bopping on beats), score text, time bar and text (hidden until the song starts), BOTPLAY, rating popups and combo digits at Psych's places, sizes and motions, and `vcr.ttf` at its real size (it was 14% too big); Psych's options **Hide HUD**, **Score text zoom on hit**, **Botplay text**, **Combo stacking**, **Pause screen song** (None, Breakfast, Tea Time) and **Opponent notes**. Scripts that fade the HUD (`doTweenAlpha` on `scoreTxt`, `timeTxt`, `timeBar`, `healthBarBG`...) now fade it instead of it vanishing at the end. A song's own mod comes first for fonts, health bar, notes, ratings and sounds (as Psych's `Paths`). **Settings live in the user's folder** (`%APPDATA%\GodsHand`, `~/Library/Application Support/GodsHand`, `~/.local/share/GodsHand`, the app's folder on Android), so updates keep them (the old ones are copied once; `portable.txt` next to the game keeps everything there). Freeplay modifiers set the **scroll speed** (the chart's, multiplied, or constant). The note counter's NPS shows each side. JS Engine's **screen effects** (`addBlockedGlitchEffect`, `addVCREffect`, `addGrainEffect`...) now run the GLSL of its `Shaders.hx` instead of look-alikes. A **detailed FPS counter** (Options → GRAPHICS): the game's memory and its peak, frame times with a graph, processor and system memory use, and the processor, graphics card, OpenGL version and system; it turns red at half the frame limit, as Psych's.
-
-**Android** – `GodsHand-android.apk` (Android 7+, arm64/armv7/x86_64). On-screen arrows, OK and BACK in the menus; during a song the whole screen is split into the lanes, with a PAUSE button (the system back button pauses too). Freeplay has MOD PACKS (download) and IMPORT ZIP (system file picker). Game files live in `Android/data/com.godshand.game/files/`. The app pauses and goes silent in the background. Shaders run as GLSL ES 1.0; `.mp4`/`.webm` videos need ffmpeg, which Android does not have (`.mpg` plays). Built with `android/build_apk.sh` (NDK + CMake, a small Java activity for fullscreen and the file picker); signed with `android/godshand.keystore` (password `godshand`) so every build installs over the previous one, or with your own key through the `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASS` repository secrets.
-
-**Complete source** – `GodsHand-complete-source.zip` in each release is the game with the exact sources of raylib, Lua, miniz and pl_mpeg in `third_party/` (used automatically by CMake), so it builds offline; `tools/make_source_package.sh` makes it.
-
-**Engine** – the song position comes from the audio mixer's frame counter; input is polled at ~1 kHz with timestamps; song audio (Ogg Vorbis, MP3, WAV) is decoded in the background in blocks with raylib's own decoders (`audio_decode`). Pure-logic core (`json`, `chart`, `chart_stream`, `song_scan`, `flp_import`, `session`, `synth`, `composer`, `psych`, `scene`, `lua_host`, `hscript`, `shader_glsl`, `basegame`, `autochart`, `replay`, `mod_install`) with a headless test suite:
-```sh
-build/gh_tests                          # all tests (add --audio to render the songs too)
-build/gh_tests --chart a.json b.json    # parse/benchmark charts of any size
-build/gh_tests --psych-corpus mods/     # load every atlas, character, stage and Lua script in a mod folder
-build/gh_tests --flp song.flp           # what an FL Studio project holds, as SNIFF reads it
-build/godshand --list-songs --base dir/ # what the song library finds in dir/songs and dir/mods
-build/godshand --list-songs --check-charts --base dir/  # ...and load every chart (keys, notes or the error)
+cmake --build build --config Release        # gh_tests + raid_engine
+cmake -S . -B build_game -DGH_BUILD_GAME=ON # + godshand (raylib fetched)
+cmake --build build_game --config Release
 ```
 
-**Layout**
-```
-src/        engine + game (C++20, raylib for window/audio/drawing, Lua 5.4, miniz, pl_mpeg)
-android/    APK build: manifest, icons, Java activity, build and emulator test scripts
-tools/      complete source package
-tests/      headless tests, chart benchmark and mod corpus checker
-assets/     fonts (SIL OFL)
-songs/      your own songs (charts, or just audio for AutoChart)
-modpacks/   the list of mod packs and the script that publishes them
-mods/       Psych Engine / FNF mods, folders or .zip (created next to the executable)
-replays/    recorded runs     saves/  script save data     cache/  converted videos     renders/  recorded videos
-```
+## The game — God's Hand of Principality and Demise
 
-**Credits** – Created for deatuamae67-crypto, merging God's Hand with ideas and features from PulseForge (same author). Event, effect and script behaviour follow [JS Engine](https://github.com/JordanSantiagoYT/FNF-JS-Engine) (Apache-2.0) and Psych Engine; the code and shaders here are our own. Built with [raylib](https://www.raylib.com) (zlib), [Lua](https://www.lua.org) (MIT), [miniz](https://github.com/richgel999/miniz) (MIT) and [pl_mpeg](https://github.com/phoboslab/pl_mpeg) (MIT). Fonts: Cinzel Decorative (Natanael Gama) and Rajdhani (Indian Type Foundry), both SIL OFL. All built-in characters, music and art are original. Code under the MIT license; mod packs are the user's own content.
+`godshand` is the playable engine: FNF-style call-and-response (DIVINE / GRACE /
+MORTAL / SINFUL ratings), Psych Engine mods (Lua 5.4 + HScript, characters,
+stages, events, shaders, videos), Kade/base-game builds, a chart editor
+(`7`), AutoChart, deterministic replays, `.zip` mod installs, rendering mode,
+and `.raid` streaming playback. See the release page for downloads
+(Windows / Linux / macOS / Android).
+
+## Honest limitations
+
+- **Encoder input is still a materialized `Chart`** — trillion-event
+  *authoring* is future work; the format/decoder/playback path supports it.
+- **Script note access degrades on `.raid`**: `noteOrder_`/`noteRef`/
+  `noteCount` return empty — Psych scripts that enumerate notes see none.
+- **Rewind** (`loopSong`) works within the ~30 s GC margin; farther back,
+  dropped notes can't replay. `restart()` always works.
+- **`LaneNote::id` is `uint32_t`** — wraps past 4 G events (only affects
+  script ids, which don't work on streams anyway).
+- **Renderer unchanged** — drawing uses the existing per-note path over
+  windowed lanes; GPU instancing is not implemented yet.
+- The pattern log reports **encoded** pattern operations — it is not a map of
+  visual note patterns.
+
+## Credits
+
+Created for deatuamae67-crypto / TofpFL, merging God's Hand with ideas and
+features from PulseForge (same author). Event, effect and script behaviour
+follow [JS Engine](https://github.com/JordanSantiagoYT/FNF-JS-Engine)
+(Apache-2.0) and Psych Engine; the code and shaders are our own. Built with
+[raylib](https://www.raylib.com) (zlib), [Lua](https://www.lua.org) (MIT),
+[miniz](https://github.com/richgel999/miniz) (MIT) and
+[pl_mpeg](https://github.com/phoboslab/pl_mpeg) (MIT). Fonts: Cinzel
+Decorative and Rajdhani, both SIL OFL. Code under the MIT license; mod packs
+are the user's own content.
