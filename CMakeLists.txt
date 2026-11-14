@@ -103,6 +103,7 @@ add_library(gh_core STATIC
   src/raid_chart.cpp
   src/lua_host.cpp
   src/replay.cpp
+  src/rchr.cpp
   src/mod_install.cpp
   src/autochart.cpp
 )

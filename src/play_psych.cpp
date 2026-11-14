@@ -6,12 +6,14 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <set>
 
 #include "basegame.hpp"
 #include "common.hpp"
 #include "effects.hpp"
 #include "platform.hpp"
 #include "psych_ui.hpp"
+#include "rchr.hpp"
 #include "state_play.hpp"
 #include "rlgl.h"
 
@@ -403,8 +405,41 @@ bool PlayState::setupPsych() {
     std::vector<std::string> roots = entry_->assetRoots;
     if (roots.empty() && !entry_->modRoot.empty()) roots.push_back(entry_->modRoot);
     roots.push_back(a.base + "mods/");
+    const std::vector<std::string> shared = a.library.sharedAssetRootsFor(*entry_);
+    // .rchr character packs: archives found at a root or one level inside it
+    // are extracted once into the user cache and mounted as extra roots, so
+    // characters/, images/, scripts/ etc. resolve like a loose mod folder.
+    {
+        std::vector<std::string> scan = roots;
+        scan.insert(scan.end(), shared.begin(), shared.end());
+        const std::string cache = a.userDir + "rchr/";
+        std::set<std::string> mounted;
+        for (const std::string& dir : scan) {
+            std::vector<fs::path> dirs{toPath(dir)};
+            std::error_code ec;
+            for (fs::directory_iterator it(toPath(dir), fs::directory_options::skip_permission_denied, ec), end;
+                 !ec && it != end; ++it) {
+                if (it->is_directory(ec)) dirs.push_back(it->path());
+            }
+            for (const fs::path& d : dirs) {
+                for (fs::directory_iterator it(d, fs::directory_options::skip_permission_denied, ec), end;
+                     !ec && it != end; ++it) {
+                    if (!it->is_regular_file(ec) || toLower(pathStr(it->path().extension())) != ".rchr")
+                        continue;
+                    std::string merr;
+                    const std::string m = rchr::mountDir(pathStr(it->path()), cache, merr);
+                    if (m.empty()) {
+                        debugNotice("rchr " + pathStr(it->path()) + ": " + merr, false, false);
+                    } else if (mounted.insert(m).second) {
+                        roots.push_back(m + "/");
+                    }
+                }
+                if (ec) break;
+            }
+        }
+    }
     sc.files.setRoots(roots);
-    sc.files.setSharedRoots(a.library.sharedAssetRootsFor(*entry_));  // what this mod lacks, from the other mods
+    sc.files.setSharedRoots(shared);
     // The Psych interface: this song's own mod first, as Psych's Paths does.
     {
         std::vector<std::string> own = entry_->assetRoots;

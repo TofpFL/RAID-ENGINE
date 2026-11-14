@@ -9,6 +9,7 @@
 //                                                    pattern plays when
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include "flp_import.hpp"
 #include "raid.hpp"
 #include "raid_chart.hpp"
+#include "rchr.hpp"
 
 using namespace gh;
 
@@ -60,6 +62,8 @@ static int convert(const std::string& in, const std::string& out) {
     std::printf("  logical events : %llu\n", (unsigned long long)info.logicalEvents);
     std::printf("  literal events : %llu (%.1f%%)\n", (unsigned long long)info.literalEvents,
                 info.logicalEvents ? 100.0 * double(info.literalEvents) / double(info.logicalEvents) : 0.0);
+    std::printf("  unique notes   : %llu in %llu stored events (pattern table)\n",
+                (unsigned long long)info.uniqueNotes, (unsigned long long)info.uniqueEvents);
     std::printf("  patterns       : %llu\n", (unsigned long long)info.patternCount);
     std::printf("  chunks         : %llu\n", (unsigned long long)info.chunkCount);
     std::printf("  payload bytes  : %llu raw -> %llu stored (%.2fx)\n",
@@ -81,6 +85,12 @@ static int info(const std::string& path) {
     std::printf("  logical events : %llu\n", (unsigned long long)i.logicalEvents);
     std::printf("  chunks         : %llu\n", (unsigned long long)i.chunkCount);
     std::printf("  patterns       : %llu\n", (unsigned long long)i.patternCount);
+    {
+        uint64_t uev = 0, un = 0;
+        if (rd.uniqueStats(uev, un, err))
+            std::printf("  unique notes   : %llu in %llu stored events (pattern table)\n",
+                        (unsigned long long)un, (unsigned long long)uev);
+    }
     std::printf("  duration       : %.0f ms\n", double(rd.durationUs()) / 1000.0);
     rd.close();
     return 0;
@@ -226,6 +236,99 @@ static int streamtest(const std::string& path) {
         if (bucket[i]) std::printf("  %4zu0-%4zus: %llu\n", i, i, (unsigned long long)bucket[i]);
     return 0;
 }
+// ---- .rchr (RAID Character archives) ---------------------------------------
+
+namespace fs = std::filesystem;
+
+// Expands pack arguments (files and directories, recursively) into
+// (arcname, disk path) pairs. Arcnames are paths relative to `root` when
+// possible, else the file name.
+static void collectRchrInputs(const std::vector<std::string>& args, const fs::path& root,
+                              std::vector<std::pair<std::string, std::string>>& out, std::string& err) {
+    for (const std::string& a : args) {
+        std::error_code ec;
+        const fs::path p(a);
+        if (fs::is_regular_file(p, ec)) {
+            fs::path rel = fs::relative(p, root, ec);
+            if (ec) rel = p.filename();
+            out.push_back({rel.generic_string(), fs::absolute(p, ec).string()});
+        } else if (fs::is_directory(p, ec)) {
+            for (fs::recursive_directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end;
+                 !ec && it != end; it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                std::error_code ec2;
+                fs::path rel = fs::relative(it->path(), root, ec2);
+                if (ec2) rel = it->path().filename();
+                out.push_back({rel.generic_string(), it->path().string()});
+            }
+            if (ec) { err = "cannot scan " + a; return; }
+        } else {
+            err = "not a file or directory: " + a;
+            return;
+        }
+    }
+}
+
+static int rchrPack(int argc, char** argv) {
+    // rchr pack <out.rchr> [--root dir] <file|dir> [...]
+    if (argc < 4) return 2;
+    const std::string out = argv[3];
+    fs::path root = fs::current_path();
+    std::vector<std::string> inputs;
+    for (int i = 4; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--root" && i + 1 < argc) {
+            root = fs::absolute(argv[++i]);
+        } else {
+            inputs.push_back(a);
+        }
+    }
+    std::vector<std::pair<std::string, std::string>> files;
+    std::string err;
+    collectRchrInputs(inputs, root, files, err);
+    if (!err.empty()) { std::printf("pack failed: %s\n", err.c_str()); return 1; }
+    if (!rchr::pack(out, files, err)) { std::printf("pack failed: %s\n", err.c_str()); return 1; }
+    uint64_t raw = 0, stored = 0;
+    std::error_code ec;
+    for (const auto& [arc, disk] : files) raw += fs::file_size(disk, ec);
+    stored = fs::file_size(out, ec);
+    std::printf("%s: %zu files, %llu -> %llu bytes\n", out.c_str(), files.size(),
+                (unsigned long long)raw, (unsigned long long)stored);
+    for (const auto& [arc, disk] : files) std::printf("  %s\n", arc.c_str());
+    return 0;
+}
+
+static int rchrCmd(int argc, char** argv) {
+    const std::string sub = argc >= 3 ? argv[2] : "";
+    if (sub == "pack" && argc >= 4) return rchrPack(argc, argv);
+    if (sub == "list" && argc >= 4) {
+        std::vector<rchr::Entry> entries;
+        std::string err;
+        if (!rchr::list(argv[3], entries, err)) { std::printf("list failed: %s\n", err.c_str()); return 1; }
+        uint64_t raw = 0, stored = 0;
+        for (const rchr::Entry& e : entries) {
+            raw += e.rawSize;
+            stored += e.storedSize;
+            std::printf("  %-48s %8llu -> %8llu  %s\n", e.path.c_str(),
+                        (unsigned long long)e.rawSize, (unsigned long long)e.storedSize,
+                        e.method ? "deflate" : "store");
+        }
+        std::printf("%s: %zu entries, %llu -> %llu bytes\n", argv[3], entries.size(),
+                    (unsigned long long)raw, (unsigned long long)stored);
+        return 0;
+    }
+    if (sub == "unpack" && argc >= 5) {
+        std::string err;
+        if (!rchr::extract(argv[3], argv[4], err)) { std::printf("unpack failed: %s\n", err.c_str()); return 1; }
+        std::printf("unpacked %s -> %s\n", argv[3], argv[4]);
+        return 0;
+    }
+    std::printf("raid_engine rchr pack <out.rchr> [--root dir] <file|dir> [...]\n"
+                "raid_engine rchr list <file.rchr>\n"
+                "raid_engine rchr unpack <file.rchr> <outdir>\n");
+    return 2;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 3) {
@@ -236,7 +339,8 @@ int main(int argc, char** argv) {
                     "  raid_engine window <file.raid> <startMs> <endMs>\n"
                     "  raid_engine meta <file.raid>\n"
                     "  raid_engine patterns <file.raid> [startMs] [endMs]\n"
-                    "  raid_engine streamtest <file.raid>\n");
+                    "  raid_engine streamtest <file.raid>\n"
+                    "  raid_engine rchr pack|list|unpack ...\n");
         return argc < 2 ? 2 : 1;
     }
     const std::string cmd = argv[1];
@@ -246,6 +350,7 @@ int main(int argc, char** argv) {
     if (cmd == "window" && argc >= 5) return window(argv[2], argv[3], argv[4]);
     if (cmd == "meta" && argc >= 3) return meta(argv[2]);
     if (cmd == "streamtest" && argc >= 3) return streamtest(argv[2]);
+    if (cmd == "rchr" && argc >= 3) return rchrCmd(argc, argv);
     if (cmd == "patterns" && argc >= 3)
         return patterns(argv[2], argc >= 4 ? argv[3] : nullptr,
                         argc >= 5 ? argv[4] : nullptr);
