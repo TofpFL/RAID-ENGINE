@@ -158,13 +158,13 @@ public:
         const float pulse = menuPulse();
         gfx::beginCanvas();
         drawMenuBackground(now, 0xF4C76B, pulse);
-        gfx::glow({gfx::W / 2, 320}, 420 + 30 * pulse, fade(kGold, 0.22f));
+        gfx::glow({gfx::W / 2, 250}, 380 + 30 * pulse, fade(kGold, 0.22f));
         const Texture2D logo = menuLogo();
         if (logo.id) {
-            const float w = 980.0f;
+            const float w = 735.0f;
             const float h = w * float(logo.height) / float(logo.width);
             DrawTexturePro(logo, {0, 0, float(logo.width), float(logo.height)},
-                           {gfx::W / 2 - w / 2, 96, w, h}, {0, 0}, 0, WHITE);
+                           {gfx::W / 2 - w / 2, 60, w, h}, {0, 0}, 0, WHITE);
         } else {
             const float s = 1.0f + 0.025f * pulse;
             gfx::glowText(FontId::Title, "RAID ENGINE", gfx::W / 2, 190 - 6 * s, 96 * s, kGold,
