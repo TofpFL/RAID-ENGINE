@@ -186,7 +186,7 @@ void App::applyPsychUi() {
             return;
         }
     }
-    menuBpm_ = menuTheme().bpm;
+    menuBpm_ = FileExists((base + "assets/menu/theme.mp3").c_str()) ? 150.0 : menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
 }
 
@@ -289,7 +289,7 @@ int App::run(int argc, char** argv) {
     SetTraceLogLevel(LOG_WARNING);
     // Android: the whole screen, whatever its size.
     InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
-               "God's Hand of Principality and Demise");
+               "RAID Engine");
     platform::afterWindowInit();
     platform::setVsync(settings.vsync);  // explicit both ways: some drivers default to on
     SetExitKey(KEY_NULL);
@@ -317,7 +317,7 @@ int App::run(int argc, char** argv) {
         SwapScreenBuffer();
     });
 
-    menuBpm_ = menuTheme().bpm;
+    menuBpm_ = FileExists((base + "assets/menu/theme.mp3").c_str()) ? 150.0 : menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
     if (settings.psychUi) applyPsychUi();
 

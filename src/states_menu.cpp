@@ -26,6 +26,24 @@ namespace {
 const Color kGold{255, 214, 120, 255};
 const Color kIvory{246, 236, 214, 255};
 
+// assets/menu/raid_engine_logo.png, loaded once; id == 0 when absent.
+Texture2D menuLogo() {
+    static Texture2D tex = [] {
+        Texture2D t{};
+        const std::string path = app().base + "assets/menu/raid_engine_logo.png";
+        if (FileExists(path.c_str())) t = LoadTexture(path.c_str());
+        return t;
+    }();
+    return tex;
+}
+
+void drawLogo(float cx, float top, float w) {
+    const Texture2D logo = menuLogo();
+    if (!logo.id) return;
+    const float h = w * float(logo.height) / float(logo.width);
+    DrawTexturePro(logo, {0, 0, float(logo.width), float(logo.height)}, {cx - w / 2, top, w, h}, {0, 0}, 0, WHITE);
+}
+
 Color diffColor(const std::string& d) {
     const std::string l = toLower(d);
     if (l == "easy") return Color{120, 220, 140, 255};
@@ -140,22 +158,25 @@ public:
         const float pulse = menuPulse();
         gfx::beginCanvas();
         drawMenuBackground(now, 0xF4C76B, pulse);
-        CharacterState p;
-        p.id = CharId::Principality;
-        p.beatAt = lastBeatTime();
-        drawCharacter(p, {230, 690}, 0.9f, now, false);
-        CharacterState h;
-        h.id = CharId::Herald;
-        h.beatAt = p.beatAt;
-        drawCharacter(h, {1060, 690}, 0.95f, now, true);
-        const float s = 1.0f + 0.025f * pulse;
-        gfx::glowText(FontId::Title, "GOD'S HAND", gfx::W / 2, 150 - 6 * s, 104 * s, kGold, Color{255, 190, 80, 255});
-        gfx::text(FontId::Title, "of Principality and Demise", gfx::W / 2, 286, 38, kIvory, Align::Center, 2.0f);
+        gfx::glow({gfx::W / 2, 320}, 420 + 30 * pulse, fade(kGold, 0.22f));
+        const Texture2D logo = menuLogo();
+        if (logo.id) {
+            const float w = 980.0f;
+            const float h = w * float(logo.height) / float(logo.width);
+            DrawTexturePro(logo, {0, 0, float(logo.width), float(logo.height)},
+                           {gfx::W / 2 - w / 2, 96, w, h}, {0, 0}, 0, WHITE);
+        } else {
+            const float s = 1.0f + 0.025f * pulse;
+            gfx::glowText(FontId::Title, "RAID ENGINE", gfx::W / 2, 190 - 6 * s, 96 * s, kGold,
+                          Color{255, 190, 80, 255});
+            gfx::text(FontId::Title, "the .RAID chart engine", gfx::W / 2, 316, 38, kIvory, Align::Center, 2.0f);
+        }
         const float blink = leaving_ ? (std::fmod(float(now) * 12.0f, 2.0f) < 1.0f ? 1.0f : 0.2f)
                                      : 0.55f + 0.45f * std::sin(float(now) * 3.5f);
-        gfx::text(FontId::Ui, a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN", gfx::W / 2, 470, 40, fade(WHITE, blink),
-                  Align::Center, 2.0f);
-        gfx::text(FontId::Ui, "A rhythm duel  -  v" GH_VERSION, gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
+        gfx::text(FontId::Ui, a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN", gfx::W / 2, 596, 40,
+                  fade(WHITE, blink), Align::Center, 2.0f);
+        gfx::text(FontId::Ui, "A rhythm duel  -  v" GH_VERSION, gfx::W / 2, 690, 22, fade(kIvory, 0.7f), Align::Center,
+                  1.0f);
         if (!a.mixer.audioOk())
             gfx::text(FontId::Ui, "No audio device found - the game will run silently", gfx::W / 2, 520, 22,
                       Color{255, 160, 140, 255}, Align::Center, 1.5f);
@@ -216,7 +237,8 @@ public:
         h.beatAt = lastBeatTime();
         gfx::glow({1080, 500}, 230 + 20 * pulse, fade(kGold, 0.3f));
         drawCharacter(h, {1080, 640}, 0.85f, now, true);
-        gfx::text(FontId::Title, "GOD'S HAND", 60, 40, 44, kGold, Align::Left, 2.0f);
+        if (menuLogo().id) drawLogo(180, 26, 240);
+        else gfx::text(FontId::Title, "RAID ENGINE", 60, 40, 44, kGold, Align::Left, 2.0f);
         for (int i = 0; i < 5; ++i) {
             const bool on = i == a.mainSel;
             const float y = 165.0f + i * 92.0f - (on ? 6.0f : 0.0f);
@@ -599,8 +621,8 @@ public:
     }
     void draw() override {
         static const char* lines[] = {
-            "#GOD'S HAND",
-            "of Principality and Demise",
+            "#RAID ENGINE",
+            "the .RAID chart engine",
             "",
             "@A RHYTHM DUEL",
             "Created for deatuamae67-crypto",

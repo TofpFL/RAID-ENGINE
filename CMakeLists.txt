@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.6.0 LANGUAGES C CXX)
+﻿cmake_minimum_required(VERSION 3.20)
+project(RAIDEngine VERSION 1.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ endif()
 
 option(GH_BUILD_GAME "Build the game executable (needs raylib)" ON)
 if(ANDROID)
-  # Android (NDK toolchain): the game is libgodshand.so inside an APK, see android/.
+  # Android (NDK toolchain): the game is libraide.so inside an APK, see android/.
   option(GH_BUILD_TESTS "Build the headless test executable" OFF)
 else()
   option(GH_BUILD_TESTS "Build the headless test executable" ON)
@@ -235,51 +235,51 @@ if(GH_BUILD_GAME)
     src/touch_ui.cpp
   )
   if(ANDROID)
-    # NativeActivity loads libgodshand.so; raylib's android_main() calls main().
-    add_library(godshand SHARED ${GH_GAME_SOURCES})
-    target_include_directories(godshand PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
-    target_link_libraries(godshand PRIVATE gh_core raylib android log EGL GLESv2 OpenSLES m)
-    target_link_options(godshand PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,-z,max-page-size=16384)
+    # NativeActivity loads libraide.so; raylib's android_main() calls main().
+    add_library(raide SHARED ${GH_GAME_SOURCES})
+    target_include_directories(raide PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
+    target_link_libraries(raide PRIVATE gh_core raylib android log EGL GLESv2 OpenSLES m)
+    target_link_options(raide PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,-z,max-page-size=16384)
   else()
-    add_executable(godshand WIN32 ${GH_GAME_SOURCES})
+    add_executable(raide WIN32 ${GH_GAME_SOURCES})
   endif()
   if(WIN32)
     # UTF-8 as the process code page (Windows 10 1903+): files and folders
     # named in any script (mods with Chinese, Japanese... names) open.
     if(MSVC)
-      target_sources(godshand PRIVATE src/windows/godshand.manifest)
+      target_sources(raide PRIVATE src/windows/raide.manifest)
     else()
-      target_sources(godshand PRIVATE src/windows/godshand.rc)
+      target_sources(raide PRIVATE src/windows/raide.rc)
     endif()
-    target_sources(godshand PRIVATE src/windows/godshand_icon.rc)  # RAID_File_Icon.ico
+    target_sources(raide PRIVATE src/windows/raide_icon.rc)  # RAID_File_Icon.ico
   endif()
-  target_link_libraries(godshand PRIVATE gh_core raylib)
-  target_compile_definitions(godshand PRIVATE GH_VERSION="${PROJECT_VERSION}")
-  target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})
+  target_link_libraries(raide PRIVATE gh_core raylib)
+  target_compile_definitions(raide PRIVATE GH_VERSION="${PROJECT_VERSION}")
+  target_include_directories(raide PRIVATE ${pl_mpeg_SOURCE_DIR})
   if(MSVC)
-    target_compile_options(godshand PRIVATE /W3 /utf-8)
-    target_link_options(godshand PRIVATE /ENTRY:mainCRTStartup)
+    target_compile_options(raide PRIVATE /W3 /utf-8)
+    target_link_options(raide PRIVATE /ENTRY:mainCRTStartup)
   else()
-    target_compile_options(godshand PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+    target_compile_options(raide PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
   endif()
   if(MINGW)
-    target_link_options(godshand PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(raide PRIVATE -static -static-libgcc -static-libstdc++)
   endif()
   if(APPLE)
-    target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+    target_link_libraries(raide PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
   endif()
   if(WIN32)
-    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32)  # the folder dialog; the FPS counter's graphics card name
+    target_link_libraries(raide PRIVATE shell32 ole32 opengl32)  # the folder dialog; the FPS counter's graphics card name
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/
   if(NOT ANDROID)
-    add_custom_command(TARGET godshand POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:godshand>/assets
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/songs $<TARGET_FILE_DIR:godshand>/songs
-      COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:godshand>/mods)
+    add_custom_command(TARGET raide POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:raide>/assets
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/songs $<TARGET_FILE_DIR:raide>/songs
+      COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:raide>/mods)
 
-    install(TARGETS godshand RUNTIME DESTINATION .)
+    install(TARGETS raide RUNTIME DESTINATION .)
     install(DIRECTORY assets songs DESTINATION .)
     install(FILES README.md LICENSE DESTINATION .)
   endif()

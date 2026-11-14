@@ -1027,7 +1027,7 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
         return true;
     }
     if (n == "Windows Notification") {
-        notices_.push_back({v1.empty() ? std::string("God's Hand") : e.v1, e.v2, a.now, 1});
+        notices_.push_back({v1.empty() ? std::string("RAID Engine") : e.v1, e.v2, a.now, 1});
         return true;
     }
     if (n == "Enable Bot Energy" || n == "Disable Bot Energy") {
@@ -1657,7 +1657,7 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
         if (w == "height") return num(gfx::H);
         if (w == "x") return num(pos.x);
         if (w == "y") return num(pos.y);
-        if (w == "title") { out = std::string("God's Hand"); return true; }
+        if (w == "title") { out = std::string("RAID Engine"); return true; }
         if (w == "fullscreen") return flag(IsWindowFullscreen());
         if (w == "resizable") return flag(!platform::kAndroid);
         if (w == "borderless" || w == "maximized" || w == "minimized") return flag(false);

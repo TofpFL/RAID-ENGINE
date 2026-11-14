@@ -74,6 +74,7 @@ private:
     std::mutex menuMtx_;
     PcmPtr menu_;
     double menuLoop_ = 0;
+    std::string baseDir_;  // kept from scan(): menu theme lookup
 };
 
 }  // namespace gh

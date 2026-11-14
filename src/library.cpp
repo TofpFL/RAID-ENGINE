@@ -53,6 +53,7 @@ void Library::scan(const std::string& baseDir, const std::function<void(const st
     }
     const size_t firstCustom = songs_.size();
     const fs::path base = toPath(baseDir);
+    baseDir_ = baseDir;
     installReport_.clear();
     installModZips(pathStr(base / "mods"), installReport_, progress);
 
@@ -212,12 +213,19 @@ PcmPtr Library::preview(const SongEntry& e) {
 PcmPtr Library::menuMusic(double* loopSec) {
     std::lock_guard<std::mutex> lk(menuMtx_);
     if (!menu_) {
-        auto comp = compose(menuTheme(), true);
-        auto p = std::make_shared<Pcm>();
-        p->channels = 2;
-        p->data = std::move(comp->inst);
-        menu_ = p;
-        menuLoop_ = comp->loopSec;
+        // A real track ships at assets/menu/theme.mp3; the composed hymn is
+        // only the fallback when it is absent or undecodable.
+        if (PcmPtr theme = loadOrNull(baseDir_ + "/assets/menu/theme.mp3")) {
+            menu_ = theme;
+            menuLoop_ = double(theme->frames()) / Mixer::kRate;
+        } else {
+            auto comp = compose(menuTheme(), true);
+            auto p = std::make_shared<Pcm>();
+            p->channels = 2;
+            p->data = std::move(comp->inst);
+            menu_ = p;
+            menuLoop_ = comp->loopSec;
+        }
     }
     if (loopSec) *loopSec = menuLoop_;
     return menu_;
