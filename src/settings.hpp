@@ -41,6 +41,7 @@ struct Settings {
     bool renderAudio = true;
     bool extraKeys = true;     // OFF: every chart has 4 keys, like Psych and JS Engine
     int noteCounter = 1;       // HUD note counter: 0 off, 1 your side, 2 both sides
+    int vizBar = 1;            // spectrum bar during play: 0 off, 1 top, 2 bottom
     // Mod script errors and warnings on screen: 0 always, 1 only for scripts
     // that set luaDebugMode (as in Psych), 2 never.
     int luaErrors = 0;

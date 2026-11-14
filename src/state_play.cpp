@@ -129,6 +129,7 @@ void PlayState::update(double dt) {
         it = now - it->t > 8.0 ? debug_.erase(it) : it + 1;
     stage_.update(float(dt), now);
     fx_.update(float(dt));
+    viz_.update(now, float(dt));
     if (phase_ == Phase::Paused) { updatePause(); return; }
     if (phase_ == Phase::Dead) { updateDead(); return; }
     if (psych_ && updateVideos(dt)) return;  // a cutscene holds the game
@@ -1316,6 +1317,7 @@ void PlayState::drawHud() {
     const PsychUi& ui = psychUi();
     const bool look = ui.active();  // the Psych Engine interface
     const bool hide = s.hideHud;    // Psych's Hide HUD: health bar, icons, score line
+    viz_.draw();  // spectrum strip sits under everything else in the HUD
     // health bar
     const Vector2 hbs = ui.healthBarSize();
     const bool psychBar = hbs.x > 0;

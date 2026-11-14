@@ -53,6 +53,7 @@ bool Settings::load(const std::string& path) {
         else if (k == "renderAudio") renderAudio = b;
         else if (k == "extraKeys") extraKeys = b;
         else if (k == "noteCounter") noteCounter = clampv(int(d), 0, 2);
+        else if (k == "vizBar") vizBar = clampv(int(d), 0, 2);
         else if (k == "luaErrors") luaErrors = clampv(int(d), 0, 2);
         else if (k == "luaWarnings") luaWarnings = clampv(int(d), 0, 2);
         else if (k == "psychUi") psychUi = b;
@@ -90,7 +91,7 @@ bool Settings::save(const std::string& path) const {
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
       << "\nshowFps=" << showFps << "\nfpsMemory=" << fpsMemory << "\nfpsFrameTimes=" << fpsFrameTimes << "\nfpsUsage=" << fpsUsage
-      << "\nfpsHardware=" << fpsHardware << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter
+      << "\nfpsHardware=" << fpsHardware << "\nlowDetail=" << lowDetail << "\nvsync=" << vsync << "\nshaders=" << shaders << "\nextraKeys=" << extraKeys << "\nnoteCounter=" << noteCounter << "\nvizBar=" << vizBar
       << "\nnoteDetail=" << noteDetail << "\nluaNoteCallbacks=" << luaNoteCallbacks
       << "\nrenderMode=" << renderMode << "\nrenderSize=" << renderSize << "\nrenderFps=" << renderFps
       << "\nrenderEncoder=" << renderEncoder << "\nrenderBitrate=" << renderBitrate << "\nrenderAudio=" << renderAudio

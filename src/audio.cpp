@@ -286,6 +286,37 @@ static inline float softClip(float x) {
     return x < 0 ? -y : y;
 }
 
+void Mixer::tapFrames(const float* out, unsigned frames) {
+    tapSeq_.fetch_add(1, std::memory_order_acq_rel);  // odd: a batch is being written
+    uint32_t head = tapHead_.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < frames; ++i) {
+        const float l = out[i * 2], r = out[i * 2 + 1];
+        tap_[head & (kTapSize - 1)] = 0.5f * (l + r);
+        head = (head + 1) & (kTapSize - 1);
+    }
+    tapHead_.store(head, std::memory_order_relaxed);
+    uint32_t f = tapFilled_.load(std::memory_order_relaxed) + frames;
+    tapFilled_.store(f > kTapSize ? kTapSize : f, std::memory_order_relaxed);
+    tapSeq_.fetch_add(1, std::memory_order_acq_rel);  // even: batch complete
+}
+
+int Mixer::tapAudio(float* out, int n) const {
+    if (n <= 0) return 0;
+    n = std::min(n, int(kTapSize));
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const uint32_t s1 = tapSeq_.load(std::memory_order_acquire);
+        if (s1 & 1) continue;
+        const uint32_t filled = std::min<uint32_t>(tapFilled_.load(std::memory_order_relaxed), kTapSize);
+        const uint32_t head = tapHead_.load(std::memory_order_relaxed);
+        const uint32_t avail = std::min<uint32_t>(uint32_t(n), filled);
+        const uint32_t start = (head + kTapSize - avail) & (kTapSize - 1);
+        for (uint32_t i = 0; i < avail; ++i) out[i] = tap_[(start + i) & (kTapSize - 1)];
+        const uint32_t s2 = tapSeq_.load(std::memory_order_acquire);
+        if (s1 == s2) return int(avail);
+    }
+    return 0;  // kept racing the audio thread: skip this frame's spectrum
+}
+
 void Mixer::audioCallback(float* out, unsigned frames) {
     const double now = nowSec();
     auto publish = [&](double pos) {
@@ -301,11 +332,13 @@ void Mixer::audioCallback(float* out, unsigned frames) {
     const bool offline = offline_.load();
     if (offline || !playing_ || !lk.owns_lock() || platform::inBackground()) {
         std::memset(out, 0, size_t(frames) * 2 * sizeof(float));
+        tapFrames(out, frames);  // silence: the visualizer decays
         if (!offline) publish(pos_.load());
         return;
     }
     double pos = pos_.load();
     stalled_.store(mixTracks(out, frames, pos));
+    tapFrames(out, frames);
     publish(pos);
 }
 
@@ -322,6 +355,7 @@ void Mixer::mixOffline(float* out, unsigned frames) {
         if (tries >= 5000) break;  // ~5 s: something is wrong, leave the silence
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    tapFrames(out, frames);
     pos_.store(pos);
 }
 

@@ -219,6 +219,7 @@ if(GH_BUILD_GAME)
     src/states_menu.cpp
     src/states_options.cpp
     src/state_play.cpp
+    src/vizbar.cpp
     src/play_psych.cpp
     src/scene_draw.cpp
     src/video.cpp

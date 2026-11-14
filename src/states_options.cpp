@@ -91,6 +91,8 @@ public:
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
             {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
             {Row::Bool, "Hide HUD", "Hides the health bar, the icons, the score line and the ratings, as Psych's Hide HUD.", &s.hideHud},
+            {Row::Choice, "Visualizer bar", "A thin spectrum strip during play: atom icon and live audio bars. Sits under the notes and HUD.",
+             nullptr, nullptr, 0, 0, 0, &s.vizBar, {0, 1, 2}, {"Off", "Top", "Bottom"}},
             {Row::Bool, "Score text zoom on hit", "The score line grows a little on each note you hit, as in Psych.", &s.scoreZoom},
             {Row::Bool, "Botplay text", "BOTPLAY (or REPLAY) on screen while the game plays by itself.", &s.botplayText},
             {Row::Bool, "Combo stacking", "Ratings and combo numbers pile up. OFF: only the latest one, easier to read.",

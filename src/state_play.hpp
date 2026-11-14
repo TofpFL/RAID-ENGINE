@@ -22,6 +22,7 @@
 #include "scene_draw.hpp"
 #include "video.hpp"
 #include "stage.hpp"
+#include "vizbar.hpp"
 
 namespace gh {
 
@@ -259,6 +260,7 @@ private:
     int gapFrames_ = 0;
     double gapTooMuch_[6] = {};  // notes on screen with which gap 2^k was too slow
     gfx::Particles fx_;
+    VizBar viz_;  // spectrum strip (Options: Visualizer bar)
     int pauseSel_ = 0, deadSel_ = 0;
     float pauseScroll_ = 0;  // the Psych pause menu's items glide to the selection
     double pausedAt_ = 0;

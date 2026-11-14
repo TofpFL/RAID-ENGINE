@@ -68,6 +68,13 @@ public:
 
     void audioCallback(float* out, unsigned frames);  // audio thread
 
+    // Visualizer tap: the last mixed audio as mono samples (-1..1), for the
+    // gameplay spectrum bar. tapAudio() copies the newest `n` samples in
+    // chronological order (oldest first) and returns how many it wrote;
+    // safe to call from the render thread while the callback runs.
+    static constexpr int kTapSize = 8192;  // ~186 ms at 44.1 kHz
+    int tapAudio(float* out, int n) const;
+
     // Rendering mode: the device plays nothing and the game mixes the song
     // itself, one video frame at a time; the song clock is then exactly the
     // position mixed so far.
@@ -96,12 +103,19 @@ private:
     // Mixes `frames` frames from `pos` into out (pos moves on); true when a
     // streamed track has not decoded that part yet (silence, pos kept).
     bool mixTracks(float* out, unsigned frames, double& pos);
+    void tapFrames(const float* out, unsigned frames);  // audio thread: mono tap
     std::atomic<double> loopStart_{0}, loopEnd_{0};
     float curVol_[kTrackCount] = {1, 1, 1};
     float fadeGain_ = 1.0f;
     bool audioOk_ = false;
     bool paused_ = false;
     void* stream_ = nullptr;  // AudioStream*
+    // Spectrum tap ring (audio thread writes, render thread reads under a
+    // seqlock: tapSeq_ is odd while a batch is being written).
+    float tap_[kTapSize] = {};
+    std::atomic<uint32_t> tapHead_{0};   // next write slot
+    std::atomic<uint32_t> tapFilled_{0}; // valid samples, capped at kTapSize
+    std::atomic<uint32_t> tapSeq_{0};
     // fallback clock
     double fbStart_ = 0, fbStartPos_ = 0;
     // smoothing
