@@ -1,4 +1,4 @@
-// Finding songs in every mod layout (song_scan.cpp), PulseForge charts, audio
+﻿// Finding songs in every mod layout (song_scan.cpp), PulseForge charts, audio
 // lengths and assets shared between mods.
 #include <cmath>
 #include <cstdio>
@@ -481,8 +481,7 @@ std::string makeFlpNamed() {
     word(0x40, 6);
     array(0xC9, utf16("Opp0"));
     word(0x41, 1);
-    array(0xC1, utf16("both"));
-    word(0x41, 1);
+    array(0xC1, utf16("both"));  // name sits between start and notes, as FL writes it
     array(0xE0, notes({{0, 0, 72},     // Player channel, C5: outside the windows -> player lane 0
                        {96, 1, 65},    // Opp channel, F4 -> opponent lane 1
                        {192, 1, 50},   // Opp channel, D#3: a player-window pitch, still opponent lane 2
@@ -677,7 +676,7 @@ void testFlStudio() {
 
     // A project with a playlist encodes straight to .raid: patterns become
     // pattern-table definitions, clips become instances on the timeline, and
-    // overlapping clips merge into sorted literals — one contiguous chart.
+    // overlapping clips merge into sorted literals â€” one contiguous chart.
     FlpProject pp;
     SCHECK(readFlp(makeFlpPlaylist(), pp, err));
     SCHECK(pp.playlist.size() == 3 && pp.playlist[0].pattern == 1 && pp.playlist[0].startTick == 0 &&

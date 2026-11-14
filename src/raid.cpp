@@ -1,4 +1,4 @@
-// RAID Engine: .raid binary chart format — writer, streaming reader,
+﻿// RAID Engine: .raid binary chart format â€” writer, streaming reader,
 // pattern-matching encoder. See raid.hpp for the format overview.
 //
 // Op encoding inside chunk/pattern payloads (all LEB128 varints, signed
@@ -35,12 +35,12 @@
 //         u32 entryCount (1..4096), then per entry:
 //           u32 patternId, u32 repeatCount, i64 anchorUs, i64 pitchDelta,
 //           i64 laneDelta   (same meaning as op 2)
-//           i64 winLoUs, i64 winHiUs  (zigzag; absolute song microseconds —
+//           i64 winLoUs, i64 winHiUs  (zigzag; absolute song microseconds â€”
 //                              only events with timeUs in [winLoUs, winHiUs)
 //                              are emitted; INT64_MIN/INT64_MAX = unbounded)
 //         Every entry expands independently (its own repeats and window)
 //         and the results are merged by timeUs, so several pattern tables
-//         can sound at once — the playlist-overlap case. Entries' windows
+//         can sound at once â€” the playlist-overlap case. Entries' windows
 //         are absolute, so they stay correct under repeat shifts and
 //         nesting.
 //
@@ -416,7 +416,7 @@ bool emitOps(Cur& cur, const Env& env, const PatternRec* pat, const Ctx& ctx,
                 if (reps > eo.limit) { err = "pattern repeat count too large"; return false; }
                 ents.push_back({&child, reps, anchor, pd, ld, lo, hi});
             }
-            // Expand each entry independently (entries may overlap — that is
+            // Expand each entry independently (entries may overlap â€” that is
             // the point of the op), then k-way merge the sorted runs into
             // the output. No merged copy: peak memory stays one chunk's
             // worth of events, same as a literal run.
@@ -527,7 +527,7 @@ bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
     if (!cur.ok) { err = "truncated literal"; return false; }
     if (t < 0) { err = "negative event time"; return false; }
     // Group-op windows clip by absolute time; times are non-decreasing so
-    // the surviving run is contiguous — track its bounds and count.
+    // the surviving run is contiguous â€” track its bounds and count.
     uint32_t kept = 0;
     int64_t kFirst = 0, kLast = 0;
     auto note = [&](int64_t tt) {
@@ -546,7 +546,7 @@ bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
     }
     if (wo.produced + kept > wo.limit) { err = "chunk expands beyond its declared size"; return false; }
     // Property columns (length, pitch, lane, attr, type, stack): n varints
-    // each — zigzag and varint consume identically, values unneeded here.
+    // each â€” zigzag and varint consume identically, values unneeded here.
     for (int col = 0; col < 6; ++col)
         for (uint32_t k = 0; k < n; ++k) {
             (void)cur.var();
@@ -1447,7 +1447,7 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
             // The merged timeline still decides chunk windows (index time
             // ranges must not overlap), but instead of literal runs each
             // window becomes an op-3 group: every pattern table with events
-            // inside it plays at once. Patterns stay separate defs — no
+            // inside it plays at once. Patterns stay separate defs â€” no
             // merged duplicates in the file.
             size_t pos = 0;
             while (pos < merged.size()) {
@@ -1786,7 +1786,7 @@ struct Reader::Impl {
         if (!c.ok || c.p != patternBlob_.data() + n - 4) { err = "trailing pattern data"; return false; }
         // Flag patterns whose op stream nests further instances; the op-log
         // walker uses this to emit only leaf segments. A pattern whose ops
-        // fail to parse is flagged non-leaf — decoding it errors properly.
+        // fail to parse is flagged non-leaf â€” decoding it errors properly.
         patHasInst_.assign(patterns_.size(), 0);
         for (size_t i = 0; i < patterns_.size(); ++i) {
             const PatternRec& p = patterns_[i];
@@ -1851,7 +1851,7 @@ struct Reader::Impl {
 
     // Walks a chunk's op stream without materializing events, recording
     // leaf segments (literals and innermost pattern instances) via walkOps.
-    // Pattern identity only survives here — expanded events lose it.
+    // Pattern identity only survives here â€” expanded events lose it.
     bool chunkOps(const ChunkEnt& e, size_t chunkIdx, std::vector<Reader::OpSegment>& out,
                   std::string& err) {
         DecodeGuard guard(decSem_);
@@ -1870,7 +1870,7 @@ struct Reader::Impl {
         Ctx ctx{};
         WalkOut wo{&out, uint32_t(chunkIdx), 0, e.expanded, 0};
         if (!walkOps(cur, env, ctx, 0, wo, true, err)) return false;
-        // trailer: u64 expandedCount — same validation as decodeChunk.
+        // trailer: u64 expandedCount â€” same validation as decodeChunk.
         uint64_t declared = cur.u64();
         if (!cur.ok || cur.p != cur.end || declared != wo.produced ||
             wo.produced != e.expanded) {
@@ -2108,6 +2108,9 @@ bool PatternLogger::tick(int64_t horizonUs, std::string& err) {
     if (!rd_->opLog(winStartUs_, horizonUs, segs, err)) return false;
     uint32_t lastChunk = UINT32_MAX, pos = 0;
     for (const Reader::OpSegment& s : segs) {
+        // Segments are emitted in time order; the first one starting at
+        // or past the horizon means the rest of the log is still future.
+        if (s.startUs >= horizonUs) break;
         if (s.chunk != lastChunk) { lastChunk = s.chunk; pos = 0; }
         uint32_t& w = written_[s.chunk];
         ++pos;

@@ -1,4 +1,4 @@
-#include "flp_import.hpp"
+﻿#include "flp_import.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -177,6 +177,7 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
         out.ppqn = ppqn;
         i = dataStart;
         int prevId = -1;
+        int curPattern = 0;  // pattern the following events belong to
         uint32_t prevValue = 0, lastChannel = 0;
         size_t chanEvents = 0;
         bool fpcFound = false, chanCtx = false;
@@ -218,7 +219,7 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
             }
             switch (id) {
                 case kGenChannel: lastChannel = value; chanCtx = true; ++chanEvents; break;
-                case kPatStart: chanCtx = false; break;
+                case kPatStart: chanCtx = false; curPattern = int(value); break;
                 case kTempo: out.bpm = value / 1000.0; break;
                 case kOldTempo: if (out.bpm <= 0) out.bpm = value; break;
                 case 17: out.timeSigNum = int(value); break;   // time signature
@@ -266,7 +267,7 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                 }
                 break;
             }            case kNoteData: {
-                    FlpPattern& p = pattern(prevId == kPatStart ? int(prevValue) : 0);
+                    FlpPattern& p = pattern(curPattern);
                     for (size_t k = 0; k + kNoteSize <= len; k += kNoteSize) {
                         const unsigned char* r = data + k;
                         FlpNote note;

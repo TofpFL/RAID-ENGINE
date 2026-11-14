@@ -1,4 +1,4 @@
-// The duel: game flow, input, judgement events, classic visuals and the HUD.
+﻿// The duel: game flow, input, judgement events, classic visuals and the HUD.
 // Psych-mode scene and scripting live in play_psych.cpp.
 #include "state_play.hpp"
 #include "psych_ui.hpp"
@@ -466,6 +466,8 @@ void PlayState::restart() {
         session_.setTotals(chart_.playerNotes, chart_.opponentNotes);
         fedUs_ = std::numeric_limits<int64_t>::min() / 4;
         prefetchUs_ = fedUs_;
+        fedEvents_ = appendedEvents_ = 0;
+        lastFeedLogMs_ = -1e18;
         startPatternLog();  // fresh log for the replayed run
     }
     popups_.clear();
@@ -539,6 +541,7 @@ void PlayState::pumpNotes() {
             streamFailed_ = true;
             return;
         }
+        fedEvents_ += evs.size();
         for (size_t i = 0; i < evs.size(); ++i) {
             const raid::Event& e = evs[i];
             LaneNote ln;
@@ -550,10 +553,14 @@ void PlayState::pumpNotes() {
             ln.stack = std::max<uint16_t>(1, e.stack);
             ln.id = uint32_t(idx[i]);  // global expanded index (stable across rewind)
             const int side = int(e.side) ^ (streamMirror_ ? 1 : 0);
-            if (e.lane < chart_.keys) session_.appendLaneNote(side, int(e.lane), ln);
+            if (e.lane < chart_.keys) {
+                session_.appendLaneNote(side, int(e.lane), ln);
+                ++appendedEvents_;
+            }
         }
         fedUs_ = endUs;
         session_.gcBefore(songMs_);
+        feedLog(songMs_);
     }
     if (endUs >= prefetchUs_) {
         noteStream_->prefetch(endUs, endUs + int64_t(kPrefetchMs * 1000.0));
@@ -565,6 +572,53 @@ void PlayState::pumpNotes() {
             debug_.push_back({"pattern log: " + lerr, {255, 80, 80, 255}, app().now});
             patternLog_.reset();
         }
+    }
+}
+
+void PlayState::feedLog(double songMs) {
+    // Diagnostics for streamed charts: one line per 5 s of song time with
+    // feed totals, lane residency, note-state histogram, and the last frame's
+    // draw counters. Answers "are notes fed but not drawn?" without a debugger.
+    if (songMs - lastFeedLogMs_ < 5000.0) return;
+    lastFeedLogMs_ = songMs;
+    App& a = app();
+    long long laneNotes = 0, pend = 0, hit = 0, miss = 0, hold = 0, done = 0, drop = 0, mh = 0, mp = 0;
+    for (int side = 0; side < 2; ++side)
+        for (int l = 0; l < chart_.keys; ++l) {
+            const std::vector<LaneNote>& v = session_.lane(side, l);
+            laneNotes += (long long)v.size();
+            for (const LaneNote& n : v) {
+                switch (n.state) {
+                    case kPending: ++pend; break;
+                    case kHit: ++hit; break;
+                    case kMissed: ++miss; break;
+                    case kHolding: ++hold; break;
+                    case kHeldDone: ++done; break;
+                    case kDropped: ++drop; break;
+                    case kMineHit: ++mh; break;
+                    case kMinePassed: ++mp; break;
+                }
+            }
+        }
+    const std::string path = a.userDir + "raid_feed_log.txt";
+    if (FILE* f = fopen(path.c_str(), "ab")) {
+        fprintf(f, "t=%8.0fms songMs=%9.1f fed=%llu app=%llu lane=%lld | pend=%lld hit=%lld miss=%lld hold=%lld done=%lld drop=%lld mine=%lld/%lld | drawn=%d cand=%d failed=%d\n",
+                songMs, songMs_, (unsigned long long)fedEvents_, (unsigned long long)appendedEvents_,
+                laneNotes, pend, hit, miss, hold, done, drop, mh, mp,
+                drawnNotes_, candidateNotes_, streamFailed_ ? 1 : 0);
+        for (int side = 0; side < 2; ++side) {
+            const scene::Strum& st = strum(side, 0);
+            const Vector2 c = strumCenter(side, 0);
+            fprintf(f, "  side%d vis=%d alpha=%.3f x=%.0f y=%.0f c=(%.0f,%.0f) down=%d ang=%.0f scl=%.2f dir=%.0f\n",
+                    side, st.visible ? 1 : 0, st.alpha, st.x, st.y, c.x, c.y,
+                    st.downScroll ? 1 : 0, st.angle, st.scaleX, st.direction);
+        }
+        for (int side = 0; side < 2; ++side) {
+            fprintf(f, "  draw side%d n=%d y=[%d..%d] hist:", side, drawnSide_[side], drawnYMin_[side], drawnYMax_[side]);
+            for (int b = 0; b <= 32; ++b) fprintf(f, "%d", drawnYHist_[side][b] ? std::min(9, drawnYHist_[side][b]) : 0);
+            fprintf(f, "\n");
+        }
+        fclose(f);
     }
 }
 
@@ -1119,6 +1173,10 @@ void PlayState::drawLanes() {
     const double pxPerMs = 0.45 * scrollSpeed() / rate_;
     const double reach = (gfx::H * 1.5 + ns) / pxPerMs;
     drawnNotes_ = candidateNotes_ = 0;
+    drawnSide_[0] = drawnSide_[1] = 0;
+    drawnYMin_[0] = drawnYMin_[1] = 1 << 30;
+    drawnYMax_[0] = drawnYMax_[1] = -1;
+    for (int s2 = 0; s2 < 2; ++s2) std::fill(std::begin(drawnYHist_[s2]), std::end(drawnYHist_[s2]), 0);
     for (int side = 0; side < 2; ++side) {
         if (side == 0 && !s.opponentNotes) continue;  // Options: opponent notes (Psych hides their receptors and notes)
         for (int lane = 0; lane < K; ++lane) {
@@ -1214,6 +1272,13 @@ void PlayState::drawLanes() {
                     if (std::fabs(y - lastY) < minGap && n.len <= 0) continue;
                     lastY = y;
                     ++drawnNotes_;
+                    {
+                        const int b = std::clamp(int(y / float(gfx::H) * 32.0f), 0, 32);
+                        ++drawnSide_[side];
+                        drawnYMin_[side] = std::min(drawnYMin_[side], int(y));
+                        drawnYMax_[side] = std::max(drawnYMax_[side], int(y));
+                        ++drawnYHist_[side][b];
+                    }
                     const float al = (n.state == kMissed ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
                     if (al <= 0.002f) continue;
                     const Vector2 p{c.x + (nv ? nv->offsetX : 0.0f), y + (nv ? nv->offsetY : 0.0f)};

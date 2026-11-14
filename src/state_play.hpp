@@ -1,4 +1,4 @@
-// The duel. Built-in songs use the game's own stages and figures; mod songs
+﻿// The duel. Built-in songs use the game's own stages and figures; mod songs
 // that ship Psych Engine content (characters, stages, Lua scripts) run in
 // "Psych mode": a Flixel-style scene driven by the scripts, with the same
 // judgement, input and HUD underneath.
@@ -88,6 +88,7 @@ private:
     void beginCountdown();
     void handleInput();
     void pumpNotes();  // .raid charts: feed the rolling note window
+    void feedLog(double songMs);  // .raid debug: append feed/session stats every 5 s
     void handleNoteEvents();
     void processChartEvents();
     void onBeat(int b);
@@ -213,6 +214,8 @@ private:
     std::shared_ptr<raid::ChartStream> noteStream_;
     bool streamMirror_ = false, streamFailed_ = false;
     int64_t fedUs_ = 0, prefetchUs_ = 0;
+    uint64_t fedEvents_ = 0, appendedEvents_ = 0;
+    double lastFeedLogMs_ = -1e18;
     // Pattern-log modifier (.raid only): appends op-stream segments to
     // <userDir>/raid_pattern_log.txt as the playhead advances.
     std::unique_ptr<raid::PatternLogger> patternLog_;
@@ -248,6 +251,10 @@ private:
     bool uiFromMod_ = false;  // the Psych interface took pieces from this song's mod
     void stopRendering();
     int drawnNotes_ = 0, candidateNotes_ = 0;  // last frame: notes drawn / that 1 px would draw
+    // Per-side y-distribution of drawn notes (feedLog diagnostics): where on
+    // screen the notes actually land, to tell "drawn offscreen" from "wall".
+    int drawnSide_[2] = {}, drawnYMin_[2] = {1 << 30, 1 << 30}, drawnYMax_[2] = {-1, -1};
+    int drawnYHist_[2][33] = {};
     double drawnSum_ = 0, candidateSum_ = 0, gapTime_ = 0;
     int gapFrames_ = 0;
     double gapTooMuch_[6] = {};  // notes on screen with which gap 2^k was too slow
