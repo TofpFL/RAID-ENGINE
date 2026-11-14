@@ -707,7 +707,9 @@ void testFlStudio() {
     SCHECK(rd.opLog(0, 3000000, segs, err));
     int kinds = 0;
     for (const auto& s : segs) kinds += s.kind == 2 ? 1 : 0;
-    SCHECK(kinds == 1);  // only the isolated pat2 clip stayed a pattern instance
+    // pat1+pat3 overlap -> one group op with two pattern entries; pat2 is
+    // an isolated instance. All three log as pattern segments.
+    SCHECK(kinds == 3);
     rd.close();
     fs::remove(raidPath);
 
@@ -734,14 +736,22 @@ int printFlp(int argc, char** argv, int first) {
         }
         std::printf("%s: ppqn %d, bpm %.3f, sig %d/%d, title '%s', chart channel %d, %zu patterns\n", argv[i], p.ppqn,
                     p.bpm, p.timeSigNum, p.timeSigDen, p.title.c_str(), p.chartChannel, p.patterns.size());
-        if (!p.playlist.empty()) {
-            std::printf("  playlist: %zu clips\n", p.playlist.size());
+        if (!p.playlist.empty() || p.playlistBlobs) {
+            std::printf("  playlist: %zu clips (%d blobs, %zu bytes, %d skipped)\n", p.playlist.size(),
+                        p.playlistBlobs, p.playlistBytes, p.playlistSkipped);
             for (size_t i = 0; i < p.playlist.size() && i < 40; ++i)
                 std::printf("    clip %zu: pat %d track %d @ %.2f s len %.2f s\n", i,
                             p.playlist[i].pattern, p.playlist[i].track,
                             p.playlist[i].startTick / double(p.ppqn) * 60.0 / p.bpm,
                             p.playlist[i].lengthTicks / double(p.ppqn) * 60.0 / p.bpm);
             if (p.playlist.size() > 40) std::printf("    ...\n");
+            if (!p.playlistRejected.empty()) {
+                std::map<int, int> hist;
+                for (const auto& r : p.playlistRejected) ++hist[r.pattern];
+                std::printf("    rejected pattern histogram:");
+                for (const auto& [pat, n] : hist) std::printf(" %d x%d", pat, n);
+                std::printf("\n");
+            }
         }
         for (const FlpPattern& pat : p.patterns) {
             size_t chart = 0, onChannel = 0;
@@ -751,6 +761,23 @@ int printFlp(int argc, char** argv, int first) {
             }
             std::printf("  pattern %d '%s': %zu notes, %zu on the chart channel, %zu in the chart lanes\n", pat.number,
                         pat.name.c_str(), pat.notes.size(), onChannel, chart);
+            {
+                std::map<uint16_t, size_t> byCh;
+                for (const FlpNote& n : pat.notes) ++byCh[n.channel];
+                std::printf("    channels:");
+                for (const auto& [ch, cnt] : byCh) {
+                    std::printf(" %u=%zu", ch, cnt);
+                    auto cn = p.channelNames.find(ch);
+                    if (cn != p.channelNames.end()) {
+                        for (const std::string& nm : cn->second) {
+                            std::printf(" [");
+                            for (unsigned char c : nm) std::printf("%02x", c);
+                            std::printf("]");
+                        }
+                    }
+                }
+                std::printf("\n");
+            }
         }
         Chart c;
         if (flpToChart(p, -1, c, err)) std::printf("  chart: %zu notes, %.1f s\n", c.notes.size(), c.lengthMs / 1000.0);

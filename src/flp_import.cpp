@@ -237,6 +237,8 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                 // Records are 60 bytes in FL 21+ files, 32 before; a blob
                 // divisible by 60 uses the new size (PyFLP's rule).
                 const size_t rec = len % 60 == 0 && len >= 60 ? 60 : 32;
+                ++out.playlistBlobs;
+                out.playlistBytes += len;
                 for (size_t k = 0; k + rec <= len; k += rec) {
                     const unsigned char* r = data + k;
                     const int32_t pos = int32_t(rd32(r));
@@ -245,7 +247,16 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                     const int32_t clipLen = int32_t(rd32(r + 8));
                     const int32_t trackRvidx = int16_t(rd16(r + 12));
                     const int pattern = itemIdx - patBase;
-                    if (pattern <= 0 || pos < 0 || clipLen <= 0) continue;  // channel/audio clips
+                    if (pattern <= 0 || pos < 0 || clipLen <= 0) {  // channel/audio clips
+                        ++out.playlistSkipped;
+                        FlpPlaylistItem bad;
+                        bad.pattern = pattern;
+                        bad.track = trackRvidx > 0 ? 500 - trackRvidx : 0;
+                        bad.startTick = pos >= 0 ? uint32_t(pos) : 0;
+                        bad.lengthTicks = clipLen > 0 ? uint32_t(clipLen) : 0;
+                        out.playlistRejected.push_back(bad);
+                        continue;
+                    }
                     FlpPlaylistItem it;
                     it.pattern = pattern;
                     it.track = trackRvidx > 0 ? 500 - trackRvidx : 0;

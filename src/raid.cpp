@@ -31,6 +31,19 @@
 //         The child pattern repeats repeatCount times, each copy shifted by
 //         the child pattern's spanUs.
 //
+//   op 3  pattern group ("play these tables together"):
+//         u32 entryCount (1..4096), then per entry:
+//           u32 patternId, u32 repeatCount, i64 anchorUs, i64 pitchDelta,
+//           i64 laneDelta   (same meaning as op 2)
+//           i64 winLoUs, i64 winHiUs  (zigzag; absolute song microseconds —
+//                              only events with timeUs in [winLoUs, winHiUs)
+//                              are emitted; INT64_MIN/INT64_MAX = unbounded)
+//         Every entry expands independently (its own repeats and window)
+//         and the results are merged by timeUs, so several pattern tables
+//         can sound at once — the playlist-overlap case. Entries' windows
+//         are absolute, so they stay correct under repeat shifts and
+//         nesting.
+//
 // Pattern section payload: u32 count, then per pattern
 // {u64 spanUs, u8 flags (bit0 hasPitch), u32 opsLen, ops[opsLen]} where ops
 // is a u32 opCount followed by ops, then u32 crc32 of the preceding bytes.
@@ -147,6 +160,7 @@ uint32_t getU32(const unsigned char* p) {
 constexpr uint8_t kOpLiteralAbs = 0;
 constexpr uint8_t kOpLiteralRel = 1;
 constexpr uint8_t kOpPattern = 2;
+constexpr uint8_t kOpGroup = 3;
 constexpr int kMaxDepth = 8;
 // kMaxChunkExpand lives in raid.hpp so the encoder can enforce it too.
 
@@ -195,8 +209,31 @@ void writeInst(Buf& b, uint32_t patternId, uint32_t repeatCount, int64_t anchorU
     b.zig(laneDelta);
 }
 
+struct GroupEntry {
+    uint32_t patternId = 0, repeatCount = 1;
+    int64_t anchorUs = 0, pitchDelta = 0, laneDelta = 0;
+    int64_t winLoUs = INT64_MIN, winHiUs = INT64_MAX;
+};
+
+void writeGroupOp(Buf& b, const GroupEntry* e, size_t n) {
+    b.u8(kOpGroup);
+    b.u32(uint32_t(n));
+    for (size_t i = 0; i < n; ++i) {
+        b.u32(e[i].patternId);
+        b.u32(e[i].repeatCount);
+        b.zig(e[i].anchorUs);
+        b.zig(e[i].pitchDelta);
+        b.zig(e[i].laneDelta);
+        b.zig(e[i].winLoUs);
+        b.zig(e[i].winHiUs);
+    }
+}
+
 struct Ctx {
     int64_t timeBase = 0, pitchBase = 0, laneBase = 0;
+    // Absolute-time clip for group-op entries: literal events outside
+    // [clipLo, clipHi) are dropped during expansion.
+    int64_t clipLo = INT64_MIN, clipHi = INT64_MAX;
 };
 
 struct Env {
@@ -233,7 +270,6 @@ bool emitLiteral(Cur& cur, bool relative, const PatternRec* pat, const Ctx& ctx,
                  EmitOut& eo, std::string& err) {
     uint32_t n = uint32_t(cur.u32());
     if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
-    if (eo.produced + n > eo.limit) { err = "chunk expands beyond its declared size"; return false; }
     std::vector<Event> tmp((size_t)n);  // extra parens: not a function decl
     // time column
     int64_t t = relative ? ctx.timeBase : 0;
@@ -253,6 +289,12 @@ bool emitLiteral(Cur& cur, bool relative, const PatternRec* pat, const Ctx& ctx,
         if (!addTime(t, d, err)) return false;
         tmp[k].timeUs = t;
     }
+    // Group-op windows clip by absolute time; count what survives before
+    // spending work on the property columns.
+    size_t kept = 0;
+    for (uint32_t k = 0; k < n; ++k)
+        kept += tmp[k].timeUs >= ctx.clipLo && tmp[k].timeUs < ctx.clipHi;
+    if (eo.produced + kept > eo.limit) { err = "chunk expands beyond its declared size"; return false; }
     // length column
     for (uint32_t k = 0; k < n; ++k) {
         uint64_t v = cur.var();
@@ -294,8 +336,11 @@ bool emitLiteral(Cur& cur, bool relative, const PatternRec* pat, const Ctx& ctx,
         tmp[k].stack = uint16_t(v);
         if (tmp[k].stack == 0) tmp[k].stack = 1;
     }
-    eo.out->insert(eo.out->end(), tmp.begin(), tmp.end());
-    eo.produced += n;
+    for (uint32_t k = 0; k < n; ++k) {
+        if (tmp[k].timeUs < ctx.clipLo || tmp[k].timeUs >= ctx.clipHi) continue;
+        eo.out->push_back(tmp[k]);
+    }
+    eo.produced += kept;
     return true;
 }
 
@@ -334,10 +379,77 @@ bool emitOps(Cur& cur, const Env& env, const PatternRec* pat, const Ctx& ctx,
             if (reps > eo.limit) { err = "pattern repeat count too large"; return false; }
             for (uint32_t r = 0; r < reps; ++r) {
                 Ctx sub{ctx.timeBase + anchor + int64_t(r) * int64_t(child.spanUs),
-                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta};
+                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta,
+                        ctx.clipLo, ctx.clipHi};
                 Cur cc{env.blob->data() + child.off, env.blob->data() + child.off + child.len};
                 if (!emitOps(cc, env, &child, sub, depth + 1, eo, err)) return false;
             }
+        } else if (kind == kOpGroup) {
+            uint32_t nEnt = uint32_t(cur.u32());
+            if (!cur.ok || nEnt == 0 || nEnt > 4096) { err = "bad group count"; return false; }
+            struct GEnt {
+                const PatternRec* child;
+                uint32_t reps;
+                int64_t anchor, pd, ld, lo, hi;
+            };
+            std::vector<GEnt> ents;
+            ents.reserve(nEnt);
+            for (uint32_t i = 0; i < nEnt; ++i) {
+                const uint32_t pid = uint32_t(cur.u32());
+                const uint32_t reps = uint32_t(cur.u32());
+                const int64_t anchor = cur.zig(), pd = cur.zig(), ld = cur.zig();
+                const int64_t lo = cur.zig(), hi = cur.zig();
+                if (!cur.ok) { err = "truncated group op"; return false; }
+                if (!env.pats || pid >= env.pats->size()) { err = "bad pattern id"; return false; }
+                const PatternRec& child = (*env.pats)[pid];
+                if (child.len < 4 || child.off > env.blob->size() ||
+                    child.len > env.blob->size() - child.off ||
+                    child.spanUs > (1ull << 50) ||
+                    (child.spanUs && uint64_t(reps) > (1ull << 50) / child.spanUs) ||
+                    anchor < -(int64_t(1) << 50) || anchor > (int64_t(1) << 50) ||
+                    pd < -kFieldBound || pd > kFieldBound ||
+                    ld < -kFieldBound || ld > kFieldBound ||
+                    lo > hi) {
+                    err = "pattern transform out of range";
+                    return false;
+                }
+                if (reps > eo.limit) { err = "pattern repeat count too large"; return false; }
+                ents.push_back({&child, reps, anchor, pd, ld, lo, hi});
+            }
+            // Expand each entry independently (entries may overlap — that is
+            // the point of the op), then k-way merge the sorted runs into
+            // the output. No merged copy: peak memory stays one chunk's
+            // worth of events, same as a literal run.
+            const uint64_t budget = eo.limit - eo.produced;
+            std::vector<std::vector<Event>> parts(ents.size());
+            uint64_t total = 0;
+            for (size_t i = 0; i < ents.size(); ++i) {
+                const GEnt& ge = ents[i];
+                EmitOut sub{&parts[i], 0, budget};
+                for (uint32_t r = 0; r < ge.reps; ++r) {
+                    Ctx sctx{ctx.timeBase + ge.anchor + int64_t(r) * int64_t(ge.child->spanUs),
+                             ctx.pitchBase + ge.pd, ctx.laneBase + ge.ld, ge.lo, ge.hi};
+                    Cur cc{env.blob->data() + ge.child->off,
+                           env.blob->data() + ge.child->off + ge.child->len};
+                    if (!emitOps(cc, env, ge.child, sctx, depth + 1, sub, err)) return false;
+                }
+                total += sub.produced;
+                if (total > budget) { err = "chunk expands beyond its declared size"; return false; }
+            }
+            std::vector<size_t> pos(parts.size(), 0);
+            for (uint64_t k = 0; k < total; ++k) {
+                size_t best = parts.size();
+                int64_t bt = 0;
+                for (size_t i = 0; i < parts.size(); ++i) {
+                    if (pos[i] < parts[i].size() &&
+                        (best == parts.size() || parts[i][pos[i]].timeUs < bt)) {
+                        best = i;
+                        bt = parts[i][pos[i]].timeUs;
+                    }
+                }
+                eo.out->push_back(parts[best][pos[best]++]);
+            }
+            eo.produced += total;
         } else {
             err = "unknown op kind";
             return false;
@@ -383,7 +495,7 @@ bool opsContainInst(Cur& cur, bool& found, std::string& err) {
             uint32_t n = uint32_t(cur.u32());
             if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
             if (!skipLiteralBody(cur, n, err)) return false;
-        } else if (kind == kOpPattern) {
+        } else if (kind == kOpPattern || kind == kOpGroup) {
             found = true;
             return true;
         } else {
@@ -406,7 +518,6 @@ bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
                  bool emit, std::string& err) {
     uint32_t n = uint32_t(cur.u32());
     if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
-    if (wo.produced + n > wo.limit) { err = "chunk expands beyond its declared size"; return false; }
     int64_t t = relative ? ctx.timeBase : 0;
     if (relative) {
         if (!addTime(t, cur.var(), err)) return false;
@@ -415,12 +526,25 @@ bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
     }
     if (!cur.ok) { err = "truncated literal"; return false; }
     if (t < 0) { err = "negative event time"; return false; }
-    const int64_t t0 = t;
+    // Group-op windows clip by absolute time; times are non-decreasing so
+    // the surviving run is contiguous — track its bounds and count.
+    uint32_t kept = 0;
+    int64_t kFirst = 0, kLast = 0;
+    auto note = [&](int64_t tt) {
+        if (tt >= ctx.clipLo && tt < ctx.clipHi) {
+            if (kept == 0) kFirst = tt;
+            kLast = tt;
+            ++kept;
+        }
+    };
+    note(t);
     for (uint32_t k = 1; k < n; ++k) {
         uint64_t d = cur.var();
         if (!cur.ok) { err = "truncated literal"; return false; }
         if (!addTime(t, d, err)) return false;
+        note(t);
     }
+    if (wo.produced + kept > wo.limit) { err = "chunk expands beyond its declared size"; return false; }
     // Property columns (length, pitch, lane, attr, type, stack): n varints
     // each — zigzag and varint consume identically, values unneeded here.
     for (int col = 0; col < 6; ++col)
@@ -428,13 +552,13 @@ bool walkLiteral(Cur& cur, bool relative, const Ctx& ctx, WalkOut& wo,
             (void)cur.var();
             if (!cur.ok) { err = "truncated literal"; return false; }
         }
-    if (emit) {
+    if (emit && kept) {
         Reader::OpSegment s;
-        s.startUs = t0; s.endUs = t; s.chunk = wo.chunk;
-        s.kind = 0; s.count = n;
+        s.startUs = kFirst; s.endUs = kLast; s.chunk = wo.chunk;
+        s.kind = 0; s.count = kept;
         wo.segs->push_back(s);
     }
-    wo.produced += n;
+    wo.produced += kept;
     return true;
 }
 
@@ -494,10 +618,59 @@ bool walkOps(Cur& cur, const Env& env, const Ctx& ctx, int depth,
             const bool childEmit = emit && !leaf;
             for (uint32_t r = 0; r < reps; ++r) {
                 Ctx sub{ctx.timeBase + anchor + int64_t(r) * int64_t(child.spanUs),
-                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta};
+                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta,
+                        ctx.clipLo, ctx.clipHi};
                 Cur cc{env.blob->data() + child.off,
                        env.blob->data() + child.off + child.len};
                 if (!walkOps(cc, env, sub, depth + 1, wo, childEmit, err)) return false;
+            }
+        } else if (kind == kOpGroup) {
+            uint32_t nEnt = uint32_t(cur.u32());
+            if (!cur.ok || nEnt == 0 || nEnt > 4096) { err = "bad group count"; return false; }
+            for (uint32_t i = 0; i < nEnt; ++i) {
+                const uint32_t pid = uint32_t(cur.u32());
+                const uint32_t reps = uint32_t(cur.u32());
+                const int64_t anchor = cur.zig(), pd = cur.zig(), ld = cur.zig();
+                const int64_t lo = cur.zig(), hi = cur.zig();
+                if (!cur.ok) { err = "truncated group op"; return false; }
+                if (!env.pats || pid >= env.pats->size()) { err = "bad pattern id"; return false; }
+                const PatternRec& child = (*env.pats)[pid];
+                if (child.len < 4 || child.off > env.blob->size() ||
+                    child.len > env.blob->size() - child.off ||
+                    child.spanUs > (1ull << 50) ||
+                    (child.spanUs && uint64_t(reps) > (1ull << 50) / child.spanUs) ||
+                    anchor < -(int64_t(1) << 50) || anchor > (int64_t(1) << 50) ||
+                    pd < -kFieldBound || pd > kFieldBound ||
+                    ld < -kFieldBound || ld > kFieldBound ||
+                    lo > hi) {
+                    err = "pattern transform out of range";
+                    return false;
+                }
+                if (reps > wo.limit) { err = "pattern repeat count too large"; return false; }
+                const bool leaf = !env.hasInst || pid >= env.hasInst->size() ||
+                                  (*env.hasInst)[pid] == 0;
+                if (leaf && emit) {
+                    const int64_t startUs = ctx.timeBase + anchor;
+                    int64_t endUs = startUs + int64_t(reps) * int64_t(child.spanUs);
+                    if (endUs < startUs) endUs = INT64_MAX;
+                    // Clip the logged span to the entry's event window.
+                    Reader::OpSegment s;
+                    s.startUs = std::max(startUs, lo);
+                    s.endUs = std::min(endUs, hi);
+                    if (s.endUs < s.startUs) { s.startUs = s.endUs = startUs; }
+                    s.chunk = wo.chunk;
+                    s.kind = 2; s.count = pid; s.aux = reps;
+                    s.pitchDelta = int32_t(pd); s.laneDelta = int32_t(ld);
+                    wo.segs->push_back(s);
+                }
+                const bool childEmit = emit && !leaf;
+                for (uint32_t r = 0; r < reps; ++r) {
+                    Ctx sub{ctx.timeBase + anchor + int64_t(r) * int64_t(child.spanUs),
+                            ctx.pitchBase + pd, ctx.laneBase + ld, lo, hi};
+                    Cur cc{env.blob->data() + child.off,
+                           env.blob->data() + child.off + child.len};
+                    if (!walkOps(cc, env, sub, depth + 1, wo, childEmit, err)) return false;
+                }
             }
         } else {
             err = "unknown op kind";
@@ -1112,6 +1285,8 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         int32_t originLane = 0;  // lane of the first event (instance lane origin)
         uint32_t count = 0;      // expanded events per instance
         uint64_t sideP = 0, sideO = 0;
+        const std::vector<Event>* src = nullptr;  // pattern events this block covers
+        size_t srcBegin = 0, srcEnd = 0;          // index range inside *src
     };
     std::vector<Def> defs;
     std::map<std::pair<int, uint64_t>, std::vector<uint32_t>> winDefs;
@@ -1133,6 +1308,9 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
             const size_t e = std::min(s + size_t(kFlpBlockEvents), n);
             Def d;
             d.count = uint32_t(e - s);
+            d.src = ev;
+            d.srcBegin = s;
+            d.srcEnd = e;
             d.originUs = ev->at(s).timeUs;
             d.originLane = ev->at(s).lane;
             d.spanUs = uint64_t(ev->at(e - 1).timeUs - ev->at(s).timeUs);
@@ -1266,17 +1444,60 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
             }
             std::stable_sort(merged.begin(), merged.end(),
                              [](const Event& a, const Event& b) { return a.timeUs < b.timeUs; });
+            // The merged timeline still decides chunk windows (index time
+            // ranges must not overlap), but instead of literal runs each
+            // window becomes an op-3 group: every pattern table with events
+            // inside it plays at once. Patterns stay separate defs — no
+            // merged duplicates in the file.
             size_t pos = 0;
             while (pos < merged.size()) {
                 ChunkOut& ch = chunks.back();
                 const size_t room = opt.chunkEvents - std::min<uint64_t>(ch.expanded, opt.chunkEvents);
                 if (room == 0) { sealChunk(); continue; }
-                const size_t take = std::min(room, merged.size() - pos);
+                size_t take = std::min(room, merged.size() - pos);
+                // A time window cannot split events sharing one timestamp:
+                // grow the take to cover the whole same-time run.
+                while (pos + take < merged.size() &&
+                       merged[pos + take].timeUs == merged[pos + take - 1].timeUs)
+                    ++take;
+                const int64_t winLo = merged[pos].timeUs;
+                const int64_t winHi = pos + take < merged.size()
+                                          ? merged[pos + take].timeUs
+                                          : INT64_MAX;
+                // Every def with at least one event in [winLo, winHi).
+                std::vector<GroupEntry> ents;
+                for (size_t x = g; x < h; ++x) {
+                    const size_t ai = active[x];
+                    const Clip& c = clips[ai];
+                    for (uint32_t id : *clipIds[ai]) {
+                        const Def& d = defs[id];
+                        const int64_t loLocal = winLo - c.startUs;
+                        const int64_t hiLocal = winHi - c.startUs;
+                        const std::vector<Event>& ev = *d.src;
+                        const auto lb = std::lower_bound(
+                            ev.begin() + std::ptrdiff_t(d.srcBegin),
+                            ev.begin() + std::ptrdiff_t(d.srcEnd), loLocal,
+                            [](const Event& e, int64_t t) { return e.timeUs < t; });
+                        const auto ub = std::lower_bound(
+                            ev.begin() + std::ptrdiff_t(d.srcBegin),
+                            ev.begin() + std::ptrdiff_t(d.srcEnd), hiLocal,
+                            [](const Event& e, int64_t t) { return e.timeUs < t; });
+                        if (lb == ub) continue;
+                        GroupEntry ge;
+                        ge.patternId = id;
+                        ge.anchorUs = c.startUs + d.originUs;
+                        ge.laneDelta = d.originLane;
+                        ge.winLoUs = winLo;
+                        ge.winHiUs = winHi;
+                        ents.push_back(ge);
+                    }
+                }
+                if (ents.empty()) { pos += take; continue; }  // cannot happen
                 if (ch.opCount == 0) {
                     ch.firstEvent = expandedTotal;
-                    ch.firstTimeUs = merged[pos].timeUs;
+                    ch.firstTimeUs = winLo;
                 }
-                writeLiteralAbs(ch.payload, merged.data(), take, pos);
+                writeGroupOp(ch.payload, ents.data(), ents.size());
                 ch.opCount++;
                 ch.expanded += uint32_t(take);
                 ch.lastTimeUs = merged[pos + take - 1].timeUs;

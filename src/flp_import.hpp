@@ -56,6 +56,10 @@ struct FlpProject {
     // side channels chart every key by channel, Cam Events feeds markers.
     std::map<uint32_t, std::vector<std::string>> channelNames;
     std::vector<FlpPlaylistItem> playlist;  // arrangement clips, in file order
+    int playlistBlobs = 0;      // 0xE9 events seen
+    size_t playlistBytes = 0;   // total playlist payload bytes
+    int playlistSkipped = 0;    // records that were not pattern clips
+    std::vector<FlpPlaylistItem> playlistRejected;  // skipped records, for diagnostics
     std::vector<FlpPattern> patterns;
 };
 

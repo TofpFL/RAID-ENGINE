@@ -9,6 +9,7 @@
 //                                                    pattern plays when
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -175,6 +176,55 @@ static int patterns(const std::string& path, const char* a, const char* b) {
     return 0;
 }
 
+// Replays the game's feed loop: 60 fps song clock, 4 s pump window,
+// 16 s async prefetch, per-10 s event buckets. Catches stream failures
+// and dropped lanes that `verify` (one sequential decode) cannot see.
+static int streamtest(const std::string& path) {
+    raid::ChartStream cs;
+    Chart meta;
+    std::string err;
+    if (!cs.open(path, meta, err)) {
+        std::printf("open failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::printf("%s: %.0f ms, keys %d, P%llu O%llu notes\n", path.c_str(), meta.lengthMs,
+                meta.keys, (unsigned long long)meta.playerNotes,
+                (unsigned long long)meta.opponentNotes);
+    int64_t fedUs = std::numeric_limits<int64_t>::min() / 4, prefetchUs = fedUs;
+    double songMs = -300.0;
+    const double stepMs = 1000.0 / 60.0;
+    uint64_t total = 0, badLane = 0;
+    std::vector<uint64_t> bucket(48, 0);
+    while (songMs < meta.lengthMs + 5000.0) {
+        songMs += stepMs;
+        const int64_t endUs = int64_t(std::max(0.0, songMs + 4000.0) * 1000.0);
+        if (endUs > fedUs) {
+            std::vector<raid::Event> evs;
+            std::vector<uint64_t> idx;
+            if (!cs.pump(fedUs, endUs, evs, idx, err)) {
+                std::printf("PUMP FAIL @ %.0f ms: %s\n", songMs, err.c_str());
+                return 1;
+            }
+            for (const raid::Event& e : evs) {
+                ++total;
+                if (e.lane >= meta.keys) ++badLane;
+                const size_t b = std::min<size_t>(47, size_t(std::max<int64_t>(0, e.timeUs / 10000000)));
+                ++bucket[b];
+            }
+            fedUs = endUs;
+        }
+        if (endUs >= prefetchUs) {
+            cs.prefetch(endUs, endUs + int64_t(16000.0 * 1000.0));
+            prefetchUs = endUs + int64_t(8000.0 * 1000.0);
+        }
+    }
+    cs.close();
+    std::printf("fed %llu events (%llu out-of-range lanes)\n",
+                (unsigned long long)total, (unsigned long long)badLane);
+    for (size_t i = 0; i < bucket.size(); ++i)
+        if (bucket[i]) std::printf("  %4zu0-%4zus: %llu\n", i, i, (unsigned long long)bucket[i]);
+    return 0;
+}
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 3) {
@@ -184,7 +234,8 @@ int main(int argc, char** argv) {
                     "  raid_engine verify <file.raid>\n"
                     "  raid_engine window <file.raid> <startMs> <endMs>\n"
                     "  raid_engine meta <file.raid>\n"
-                    "  raid_engine patterns <file.raid> [startMs] [endMs]\n");
+                    "  raid_engine patterns <file.raid> [startMs] [endMs]\n"
+                    "  raid_engine streamtest <file.raid>\n");
         return argc < 2 ? 2 : 1;
     }
     const std::string cmd = argv[1];
@@ -193,6 +244,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify" && argc >= 3) return verify(argv[2]);
     if (cmd == "window" && argc >= 5) return window(argv[2], argv[3], argv[4]);
     if (cmd == "meta" && argc >= 3) return meta(argv[2]);
+    if (cmd == "streamtest" && argc >= 3) return streamtest(argv[2]);
     if (cmd == "patterns" && argc >= 3)
         return patterns(argv[2], argc >= 4 ? argv[3] : nullptr,
                         argc >= 5 ? argv[4] : nullptr);
