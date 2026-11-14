@@ -68,10 +68,10 @@ std::vector<int> flpChartPatterns(const FlpProject& p, bool strict = true);
 // A pattern's name for a difficulty list ("Hard", or "Pattern 3").
 std::string flpPatternLabel(const FlpProject& p, int number);
 
-// A 4/x time signature retitles the beat: 4/16 makes it a 16th note so
-// the quarter-note tempo reads 4x fast, 4/8 makes it an 8th note (2x).
-// Charts keep quarter-note timing, so a 4/x project scales its tempo by
-// den/4 (4/4 -> 1, 4/8 -> 2, 4/16 -> 4); other meters scale by 1.
+// The signature's denominator names the beat: x/16 makes it a 16th note
+// so the quarter-note tempo reads 4x fast, x/8 an 8th (2x), x/4 a
+// quarter (1x). Charts keep quarter-note timing, so the tempo scales by
+// den/4 (4/4 -> 1, 4/8 -> 2, 4/16 -> 4, 16/16 -> 4).
 double flpBpmScale(const FlpProject& p);
 
 // SNIFF's conversion of one pattern (-1: the first with chart notes). The

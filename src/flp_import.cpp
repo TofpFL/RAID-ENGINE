@@ -326,9 +326,10 @@ std::string flpPatternLabel(const FlpProject& p, int number) {
 }
 
 double flpBpmScale(const FlpProject& p) {
-    // Only 4/x signatures retitle the beat (4/16 -> x4, 4/8 -> x2); other
-    // meters like 16/16 or 3/4 keep quarter-note timing.
-    return p.timeSigNum == 4 && p.timeSigDen > 0 ? p.timeSigDen / 4.0 : 1.0;
+    // The signature's denominator names the beat: x/16 -> a 16th-note beat
+    // (tempo x4), x/8 -> an 8th (x2), x/4 -> a quarter (x1). The numerator
+    // only counts beats per bar, so it does not enter the scale.
+    return p.timeSigDen > 0 ? p.timeSigDen / 4.0 : 1.0;
 }
 
 bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, double bpmIn) {
