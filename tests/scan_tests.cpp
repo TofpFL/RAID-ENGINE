@@ -395,19 +395,21 @@ std::string makeFlp() {
     array(0xC9, utf16("FPC"));
     word(0x40, 1);
     array(0xC9, utf16("3x Osc"));
+    word(0x40, 2);
+    array(0xC9, utf16("Cam Events"));
     byte(0x1C, 3);
     word(0x41, 1);
     array(0xC1, utf16("hard"));
     word(0x41, 2);
     array(0xC1, utf16("easy"));
     word(0x41, 1);
-    array(0xE0, notes({{0, 0, 24, 54, 100},     // camera on the opponent
+    array(0xE0, notes({{0, 2, 24, 54, 100},     // Cam Events: camera on the opponent
                        {0, 0, 24, 60, 100},     // opponent left
                        {96, 0, 24, 61, 100},    // opponent down, one beat in
-                       {384, 0, 24, 53, 100},   // section 1: camera on the player
+                       {384, 2, 24, 53, 100},   // Cam Events: section 1 camera on the player
                        {384, 0, 96, 48, 100},   // player left, held a beat
                        {480, 0, 48, 51, 50},    // player right, soft: a hold
-                       {768, 0, 24, 58, 100},   // section 2: the player's alt animation
+                       {768, 2, 24, 58, 100},   // Cam Events: section 2 player alt animation
                        {768, 0, 24, 49, 100},   // player down
                        {100, 1, 24, 60, 100}}));  // another channel: not the chart
     word(0x41, 2);
@@ -575,17 +577,17 @@ void testFlStudio() {
     SCHECK(readFlp(makeFlp(), p, err));
     SCHECK(p.ppqn == 96 && std::fabs(p.bpm - 150) < 1e-9 && p.title == "Forge Test" && p.chartChannel == 0);
     SCHECK(p.patterns.size() == 3 && p.patterns[0].name == "hard" && p.patterns[1].name == "easy");
-    SCHECK(flpChartPatterns(p, true) == std::vector<int>({1, 2}));         // the melody is no chart
+    SCHECK(flpChartPatterns(p, true) == std::vector<int>({1, 2, 3}));       // every key charts now
     SCHECK(flpChartPatterns(p, false) == std::vector<int>({1, 2, 3}));
     SCHECK(flpPatternLabel(p, 1) == "Hard" && flpPatternLabel(p, 3) == "Pattern 3");
 
     Chart c;
     SCHECK(flpToChart(p, 1, c, err));
-    SCHECK(c.keys == 4 && c.notes.size() == 5 && c.playerNotes == 3 && c.opponentNotes == 2);
+    SCHECK(c.keys == 4 && c.notes.size() == 5 && c.playerNotes == 5 && c.opponentNotes == 0);  // pattern 1 votes player
     if (c.notes.size() == 5) {
         // 96 ticks per beat at 150 BPM: 400 ms a beat.
-        SCHECK(c.notes[0].side == 0 && c.notes[0].lane == 0 && std::fabs(c.notes[0].time) < 1e-6 && c.notes[0].length == 0);
-        SCHECK(c.notes[1].side == 0 && c.notes[1].lane == 1 && std::fabs(c.notes[1].time - 400) < 1e-6);
+        SCHECK(c.notes[0].side == 1 && c.notes[0].lane == 0 && std::fabs(c.notes[0].time) < 1e-6 && c.notes[0].length == 0);
+        SCHECK(c.notes[1].side == 1 && c.notes[1].lane == 1 && std::fabs(c.notes[1].time - 400) < 1e-6);
         SCHECK(c.notes[2].side == 1 && c.notes[2].lane == 0 && std::fabs(c.notes[2].time - 1600) < 1e-6 &&
                std::fabs(c.notes[2].length - 300) < 1e-6);  // (96 - 24) ticks
         SCHECK(c.notes[3].side == 1 && c.notes[3].lane == 3 && std::fabs(c.notes[3].length - 100) < 1e-6);  // soft: (48 - 24) ticks
@@ -626,7 +628,7 @@ void testFlStudio() {
     SongScan s;
     scanModsDir(str(base / "mods"), s);
     const SongEntry* e = byTitle(s, "Forge Test");
-    SCHECK(e && e->diffs.size() == 2 && e->diffs[0] == "Easy (FL Studio)" && e->diffs[1] == "Hard (FL Studio)");
+    SCHECK(e && e->diffs.size() == 3 && e->diffs[0] == "Easy (FL Studio)" && e->diffs[1] == "Hard (FL Studio)" && e->diffs[2] == "Pattern 3 (FL Studio)");
     fs::remove_all(base);
 
     // A project with a playlist encodes straight to .raid: patterns become
@@ -652,9 +654,9 @@ void testFlStudio() {
         SCHECK(evs[0].timeUs == 0 && evs[0].lane == 0 && evs[0].side == 0);
         SCHECK(evs[1].timeUs == T96 && evs[1].lane == 1 && evs[1].side == 0);
         SCHECK(evs[2].timeUs == T96 && evs[2].lane == 0 && evs[2].side == 0);  // pat3's first note
-        SCHECK(evs[3].timeUs == T192 && evs[3].lane == 0 && evs[3].side == 1);
+        SCHECK(evs[3].timeUs == T192 && evs[3].lane == 0 && evs[3].side == 0);  // pat1 is an opponent pattern
         SCHECK(evs[4].timeUs == T192 && evs[4].lane == 3 && evs[4].side == 0);  // pat3's second note
-        SCHECK(evs[5].timeUs == T576 && evs[5].lane == 2 && evs[5].side == 0);
+        SCHECK(evs[5].timeUs == T576 && evs[5].lane == 2 && evs[5].side == 1);  // pat2 ties -> player
         SCHECK(evs[6].timeUs == T672 && evs[6].lane == 1 && evs[6].side == 1);
     }
     std::vector<raid::Reader::OpSegment> segs;

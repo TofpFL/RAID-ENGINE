@@ -54,7 +54,6 @@ enum : uint8_t {
 constexpr size_t kNoteSize = 24;
 
 bool isSpecial(uint32_t pitch) { return pitch == 53 || pitch == 54 || pitch == 56 || pitch == 57 || pitch == 58; }
-bool isChartPitch(uint32_t pitch) { return (pitch >= 48 && pitch <= 51) || (pitch >= 60 && pitch <= 63); }
 
 // A channel named "Opp", "Opponent" or "Player" - optionally with a 1-50
 // index like "Opp3" or "Player 12" - charts by channel instead of the FPC
@@ -89,8 +88,20 @@ bool flpSideName(const std::string& nm, int& side) {
     return false;
 }
 
+// A channel named "Cam Events" (or CamEvents / Cam / Camera) carries
+// the camera and section markers instead of notes.
+bool flpCamName(const std::string& nm) {
+    std::string low;
+    low.reserve(nm.size());
+    for (char c : nm) low += char(std::tolower((unsigned char)c));
+    const size_t a = low.find_first_not_of(' '), z = low.find_last_not_of(' ');
+    if (a == std::string::npos) return false;
+    low = low.substr(a, z - a + 1);
+    return low == "cam events" || low == "camevents" || low == "cam" || low == "camera";
+}
+
 struct FlpNamedChannels {
-    std::vector<uint32_t> opp, player;  // sorted, unique
+    std::vector<uint32_t> opp, player, cam;  // sorted, unique
 };
 
 FlpNamedChannels flpNamedChannels(const FlpProject& p) {
@@ -99,6 +110,7 @@ FlpNamedChannels flpNamedChannels(const FlpProject& p) {
         for (const std::string& nm : names) {
             int side = -1;
             if (flpSideName(nm, side)) (side == 0 ? r.opp : r.player).push_back(ch);
+            if (flpCamName(nm)) r.cam.push_back(ch);
         }
     auto dedupe = [](std::vector<uint32_t>& v) {
         std::sort(v.begin(), v.end());
@@ -106,6 +118,7 @@ FlpNamedChannels flpNamedChannels(const FlpProject& p) {
     };
     dedupe(r.opp);
     dedupe(r.player);
+    dedupe(r.cam);
     return r;
 }
 
@@ -114,6 +127,31 @@ int flpNamedSide(const FlpNamedChannels& n, uint32_t ch) {
     if (std::binary_search(n.opp.begin(), n.opp.end(), ch)) return 0;
     if (std::binary_search(n.player.begin(), n.player.end(), ch)) return 1;
     return -1;
+}
+
+// True when the channel is a "Cam Events" instrument.
+bool flpCamSide(const FlpNamedChannels& n, uint32_t ch) {
+    return std::binary_search(n.cam.begin(), n.cam.end(), ch);
+}
+
+// A pattern charts as ONE side: every key on the piano roll maps onto the
+// four lanes (pitch % 4, C-anchored) and the pattern's side comes from its
+// content - named channels vote their channel's side, chart-channel notes
+// vote by register (below middle C player, middle C and up opponent).
+// Ties go to the player.
+int flpPatternSide(const FlpProject& p, const FlpPattern& pat) {
+    const FlpNamedChannels named = flpNamedChannels(p);
+    uint64_t playerVotes = 0, oppVotes = 0;
+    for (const FlpNote& n : pat.notes) {
+        if (isSpecial(n.pitch)) continue;
+        const int ns = flpNamedSide(named, n.channel);
+        if (ns >= 0) {
+            (ns == 1 ? playerVotes : oppVotes)++;
+        } else if (n.channel == p.chartChannel) {
+            (n.pitch < 60 ? playerVotes : oppVotes)++;
+        }
+    }
+    return playerVotes >= oppVotes ? 1 : 0;
 }
 
 }  // namespace
@@ -271,13 +309,8 @@ std::vector<int> flpChartPatterns(const FlpProject& p, bool strict) {
             const bool onNamed = flpNamedSide(named, n.channel) >= 0;
             if (!onNamed && n.channel != p.chartChannel) continue;
             ++onChannel;
-            if (onNamed) {  // a named channel charts every key
-                ++sniffKeys;
-                ++lanes;
-            } else {
-                sniffKeys += isChartPitch(n.pitch) || isSpecial(n.pitch);
-                lanes += isChartPitch(n.pitch);
-            }
+            ++sniffKeys;  // every key on a chart channel charts now
+            ++lanes;
         }
         if (lanes > 0 && (!strict || sniffKeys * 10 >= onChannel * 9)) out.push_back(pat.number);
     }
@@ -295,24 +328,28 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
     if (pattern < 0) {
         std::vector<int> list = flpChartPatterns(p, true);
         if (list.empty()) list = flpChartPatterns(p, false);  // asked for this file: any notes in the lanes
-        if (list.empty()) { err = "no notes in the chart lanes (C3-D#3, C4-D#4)"; return false; }
+        if (list.empty()) { err = "no chart notes"; return false; }
         pattern = list.front();
     }
     const FlpPattern* pat = nullptr;
     for (const FlpPattern& q : p.patterns)
         if (q.number == pattern) pat = &q;
     if (!pat) { err = "no pattern " + std::to_string(pattern); return false; }
+    const int pside = flpPatternSide(p, *pat);
     const double bpm = bpmIn > 0 ? bpmIn : p.bpm > 0 ? p.bpm : 120.0;
     const double msPerTick = 60000.0 / (bpm * p.ppqn);
 
     const auto named = flpNamedChannels(p);
     std::vector<FlpNote> notes;
     for (const FlpNote& n : pat->notes)
-        if (flpNamedSide(named, n.channel) >= 0 || n.channel == p.chartChannel) notes.push_back(n);
+        if (flpNamedSide(named, n.channel) >= 0 || n.channel == p.chartChannel ||
+            flpCamSide(named, n.channel)) notes.push_back(n);
     // By time; at the same time the section markers come first (SNIFF).
-    std::stable_sort(notes.begin(), notes.end(), [](const FlpNote& a, const FlpNote& b) {
+    std::stable_sort(notes.begin(), notes.end(), [&](const FlpNote& a, const FlpNote& b) {
         if (a.time != b.time) return a.time < b.time;
-        return isSpecial(a.pitch) && !isSpecial(b.pitch);
+        const bool sa = flpCamSide(named, a.channel) && isSpecial(a.pitch);
+        const bool sb = flpCamSide(named, b.channel) && isSpecial(b.pitch);
+        return sa && !sb;
     });
 
     const uint32_t sectionTicks = uint32_t(p.ppqn) * 4;
@@ -332,27 +369,22 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
     std::vector<Pending> pending;
     for (const FlpNote& n : notes) {
         Sec& sec = secAt(n.time);
-        switch (n.pitch) {
-            case 53: mustHit = sec.mustHit = true; continue;   // camera on the player
-            case 54: mustHit = sec.mustHit = false; continue;  // camera on the opponent
-            case 57: sec.altOpp = true; continue;
-            case 58: sec.altPlayer = true; continue;
-            case 56: continue;  // a tempo change: SNIFF asks for the new tempo, the chart keeps one
-            default: break;
+        if (flpCamSide(named, n.channel)) {
+            // Cam Events: the pitch picks the marker; never a chart note.
+            switch (n.pitch) {
+                case 53: mustHit = sec.mustHit = true; break;   // camera on the player
+                case 54: mustHit = sec.mustHit = false; break;  // camera on the opponent
+                case 57: sec.altOpp = true; break;
+                case 58: sec.altPlayer = true; break;
+                default: break;  // tempo changes and anything else: ignored
+            }
+            continue;
         }
         const int nside = flpNamedSide(named, n.channel);
-        int side;
-        uint8_t lane;
-        if (nside >= 0) {
-            // A named channel charts every key; pitch % 4 is C-anchored, so
-            // the C3-D#3 / C4-D#4 windows land on the same lanes as before.
-            side = nside;
-            lane = uint8_t(n.pitch & 3);
-        } else {
-            if (!isChartPitch(n.pitch)) continue;
-            side = n.pitch <= 51 ? 1 : 0;
-            lane = uint8_t(n.pitch <= 51 ? n.pitch - 48 : n.pitch - 60);
-        }
+        // Named channels keep their channel's side; the chart channel takes
+        // the pattern's classified side. Every key charts: lane = pitch % 4.
+        const int side = nside >= 0 ? nside : pside;
+        const uint8_t lane = uint8_t(n.pitch & 3);
         Note note;
         note.time = n.time * msPerTick;
         note.side = side;
@@ -361,7 +393,7 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
             note.length = std::max(0.0, (double(n.duration) - p.ppqn / 4.0) * msPerTick);
         pending.push_back({note, n.time / sectionTicks});
     }
-    if (pending.empty()) { err = "no notes in the chart lanes (C3-D#3, C4-D#4)"; return false; }
+    if (pending.empty()) { err = "no chart notes"; return false; }
     for (Pending& pn : pending) {
         const Sec& sec = secs[pn.sec];
         if ((pn.n.side == 0 && sec.altOpp) || (pn.n.side == 1 && sec.altPlayer)) pn.n.flags |= kFlagAlt;
