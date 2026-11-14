@@ -247,7 +247,9 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                     const int32_t itemIdx = int16_t(rd16(r + 6));
                     const int32_t clipLen = int32_t(rd32(r + 8));
                     const int32_t trackRvidx = int16_t(rd16(r + 12));
-                    const int pattern = itemIdx - patBase;
+                    // Pattern clips carry the constant pattern_base 20480;
+                    // other item types reuse the field, so gate on it.
+                    const int pattern = patBase == 20480 ? itemIdx - patBase : 0;
                     if (pattern <= 0 || pos < 0 || clipLen <= 0) {  // channel/audio clips
                         ++out.playlistSkipped;
                         FlpPlaylistItem bad;
