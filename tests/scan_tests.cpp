@@ -815,6 +815,57 @@ void testFlStudio() {
         fs::remove(tp);
     }
 
+    // Back-to-back identical clips (an FL "pattern stack") collapse into a
+    // single op-4 burst: one table def, repeatCount = clip count, stride =
+    // clip pitch - instead of one instance op per clip.
+    {
+        FlpProject pb;
+        pb.bpm = 120;
+        pb.ppqn = 96;
+        pb.chartChannel = 7;
+        FlpPattern pat;
+        pat.number = 1;
+        pat.lengthTicks = 384;
+        pat.notes.push_back({0, 48, 60, 7, 100, 0});
+        pat.notes.push_back({192, 48, 62, 7, 100, 0});
+        pb.patterns.push_back(pat);
+        for (int k = 0; k < 4; ++k)
+            pb.playlist.push_back({1, 0, uint32_t(384 * k), 384, 0, false});
+        raid::Info bi;
+        const fs::path bp = fs::temp_directory_path() / "gh_flp_burst.raid";
+        SCHECK(raid::writeRaidFlp(str(bp), pb, raid::EncodeOptions{}, &bi, err));
+        SCHECK(bi.logicalEvents == 8);
+        // Unique stats: the def stores the pattern's 2 events once, however
+        // many clips reference it (4 copies -> 8 expanded, 2 unique).
+        SCHECK(bi.uniqueEvents == 2 && bi.uniqueNotes == 2);
+        raid::Reader brd;
+        SCHECK(brd.open(str(bp), err));
+        {
+            uint64_t uev = 0, un = 0;
+            SCHECK(brd.uniqueStats(uev, un, err));
+            SCHECK(uev == 2 && un == 2);
+        }
+        std::vector<raid::Event> be;
+        SCHECK(brd.range(0, 10000000, be, err));
+        // 120 BPM / 96 ppqn -> 5208.33 us a tick: clips at 0/2M/4M/6M us,
+        // each playing the pattern's notes at +0 and +1M us.
+        SCHECK(be.size() == 8);
+        if (be.size() == 8) {
+            for (int k = 0; k < 4; ++k) {
+                SCHECK(be[2 * k].timeUs == int64_t(k) * 2000000);
+                SCHECK(be[2 * k + 1].timeUs == int64_t(k) * 2000000 + 1000000);
+            }
+        }
+        std::vector<raid::Reader::OpSegment> bsegs;
+        SCHECK(brd.opLog(0, 10000000, bsegs, err));
+        uint32_t bursts = 0;
+        for (const auto& s : bsegs)
+            if (s.kind == 2 && s.aux == 4) ++bursts;
+        SCHECK(bursts == 1);
+        brd.close();
+        fs::remove(bp);
+    }
+
     // A 4/16 project: the beat is a 16th note, so timing scales x4.
     FlpProject ps;
     SCHECK(readFlp(makeFlpSig16(), ps, err));

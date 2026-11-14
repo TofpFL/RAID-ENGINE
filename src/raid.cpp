@@ -44,6 +44,15 @@
 //         are absolute, so they stay correct under repeat shifts and
 //         nesting.
 //
+//   op 4  pattern burst (explicit stride):
+//         u32 patternId, u32 repeatCount,
+//         i64 anchorUs, i64 pitchDelta, i64 laneDelta  (as op 2)
+//         i64 strideUs   (zigzag, >= 0)
+//         Like op 2, but copy r anchors at anchorUs + r*strideUs instead of
+//         r*pattern.spanUs. Used for runs of identical playlist placements
+//         (FL clip stacks / back-to-back loops) where the spacing is the
+//         clip pitch, not the pattern's content span.
+//
 // Pattern section payload: u32 count, then per pattern
 // {u64 spanUs, u8 flags (bit0 hasPitch), u32 opsLen, ops[opsLen]} where ops
 // is a u32 opCount followed by ops, then u32 crc32 of the preceding bytes.
@@ -162,6 +171,7 @@ constexpr uint8_t kOpLiteralAbs = 0;
 constexpr uint8_t kOpLiteralRel = 1;
 constexpr uint8_t kOpPattern = 2;
 constexpr uint8_t kOpGroup = 3;
+constexpr uint8_t kOpBurst = 4;
 constexpr int kMaxDepth = 8;
 // kMaxChunkExpand lives in raid.hpp so the encoder can enforce it too.
 
@@ -228,6 +238,17 @@ void writeGroupOp(Buf& b, const GroupEntry* e, size_t n) {
         b.zig(e[i].winLoUs);
         b.zig(e[i].winHiUs);
     }
+}
+
+void writeBurst(Buf& b, uint32_t patternId, uint32_t repeatCount, int64_t anchorUs,
+                int64_t pitchDelta, int64_t laneDelta, int64_t strideUs) {
+    b.u8(kOpBurst);
+    b.u32(patternId);
+    b.u32(repeatCount);
+    b.zig(anchorUs);
+    b.zig(pitchDelta);
+    b.zig(laneDelta);
+    b.zig(strideUs);
 }
 
 struct Ctx {
@@ -385,6 +406,35 @@ bool emitOps(Cur& cur, const Env& env, const PatternRec* pat, const Ctx& ctx,
                 Cur cc{env.blob->data() + child.off, env.blob->data() + child.off + child.len};
                 if (!emitOps(cc, env, &child, sub, depth + 1, eo, err)) return false;
             }
+        } else if (kind == kOpBurst) {
+            uint32_t pid = uint32_t(cur.u32());
+            uint32_t reps = uint32_t(cur.u32());
+            int64_t anchor = cur.zig();
+            int64_t pitchDelta = cur.zig();
+            int64_t laneDelta = cur.zig();
+            int64_t stride = cur.zig();
+            if (!cur.ok) { err = "truncated burst op"; return false; }
+            if (!env.pats || pid >= env.pats->size()) { err = "bad pattern id"; return false; }
+            const PatternRec& child = (*env.pats)[pid];
+            if (child.len < 4 || child.off > env.blob->size() ||
+                child.len > env.blob->size() - child.off ||
+                child.spanUs > (1ull << 50) ||
+                (uint64_t(stride) && uint64_t(reps) > (1ull << 50) / uint64_t(stride)) ||
+                stride < 0 || stride > kFieldBound ||
+                anchor < -(int64_t(1) << 50) || anchor > (int64_t(1) << 50) ||
+                pitchDelta < -kFieldBound || pitchDelta > kFieldBound ||
+                laneDelta < -kFieldBound || laneDelta > kFieldBound) {
+                err = "pattern transform out of range";
+                return false;
+            }
+            if (reps > eo.limit) { err = "pattern repeat count too large"; return false; }
+            for (uint32_t r = 0; r < reps; ++r) {
+                Ctx sub{ctx.timeBase + anchor + int64_t(r) * stride,
+                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta,
+                        ctx.clipLo, ctx.clipHi};
+                Cur cc{env.blob->data() + child.off, env.blob->data() + child.off + child.len};
+                if (!emitOps(cc, env, &child, sub, depth + 1, eo, err)) return false;
+            }
         } else if (kind == kOpGroup) {
             uint32_t nEnt = uint32_t(cur.u32());
             if (!cur.ok || nEnt == 0 || nEnt > 4096) { err = "bad group count"; return false; }
@@ -467,26 +517,26 @@ bool emitOps(Cur& cur, const Env& env, const PatternRec* pat, const Ctx& ctx,
 // time/pitch/lane transforms emitOps applies) but not logged, so the
 // resulting segment stream is a flat "what is sounding" timeline.
 
-// Skips a literal op's column data after its u32 count: the time column
-// (n varints) plus 6 property columns of n varints each.
-bool skipLiteralBody(Cur& cur, uint32_t n, std::string& err) {
-    for (uint32_t k = 0; k < n; ++k) {
-        (void)cur.var();
-        if (!cur.ok) { err = "truncated literal"; return false; }
-    }
-    for (int col = 0; col < 6; ++col)
-        for (uint32_t k = 0; k < n; ++k) {
-            (void)cur.var();
-            if (!cur.ok) { err = "truncated literal"; return false; }
-        }
+// Skips the fixed fields of a pattern-instance op (op 2 or 4): both are
+// u32 patternId + u32 repeatCount + zigzag fields (3 for op 2, 4 for op 4).
+// Zigzag and varint consume identically, so cur.var() skips either.
+bool skipInstFields(Cur& cur, int zigCount, std::string& err) {
+    (void)cur.u32(); (void)cur.u32();
+    for (int i = 0; i < zigCount; ++i) (void)cur.var();
+    if (!cur.ok) { err = "truncated pattern op"; return false; }
     return true;
 }
 
-// Scans one pattern definition's top-level ops (cur at its opCount) and
-// reports whether any op is a pattern instance. Used to flag non-leaf
-// patterns for the op-log walker. `found` is only meaningful on success.
-bool opsContainInst(Cur& cur, bool& found, std::string& err) {
-    found = false;
+// Scans a pattern def's op stream once, reporting (a) whether it nests
+// further pattern ops, (b) how many literal events it physically stores,
+// and (c) their stack-weighted note total. Instance/group/burst ops only
+// reference other defs — their events are counted in those defs' own
+// scans, so nothing is double-counted and nothing expanded is materialized.
+bool scanPatternOps(Cur& cur, bool& hasInst, uint64_t& ev, uint64_t& notes,
+                    std::string& err) {
+    hasInst = false;
+    ev = 0;
+    notes = 0;
     uint32_t opCount = uint32_t(cur.u32());
     if (!cur.ok || opCount > (1u << 22)) { err = "bad op count"; return false; }
     for (uint32_t o = 0; o < opCount; ++o) {
@@ -495,10 +545,39 @@ bool opsContainInst(Cur& cur, bool& found, std::string& err) {
         if (kind == kOpLiteralAbs || kind == kOpLiteralRel) {
             uint32_t n = uint32_t(cur.u32());
             if (!cur.ok || n == 0 || n > (1u << 24)) { err = "bad literal count"; return false; }
-            if (!skipLiteralBody(cur, n, err)) return false;
-        } else if (kind == kOpPattern || kind == kOpGroup) {
-            found = true;
-            return true;
+            // time column, then length/pitch/lane/attr/type columns.
+            for (uint32_t k = 0; k < n; ++k) {
+                (void)cur.var();
+                if (!cur.ok) { err = "truncated literal"; return false; }
+            }
+            for (int col = 0; col < 5; ++col)
+                for (uint32_t k = 0; k < n; ++k) {
+                    (void)cur.var();
+                    if (!cur.ok) { err = "truncated literal"; return false; }
+                }
+            // stack column (last): plain varints, value = merged count.
+            for (uint32_t k = 0; k < n; ++k) {
+                const uint64_t s = cur.var();
+                if (!cur.ok) { err = "truncated literal"; return false; }
+                notes += s ? s : 1;
+            }
+            ev += n;
+        } else if (kind == kOpPattern) {
+            hasInst = true;
+            if (!skipInstFields(cur, 3, err)) return false;
+        } else if (kind == kOpBurst) {
+            hasInst = true;
+            if (!skipInstFields(cur, 4, err)) return false;
+        } else if (kind == kOpGroup) {
+            hasInst = true;
+            uint32_t nEnt = uint32_t(cur.u32());
+            if (!cur.ok || nEnt == 0 || nEnt > 4096) { err = "bad group count"; return false; }
+            for (uint32_t i = 0; i < nEnt; ++i) {
+                // 2 x u32 + 5 zigzag per entry.
+                (void)cur.u32(); (void)cur.u32();
+                for (int z = 0; z < 5; ++z) (void)cur.var();
+                if (!cur.ok) { err = "truncated group op"; return false; }
+            }
         } else {
             err = "unknown op kind";
             return false;
@@ -619,6 +698,50 @@ bool walkOps(Cur& cur, const Env& env, const Ctx& ctx, int depth,
             const bool childEmit = emit && !leaf;
             for (uint32_t r = 0; r < reps; ++r) {
                 Ctx sub{ctx.timeBase + anchor + int64_t(r) * int64_t(child.spanUs),
+                        ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta,
+                        ctx.clipLo, ctx.clipHi};
+                Cur cc{env.blob->data() + child.off,
+                       env.blob->data() + child.off + child.len};
+                if (!walkOps(cc, env, sub, depth + 1, wo, childEmit, err)) return false;
+            }
+        } else if (kind == kOpBurst) {
+            uint32_t pid = uint32_t(cur.u32());
+            uint32_t reps = uint32_t(cur.u32());
+            int64_t anchor = cur.zig();
+            int64_t pitchDelta = cur.zig();
+            int64_t laneDelta = cur.zig();
+            int64_t stride = cur.zig();
+            if (!cur.ok) { err = "truncated burst op"; return false; }
+            if (!env.pats || pid >= env.pats->size()) { err = "bad pattern id"; return false; }
+            const PatternRec& child = (*env.pats)[pid];
+            if (child.len < 4 || child.off > env.blob->size() ||
+                child.len > env.blob->size() - child.off ||
+                child.spanUs > (1ull << 50) ||
+                (uint64_t(stride) && uint64_t(reps) > (1ull << 50) / uint64_t(stride)) ||
+                stride < 0 || stride > kFieldBound ||
+                anchor < -(int64_t(1) << 50) || anchor > (int64_t(1) << 50) ||
+                pitchDelta < -kFieldBound || pitchDelta > kFieldBound ||
+                laneDelta < -kFieldBound || laneDelta > kFieldBound) {
+                err = "pattern transform out of range";
+                return false;
+            }
+            if (reps > wo.limit) { err = "pattern repeat count too large"; return false; }
+            const bool leaf = !env.hasInst || pid >= env.hasInst->size() ||
+                              (*env.hasInst)[pid] == 0;
+            if (leaf && emit && reps) {
+                const int64_t startUs = ctx.timeBase + anchor;
+                int64_t endUs = startUs + int64_t(reps - 1) * stride +
+                                int64_t(child.spanUs);
+                if (endUs < startUs) endUs = INT64_MAX;
+                Reader::OpSegment s;
+                s.startUs = startUs; s.endUs = endUs; s.chunk = wo.chunk;
+                s.kind = 2; s.count = pid; s.aux = reps;
+                s.pitchDelta = int32_t(pitchDelta); s.laneDelta = int32_t(laneDelta);
+                wo.segs->push_back(s);
+            }
+            const bool childEmit = emit && !leaf;
+            for (uint32_t r = 0; r < reps; ++r) {
+                Ctx sub{ctx.timeBase + anchor + int64_t(r) * stride,
                         ctx.pitchBase + pitchDelta, ctx.laneBase + laneDelta,
                         ctx.clipLo, ctx.clipHi};
                 Cur cc{env.blob->data() + child.off,
@@ -804,6 +927,7 @@ struct ChunkOut {
 bool writeRaidDone(const std::string& path, const std::vector<char>& patSection,
                    std::vector<ChunkOut>& chunks, uint64_t logicalN,
                    uint64_t literalEvents, uint64_t patternCount,
+                   uint64_t uniqueEvents, uint64_t uniqueNotes,
                    std::string_view metaJson, const EncodeOptions& opt,
                    Info* statsOut, std::string& err) {
     chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
@@ -933,6 +1057,8 @@ bool writeRaidDone(const std::string& path, const std::vector<char>& patSection,
         statsOut->chunkCount = chunks.size();
         statsOut->patternCount = patternCount;
         statsOut->literalEvents = literalEvents;
+        statsOut->uniqueEvents = uniqueEvents;
+        statsOut->uniqueNotes = uniqueNotes;
         statsOut->storedBytes = storedBytes;
         statsOut->rawBytes = rawBytes;
     }
@@ -1092,6 +1218,18 @@ bool writeRaid(const std::string& path, const std::vector<Event>& events,
     }
     if (litStart < n) plans.push_back({litStart, uint32_t(n - litStart), -1, 0, 0});
 
+    // Unique stored notes: the pattern table holds each template once.
+    // Chunk literals are stored once too but are not part of the pattern
+    // table, so they are not counted here (literalEvents covers them).
+    uint64_t uniqEv = 0, uniqNotes = 0;
+    for (const Tmpl& t : tmpls) {
+        uniqEv += t.len;
+        for (size_t k = t.start; k < t.start + t.len; ++k) {
+            const Event& e = events[k];
+            uniqNotes += e.stack ? e.stack : 1;
+        }
+    }
+
     // ---- pattern table --------------------------------------------------
     std::vector<PatternRec> patterns(tmpls.size());
     std::vector<char> patSection;
@@ -1205,7 +1343,8 @@ bool writeRaid(const std::string& path, const std::vector<Event>& events,
     }
 
     return writeRaidDone(path, patSection, chunks, n, literalEvents,
-                         patterns.size(), metaJson, opt, statsOut, err);
+                         patterns.size(), uniqEv, uniqNotes, metaJson, opt,
+                         statsOut, err);
 }
 
 // ------------------------------------------------------- FL Studio ------
@@ -1421,6 +1560,18 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
     // Pre-build defs in segment order so pattern ids follow the arrangement.
     for (const Seg& s : segs) defsFor(s);
 
+    // Unique stored notes: every def holds a playlist clip window's events,
+    // so this counts exactly the notes that can sound. Pattern-resident
+    // notes outside every clip window never reach a def - no ghosts.
+    uint64_t uniqEv = 0, uniqNotes = 0;
+    for (const Def& d : defs) {
+        uniqEv += d.count;
+        for (size_t k = d.srcBegin; k < d.srcEnd; ++k) {
+            const Event& e = d.src->at(k);
+            uniqNotes += e.stack ? e.stack : 1;
+        }
+    }
+
     // ---- pattern section --------------------------------------------------
     Buf pb;
     pb.u32(uint32_t(defs.size()));
@@ -1505,16 +1656,90 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         }
     };
 
-    size_t g = 0;
-    while (g < active.size()) {
+    // One op-4 per def covering `copies` evenly spaced placements of the
+    // same segment: copy r anchors strideUs after the previous one. Used
+    // for runs of identical non-overlapping clips (pattern stacks).
+    auto emitBurst = [&](const Seg& s, const std::vector<uint32_t>& ids,
+                         uint32_t copies, int64_t strideUs) {
+        for (uint32_t id : ids) {
+            const Def& d = defs[id];
+            int64_t anchor = s.baseUs - s.loUs + d.originUs;
+            uint32_t left = copies;
+            while (left) {
+                ChunkOut& ch = chunks.back();
+                const size_t room =
+                    opt.chunkEvents - std::min<uint64_t>(ch.expanded, opt.chunkEvents);
+                const uint32_t fit = d.count ? uint32_t(room / d.count) : 0;
+                uint32_t use = std::min(fit, left);
+                if (use == 0) {
+                    if (ch.expanded != 0) { sealChunk(); continue; }
+                    use = 1;  // a single copy may exceed the target size
+                }
+                if (ch.opCount == 0) {
+                    ch.firstEvent = expandedTotal;
+                    ch.firstTimeUs = anchor;
+                }
+                writeBurst(ch.payload, id, use, anchor, 0, d.originLane, strideUs);
+                ch.opCount++;
+                ch.expanded += uint64_t(use) * d.count;
+                ch.lastTimeUs = anchor + int64_t(use - 1) * strideUs + int64_t(d.spanUs);
+                expandedTotal += uint64_t(use) * d.count;
+                literalEvents += uint64_t(use) * d.count;
+                playerNotes += uint64_t(use) * d.sideP;
+                opponentNotes += uint64_t(use) * d.sideO;
+                maxEndUs = std::max(maxEndUs, ch.lastTimeUs);
+                anchor += int64_t(use) * strideUs;
+                left -= use;
+                if (ch.expanded >= opt.chunkEvents) sealChunk();
+            }
+        }
+    };
+
+    // Maximal overlap-connected groups over the active segment list.
+    struct Grp { size_t b = 0, e = 0; };
+    std::vector<Grp> groups;
+    for (size_t g = 0; g < active.size();) {
         size_t h = g + 1;
         int64_t gEnd = segEndUs[active[g]];
         while (h < active.size() && segs[active[h]].baseUs < gEnd) {
             gEnd = std::max(gEnd, segEndUs[active[h]]);
             ++h;
         }
+        groups.push_back({g, h});
+        g = h;
+    }
+
+    auto sameSeg = [](const Seg& a, const Seg& b) {
+        return a.pattern == b.pattern && a.rotShift == b.rotShift &&
+               a.loUs == b.loUs && a.hiUs == b.hiUs && a.track == b.track;
+    };
+
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+        const size_t g = groups[gi].b, h = groups[gi].e;
         if (h - g == 1) {
             const size_t ai = active[g];
+            // Runs of identical, non-overlapping, evenly spaced placements
+            // (FL clip stacks, back-to-back loops) collapse into one op-4
+            // burst per def: "play this table N times, stride S".
+            size_t cnt = 1, nj = gi + 1;
+            int64_t stride = 0;
+            if (nj < groups.size() && groups[nj].e - groups[nj].b == 1 &&
+                sameSeg(segs[ai], segs[active[groups[nj].b]])) {
+                stride = segs[active[groups[nj].b]].baseUs - segs[ai].baseUs;
+                ++cnt;
+                ++nj;
+                while (nj < groups.size() && groups[nj].e - groups[nj].b == 1) {
+                    const Seg& sp = segs[active[groups[nj - 1].b]];
+                    const Seg& sc = segs[active[groups[nj].b]];
+                    if (!sameSeg(segs[ai], sc) || sc.baseUs - sp.baseUs != stride)
+                        break;
+                    ++cnt;
+                    ++nj;
+                }
+                emitBurst(segs[ai], *segIds[ai], uint32_t(cnt), stride);
+                gi = nj - 1;
+                continue;
+            }
             for (uint32_t id : *segIds[ai]) emitInstance(segs[ai], id);
         } else {
             // Overlapping segments: merge their in-window events by absolute
@@ -1604,7 +1829,6 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
                 if (ch.expanded >= opt.chunkEvents) sealChunk();
             }
         }
-        g = h;
     }
     sealChunk();
 
@@ -1631,7 +1855,7 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
     const std::string mj = chartMetaJson(meta);
 
     return writeRaidDone(path, patSection, chunks, expandedTotal, literalEvents,
-                         defs.size(), mj, opt, statsOut, err);
+                         defs.size(), uniqEv, uniqNotes, mj, opt, statsOut, err);
 }
 
 // ------------------------------------------------------------ reading -----
@@ -1686,6 +1910,8 @@ struct Reader::Impl {
     std::vector<char> patternBlob_;
     std::vector<PatternRec> patterns_;
     std::vector<uint8_t> patHasInst_;  // pattern ops contain nested instances
+    uint64_t patUniqueEvents_ = 0;    // literal events stored in defs
+    uint64_t patUniqueNotes_ = 0;     // their stack-weighted note total
 
     // FILE* has one shared seek position: every seek+read is serialized here.
     // Decompression and pattern expansion run outside this lock.
@@ -1881,17 +2107,26 @@ struct Reader::Impl {
         // Flag patterns whose op stream nests further instances; the op-log
         // walker uses this to emit only leaf segments. A pattern whose ops
         // fail to parse is flagged non-leaf â€” decoding it errors properly.
+        // The same pass counts the literal events each def physically stores
+        // (uniqueEvents) and their stack-weighted note total (uniqueNotes).
         patHasInst_.assign(patterns_.size(), 0);
+        uint64_t pev = 0, pnotes = 0;
         for (size_t i = 0; i < patterns_.size(); ++i) {
             const PatternRec& p = patterns_[i];
             Cur pc{patternBlob_.data() + p.off, patternBlob_.data() + p.off + p.len};
             bool found = false;
+            uint64_t ev = 0, nt = 0;
             std::string scanErr;
-            if (!opsContainInst(pc, found, scanErr))
+            if (!scanPatternOps(pc, found, ev, nt, scanErr))
                 patHasInst_[i] = 1;
-            else
+            else {
                 patHasInst_[i] = found ? 1 : 0;
+                pev += ev;
+                pnotes += nt;
+            }
         }
+        patUniqueEvents_ = pev;
+        patUniqueNotes_ = pnotes;
         return true;
     }
 
@@ -2060,6 +2295,15 @@ void Reader::setMemoryBudgetBytes(uint64_t bytes) {
 
 uint64_t Reader::memoryBudgetBytes() const {
     return impl_ ? impl_->memBudget_ : memBudget_;
+}
+
+bool Reader::uniqueStats(uint64_t& events, uint64_t& notes, std::string& err) {
+    events = notes = 0;
+    if (!impl_ || !impl_->f_) { err = "reader not open"; return false; }
+    if (!impl_->loadPatterns(err)) return false;
+    events = impl_->patUniqueEvents_;
+    notes = impl_->patUniqueNotes_;
+    return true;
 }
 
 std::string Reader::metaJson() {

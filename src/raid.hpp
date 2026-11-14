@@ -77,6 +77,8 @@ struct Info {
     uint64_t chunkCount = 0;
     uint64_t patternCount = 0;
     uint64_t literalEvents = 0;   // events stored as literals (after dedup)
+    uint64_t uniqueEvents = 0;    // events stored in pattern defs (each once)
+    uint64_t uniqueNotes = 0;     // stack-weighted notes in pattern defs
     uint64_t storedBytes = 0;     // chunk payload bytes after deflate
     uint64_t rawBytes = 0;        // chunk payload bytes before deflate
     std::string title, difficulty, opponent, player, gf, stage;
@@ -213,6 +215,14 @@ public:
     void setMaxConcurrentDecodes(int n);
     void setMemoryBudgetBytes(uint64_t bytes);
     uint64_t memoryBudgetBytes() const;
+
+    // Unique notes stored in the pattern table: events physically present in
+    // pattern defs (each stored once, never expanded), stack-weighted for
+    // `notes`. This is the ghost-note-free count — FL pattern defs only hold
+    // events inside playlist clip windows, so notes that live in a pattern
+    // but never play are not counted. Decodes the (deflated) pattern section
+    // only; chunk payloads are not touched.
+    bool uniqueStats(uint64_t& events, uint64_t& notes, std::string& err);
 
     uint64_t logicalEvents() const { return info().logicalEvents; }
 
