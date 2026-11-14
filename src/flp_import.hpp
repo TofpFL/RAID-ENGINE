@@ -1,4 +1,4 @@
-// FL Studio projects (.flp) and scores (.fsc) as charts, read the way SNIFF
+﻿// FL Studio projects (.flp) and scores (.fsc) as charts, read the way SNIFF
 // (SiIva Note Importer For FNF, https://github.com/JordanSantiagoYT/SNIFF)
 // reads them: the notes of one pattern of the FPC channel (the first channel
 // without one): every piano-roll key charts onto the four lanes
@@ -36,11 +36,13 @@ struct FlpPlaylistItem {
     int pattern = 0;        // FL pattern number (item_index - pattern_base)
     int track = 0;          // playlist track
     uint32_t startTick = 0, lengthTicks = 0;
+    bool muted = false;         // item_flags bit 0x2000
 };
 
 struct FlpPattern {
     int number = 0;
     std::string name;
+    uint32_t lengthTicks = 0;  // event 164: pattern length in ticks (0 = auto/unknown)
     std::vector<FlpNote> notes;
 };
 

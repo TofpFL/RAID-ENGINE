@@ -1247,13 +1247,50 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         uint64_t lenUs = 0;
         int track = 0;
     };
+    // Loop period per pattern in microseconds: the declared length when
+    // the file carries it (event 164), else the content extent rounded up
+    // to a whole bar - FL's effective repeat unit for playlist clips.
+    const uint64_t barTicks = project.timeSigDen > 0
+        ? uint64_t(project.timeSigNum) * uint64_t(project.ppqn) * 4 / uint64_t(project.timeSigDen)
+        : 0;
+    std::unordered_map<int, uint64_t> patPeriodUs;
+    for (const FlpPattern& fp : project.patterns) {
+        uint64_t ticks = fp.lengthTicks;
+        if (!ticks) {
+            uint64_t maxEnd = 0;
+            for (const FlpNote& n : fp.notes)
+                maxEnd = std::max<uint64_t>(maxEnd, uint64_t(n.time) + uint64_t(n.duration));
+            if (maxEnd && barTicks)
+                ticks = (maxEnd + barTicks - 1) / barTicks * barTicks;
+        }
+        if (ticks)
+            patPeriodUs[fp.number] = uint64_t(std::llround(double(ticks) * usPerTick));
+    }
+
     std::vector<Clip> clips;
     for (const FlpPlaylistItem& it : project.playlist) {
-        if (it.pattern <= 0 || it.startTick < 0) continue;
-        clips.push_back({it.pattern, int64_t(std::llround(it.startTick * usPerTick)),
-                         uint64_t(std::llround(it.lengthTicks * usPerTick)), it.track});
+        if (it.muted || it.pattern <= 0 || it.startTick < 0) continue;
+        const int64_t startUs = int64_t(std::llround(it.startTick * usPerTick));
+        const uint64_t lenUs = uint64_t(std::llround(it.lengthTicks * usPerTick));
+        // A clip longer than its pattern loops in FL Studio: split it into
+        // per-cycle sub-clips (defs are shared by window, so the pattern
+        // data is still stored once).
+        const auto perIt = patPeriodUs.find(it.pattern);
+        const uint64_t periodUs = perIt != patPeriodUs.end() ? perIt->second : 0;
+        if (periodUs > 0 && lenUs > periodUs) {
+            int64_t t = startUs;
+            uint64_t rem = lenUs;
+            while (rem > 0) {
+                const uint64_t w = std::min(rem, periodUs);
+                clips.push_back({it.pattern, t, w, it.track});
+                t += int64_t(periodUs);
+                rem -= w;
+            }
+        } else {
+            clips.push_back({it.pattern, startUs, lenUs, it.track});
+        }
     }
-    if (clips.empty()) {
+    if (clips.empty() && project.playlist.empty()) {
         // No usable arrangement: lay every pattern that charts notes end to end.
         std::vector<const FlpPattern*> order;
         for (const FlpPattern& p : project.patterns)

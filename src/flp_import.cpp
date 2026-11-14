@@ -234,22 +234,46 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                 case kPatName:
                     if (prevId == kPatStart) pattern(int(prevValue)).name = flString(data, len);
                     break;
+                case 164:  // pattern length in ticks (metadata section, after its kPatStart)
+                    pattern(curPattern).lengthTicks = value;
+                    break;
                 case kPlaylist: {
-                // Records are 60 bytes in FL 21+ files, 32 before; a blob
-                // divisible by 60 uses the new size (PyFLP's rule).
-                const size_t rec = len % 60 == 0 && len >= 60 ? 60 : 32;
+                // FL grew the playlist record across versions (32/60/88/... bytes).
+                // Detect the stride structurally: at the right size, records
+                // whose item_index tops PATTERN_BASE almost all carry
+                // pattern_base == 20480 (rule field-tested across FL 20-26).
+                auto strideOk = [&](size_t cand) {
+                    if (cand > len || len % cand) return false;
+                    size_t checked = 0, good = 0;
+                    for (size_t k = 0; k + cand <= len; k += cand) {
+                        const unsigned char* r = data + k;
+                        if (int32_t(rd16(r + 6)) > 20480) {
+                            ++checked;
+                            if (rd16(r + 4) == 20480) ++good;
+                        }
+                    }
+                    return checked == 0 || good * 10 >= checked * 7;
+                };
+                size_t rec = 0;
+                for (const size_t cand : {size_t(88), size_t(60), size_t(32), size_t(48),
+                                         size_t(64), size_t(72), size_t(80), size_t(96),
+                                         size_t(104), size_t(112)})
+                    if (strideOk(cand)) { rec = cand; break; }
+                for (size_t cand = 24; !rec && cand < 160; cand += 4)
+                    if (strideOk(cand)) rec = cand;
+                if (!rec) rec = len % 60 == 0 && len >= 60 ? 60 : 32;
                 ++out.playlistBlobs;
                 out.playlistBytes += len;
                 for (size_t k = 0; k + rec <= len; k += rec) {
                     const unsigned char* r = data + k;
                     const int32_t pos = int32_t(rd32(r));
-                    const int32_t patBase = int16_t(rd16(r + 4));
                     const int32_t itemIdx = int16_t(rd16(r + 6));
                     const int32_t clipLen = int32_t(rd32(r + 8));
                     const int32_t trackRvidx = int16_t(rd16(r + 12));
-                    // Pattern clips carry the constant pattern_base 20480;
-                    // other item types reuse the field, so gate on it.
-                    const int pattern = patBase == 20480 ? itemIdx - patBase : 0;
+                    const int32_t flags = int16_t(rd16(r + 18));
+                    // Pattern clips are the items whose index tops 20480;
+                    // audio/automation clips reuse the fields for other IDs.
+                    const int pattern = itemIdx > 20480 ? itemIdx - 20480 : 0;
                     if (pattern <= 0 || pos < 0 || clipLen <= 0) {  // channel/audio clips
                         ++out.playlistSkipped;
                         FlpPlaylistItem bad;
@@ -265,6 +289,7 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                     it.track = trackRvidx > 0 ? 500 - trackRvidx : 0;
                     it.startTick = uint32_t(pos);
                     it.lengthTicks = uint32_t(clipLen);
+                    it.muted = (flags & 0x2000) != 0;
                     out.playlist.push_back(it);
                 }
                 break;

@@ -1,4 +1,4 @@
-// raid_engine: standalone RAID Engine command line tool (no raylib).
+﻿// raid_engine: standalone RAID Engine command line tool (no raylib).
 //
 //   raid_engine convert <chart|flp|fsc> <out.raid>   encode a chart to .raid
 //   raid_engine info <file.raid>                     header + encoder stats
@@ -31,7 +31,7 @@ static int convert(const std::string& in, const std::string& out) {
 
     // Whole .flp/.fsc projects encode directly: patterns are stored once as
     // pattern-table definitions and playlist clips place them on the
-    // timeline — the file decodes as one contiguous chart. A `#N` suffix
+    // timeline â€” the file decodes as one contiguous chart. A `#N` suffix
     // still selects a single pattern through the Chart path.
     std::string flpFile;
     int flpPat = -1;
@@ -193,7 +193,7 @@ static int streamtest(const std::string& path) {
     int64_t fedUs = std::numeric_limits<int64_t>::min() / 4, prefetchUs = fedUs;
     double songMs = -300.0;
     const double stepMs = 1000.0 / 60.0;
-    uint64_t total = 0, badLane = 0;
+    uint64_t total = 0, badLane = 0, stackSum = 0;
     std::vector<uint64_t> bucket(48, 0);
     while (songMs < meta.lengthMs + 5000.0) {
         songMs += stepMs;
@@ -208,6 +208,7 @@ static int streamtest(const std::string& path) {
             for (const raid::Event& e : evs) {
                 ++total;
                 if (e.lane >= meta.keys) ++badLane;
+                stackSum += e.stack ? e.stack : 1;
                 const size_t b = std::min<size_t>(47, size_t(std::max<int64_t>(0, e.timeUs / 10000000)));
                 ++bucket[b];
             }
@@ -219,8 +220,8 @@ static int streamtest(const std::string& path) {
         }
     }
     cs.close();
-    std::printf("fed %llu events (%llu out-of-range lanes)\n",
-                (unsigned long long)total, (unsigned long long)badLane);
+    std::printf("fed %llu events, %llu stacked notes (%llu out-of-range lanes)\n",
+                (unsigned long long)total, (unsigned long long)stackSum, (unsigned long long)badLane);
     for (size_t i = 0; i < bucket.size(); ++i)
         if (bucket[i]) std::printf("  %4zu0-%4zus: %llu\n", i, i, (unsigned long long)bucket[i]);
     return 0;

@@ -545,8 +545,8 @@ std::string makeFlpPlaylist() {
     // Playlist: 32-byte records {i32 pos, i16 patBase=20480, i16 itemIdx,
     // i32 len, i16 trackRvidx=499 (track 1)}.
     std::string pl;
-    for (const auto& [pat, st, ln] : {std::tuple<int, int, int>{1, 0, 576},
-                                     {std::tuple<int, int, int>{3, 96, 480}},
+    for (const auto& [pat, st, ln] : {std::tuple<int, int, int>{1, 0, 384},
+                                     {std::tuple<int, int, int>{3, 96, 384}},
                                      {std::tuple<int, int, int>{2, 576, 288}}}) {
         std::string r(32, '\0');
         auto p32 = [&](int off, uint32_t x) { for (int i = 0; i < 4; ++i) r[size_t(off + i)] = char((x >> (8 * i)) & 255); };
@@ -568,7 +568,73 @@ std::string makeFlpPlaylist() {
     f += "FLdt";
     u32(uint32_t(ev.size()));
     return f + ev;
+
 }
+// FL 26 writes 88-byte playlist records; non-pattern items share the blob
+// and must be rejected via the pattern_base=20480 signature.
+std::string makeFlpPlaylist88() {
+    std::string ev;
+    auto word = [&](uint8_t id, uint16_t v) { ev += char(id); ev += char(v & 255); ev += char(v >> 8); };
+    auto dword = [&](uint8_t id, uint32_t v) {
+        ev += char(id);
+        for (int i = 0; i < 4; ++i) ev += char((v >> (8 * i)) & 255);
+    };
+    auto array = [&](uint8_t id, const std::string& data) {
+        ev += char(id);
+        size_t n = data.size();
+        do {
+            uint8_t c = uint8_t(n & 0x7F);
+            n >>= 7;
+            if (n) c |= 0x80;
+            ev += char(c);
+        } while (n);
+        ev += data;
+    };
+    auto notes = [](const std::vector<std::tuple<uint32_t, uint32_t, uint32_t>>& v) {
+        std::string d;
+        for (const auto& [t, dur, pitch] : v) {
+            std::string r(24, '\0');
+            for (int i = 0; i < 4; ++i) r[size_t(i)] = char((t >> (8 * i)) & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(8 + i)] = char((dur >> (8 * i)) & 255);
+            for (int i = 0; i < 4; ++i) r[size_t(12 + i)] = char((pitch >> (8 * i)) & 255);
+            r[21] = char(100);
+            d += r;
+        }
+        return d;
+    };
+    dword(0x9C, 150000);
+    word(0x40, 0);
+    array(0xC9, std::string("F\0P\0C\0\0\0", 8));
+    word(0x41, 1);
+    array(0xE0, notes({{0, 24, 60}, {96, 24, 61}}));
+    // Playlist: 88-byte records (FL 21+ era layout) + one audio-clip record
+    // whose fields must NOT decode as a pattern.
+    std::string pl;
+    auto rec88 = [&](uint32_t pos, uint16_t pb, uint16_t idx, uint32_t len, uint16_t trk) {
+        std::string r(88, '\0');
+        auto p32 = [&](int off, uint32_t x) { for (int i = 0; i < 4; ++i) r[size_t(off + i)] = char((x >> (8 * i)) & 255); };
+        auto p16 = [&](int off, uint16_t x) { r[size_t(off)] = char(x & 255); r[size_t(off + 1)] = char(x >> 8); };
+        p32(0, pos); p16(4, pb); p16(6, idx); p32(8, len); p16(12, trk);
+        p32(24, 0xFFFFFFFF); p32(28, 0xFFFFFFFF);  // start/end offsets: full clip
+        return r;
+    };
+    pl += rec88(0, 20480, 20481, 384, 499);    // pattern 1
+    pl += rec88(96, 0, 3, 1654, 0);            // audio item: patBase 0 -> rejected
+    pl += rec88(192, 20480, 20482, 288, 498);  // pattern 2, track 2
+    for (int i = 0; i < 5; ++i)
+        pl += rec88(256 + i * 32, 0, 100 + i, 4096, 0);  // audio items: pad to 704 B (divisible by 32 too)
+    array(0xE9, pl);
+    std::string f = "FLhd";
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
+    u32(6);
+    f += std::string("\0\0\x02\0", 4);
+    f += char(96);
+    f += char(0);
+    f += "FLdt";
+    u32(uint32_t(ev.size()));
+    return f + ev;
+}
+
 
 // A project in 4/16: the beat is a 16th note, so the quarter-note tempo
 // scales x4 (150 BPM reads as 600 for chart timing).
@@ -712,6 +778,18 @@ void testFlStudio() {
     rd.close();
     fs::remove(raidPath);
 
+    // FL 26's 88-byte playlist records decode identically; non-pattern items
+    // in the same blob are rejected by the pattern_base signature.
+    FlpProject p88;
+    SCHECK(readFlp(makeFlpPlaylist88(), p88, err));
+    SCHECK(p88.playlist.size() == 2 && p88.playlistSkipped >= 1);
+    if (p88.playlist.size() == 2) {
+        SCHECK(p88.playlist[0].pattern == 1 && p88.playlist[0].startTick == 0 &&
+               p88.playlist[0].lengthTicks == 384 && p88.playlist[0].track == 1);
+        SCHECK(p88.playlist[1].pattern == 2 && p88.playlist[1].startTick == 192 &&
+               p88.playlist[1].track == 2);
+    }
+
     // A 4/16 project: the beat is a 16th note, so timing scales x4.
     FlpProject ps;
     SCHECK(readFlp(makeFlpSig16(), ps, err));
@@ -738,7 +816,7 @@ int printFlp(int argc, char** argv, int first) {
         if (!p.playlist.empty() || p.playlistBlobs) {
             std::printf("  playlist: %zu clips (%d blobs, %zu bytes, %d skipped)\n", p.playlist.size(),
                         p.playlistBlobs, p.playlistBytes, p.playlistSkipped);
-            for (size_t i = 0; i < p.playlist.size() && i < 40; ++i)
+            for (size_t i = 0; i < p.playlist.size() && i < 100000; ++i)
                 std::printf("    clip %zu: pat %d track %d @ %.2f s len %.2f s\n", i,
                             p.playlist[i].pattern, p.playlist[i].track,
                             p.playlist[i].startTick / double(p.ppqn) * 60.0 / p.bpm,
@@ -758,8 +836,8 @@ int printFlp(int argc, char** argv, int first) {
                 onChannel += n.channel == p.chartChannel;
                 chart += n.channel == p.chartChannel && ((n.pitch >= 48 && n.pitch <= 51) || (n.pitch >= 60 && n.pitch <= 63));
             }
-            std::printf("  pattern %d '%s': %zu notes, %zu on the chart channel, %zu in the chart lanes\n", pat.number,
-                        pat.name.c_str(), pat.notes.size(), onChannel, chart);
+            std::printf("  pattern %d '%s': %zu notes, len %u ticks, %zu on the chart channel, %zu in the chart lanes\n", pat.number,
+                        pat.name.c_str(), pat.notes.size(), unsigned(pat.lengthTicks), onChannel, chart);
             {
                 std::map<uint16_t, size_t> byCh;
                 for (const FlpNote& n : pat.notes) ++byCh[n.channel];
