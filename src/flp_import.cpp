@@ -289,6 +289,14 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                     it.track = trackRvidx > 0 ? 500 - trackRvidx : 0;
                     it.startTick = uint32_t(pos);
                     it.lengthTicks = uint32_t(clipLen);
+                    // Records >= 32 bytes carry the clip's trim window at
+                    // +24/+28 (start/end offset into the pattern, -1 = full).
+                    // FLP Counter reads the same fields; ignoring them made
+                    // trimmed clips replay the pattern's beginning.
+                    if (rec >= 32) {
+                        const int32_t st = int32_t(rd32(r + 24));
+                        it.offsetTicks = st > 0 ? st : 0;
+                    }
                     it.muted = (flags & 0x2000) != 0;
                     out.playlist.push_back(it);
                 }

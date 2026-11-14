@@ -610,17 +610,19 @@ std::string makeFlpPlaylist88() {
     // Playlist: 88-byte records (FL 21+ era layout) + one audio-clip record
     // whose fields must NOT decode as a pattern.
     std::string pl;
-    auto rec88 = [&](uint32_t pos, uint16_t pb, uint16_t idx, uint32_t len, uint16_t trk) {
+    auto rec88 = [&](uint32_t pos, uint16_t pb, uint16_t idx, uint32_t len, uint16_t trk,
+                     uint32_t off = 0xFFFFFFFF) {
         std::string r(88, '\0');
-        auto p32 = [&](int off, uint32_t x) { for (int i = 0; i < 4; ++i) r[size_t(off + i)] = char((x >> (8 * i)) & 255); };
-        auto p16 = [&](int off, uint16_t x) { r[size_t(off)] = char(x & 255); r[size_t(off + 1)] = char(x >> 8); };
+        auto p32 = [&](int off2, uint32_t x) { for (int i = 0; i < 4; ++i) r[size_t(off2 + i)] = char((x >> (8 * i)) & 255); };
+        auto p16 = [&](int off2, uint16_t x) { r[size_t(off2)] = char(x & 255); r[size_t(off2 + 1)] = char(x >> 8); };
         p32(0, pos); p16(4, pb); p16(6, idx); p32(8, len); p16(12, trk);
-        p32(24, 0xFFFFFFFF); p32(28, 0xFFFFFFFF);  // start/end offsets: full clip
+        p32(24, off); p32(28, 0xFFFFFFFF);  // start/end offsets: -1 = full
         return r;
     };
     pl += rec88(0, 20480, 20481, 384, 499);    // pattern 1
     pl += rec88(96, 0, 3, 1654, 0);            // audio item: patBase 0 -> rejected
     pl += rec88(192, 20480, 20482, 288, 498);  // pattern 2, track 2
+    pl += rec88(512, 20480, 20481, 96, 499, 96);  // pattern 1 trimmed: offset 96 ticks
     for (int i = 0; i < 5; ++i)
         pl += rec88(256 + i * 32, 0, 100 + i, 4096, 0);  // audio items: pad to 704 B (divisible by 32 too)
     array(0xE9, pl);
@@ -782,12 +784,35 @@ void testFlStudio() {
     // in the same blob are rejected by the pattern_base signature.
     FlpProject p88;
     SCHECK(readFlp(makeFlpPlaylist88(), p88, err));
-    SCHECK(p88.playlist.size() == 2 && p88.playlistSkipped >= 1);
-    if (p88.playlist.size() == 2) {
+    SCHECK(p88.playlist.size() == 3 && p88.playlistSkipped >= 1);
+    if (p88.playlist.size() == 3) {
         SCHECK(p88.playlist[0].pattern == 1 && p88.playlist[0].startTick == 0 &&
                p88.playlist[0].lengthTicks == 384 && p88.playlist[0].track == 1);
         SCHECK(p88.playlist[1].pattern == 2 && p88.playlist[1].startTick == 192 &&
                p88.playlist[1].track == 2);
+        SCHECK(p88.playlist[2].offsetTicks == 96);
+    }
+    // The trimmed clip must play only the pattern's second note (local
+    // 96..192 ticks), landing at the clip's own start - not replay the
+    // pattern's beginning like the untrimmed window would.
+    {
+        raid::Info ti;
+        const fs::path tp = fs::temp_directory_path() / "gh_flp_trim.raid";
+        SCHECK(raid::writeRaidFlp(str(tp), p88, raid::EncodeOptions{}, &ti, err));
+        raid::Reader trd;
+        SCHECK(trd.open(str(tp), err));
+        std::vector<raid::Event> te;
+        SCHECK(trd.range(0, 4000000, te, err));
+        // pat1@0: notes at 0 and 400000 us; trimmed pat1@512 ticks (2133333 us)
+        // shows only its 96-tick note -> one event at 2133333 us, lane 1.
+        SCHECK(te.size() == 3);
+        if (te.size() == 3) {
+            SCHECK(te[0].timeUs == 0);
+            SCHECK(te[1].timeUs == 400000);
+            SCHECK(te[2].timeUs == 2133333 && te[2].lane == 1);
+        }
+        trd.close();
+        fs::remove(tp);
     }
 
     // A 4/16 project: the beat is a 16th note, so timing scales x4.

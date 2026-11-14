@@ -36,6 +36,7 @@ struct FlpPlaylistItem {
     int pattern = 0;        // FL pattern number (item_index - pattern_base)
     int track = 0;          // playlist track
     uint32_t startTick = 0, lengthTicks = 0;
+    int64_t offsetTicks = 0;  // start trim: where the clip's window begins inside the pattern
     bool muted = false;         // item_flags bit 0x2000
 };
 

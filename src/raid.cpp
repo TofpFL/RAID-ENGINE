@@ -57,6 +57,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 
 #include "miniz.h"
@@ -1241,11 +1242,19 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
     };
 
     // ---- clips on the timeline -------------------------------------------
-    struct Clip {
+    // A playlist clip shows a WINDOW of its pattern: FL trims clips at
+    // record +24 (start offset) so the visible content is pattern-local
+    // [offUs, offUs+lenUs), not always [0, len). Clips longer than the
+    // pattern's loop period play it cyclically: cycle k is the pattern
+    // rotated by (offUs mod period), i.e. pattern note t sounds at clip-local
+    // (t - off) mod period + k*period.
+    struct Seg {
         int pattern = 0;
-        int64_t startUs = 0;
-        uint64_t lenUs = 0;
+        int64_t baseUs = 0;     // absolute time where local loUs maps
+        int64_t loUs = 0;       // window start in segment-local pattern time
+        int64_t hiUs = 0;       // window end, exclusive
         int track = 0;
+        int64_t rotShift = -1;  // >=0: rotated cycle, shift = offUs mod period
     };
     // Loop period per pattern in microseconds: the declared length when
     // the file carries it (event 164), else the content extent rounded up
@@ -1267,30 +1276,36 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
             patPeriodUs[fp.number] = uint64_t(std::llround(double(ticks) * usPerTick));
     }
 
-    std::vector<Clip> clips;
+    std::vector<Seg> segs;
     for (const FlpPlaylistItem& it : project.playlist) {
         if (it.muted || it.pattern <= 0 || it.startTick < 0) continue;
         const int64_t startUs = int64_t(std::llround(it.startTick * usPerTick));
         const uint64_t lenUs = uint64_t(std::llround(it.lengthTicks * usPerTick));
-        // A clip longer than its pattern loops in FL Studio: split it into
-        // per-cycle sub-clips (defs are shared by window, so the pattern
-        // data is still stored once).
+        const int64_t offUs = int64_t(std::llround(double(it.offsetTicks) * usPerTick));
+        // A clip longer than its pattern loops in FL Studio: each cycle is a
+        // segment playing the pattern rotated by the clip's offset (defs are
+        // shared per rotation+window, so the pattern data is still stored once).
         const auto perIt = patPeriodUs.find(it.pattern);
         const uint64_t periodUs = perIt != patPeriodUs.end() ? perIt->second : 0;
         if (periodUs > 0 && lenUs > periodUs) {
+            int64_t sMod = offUs % int64_t(periodUs);
+            if (sMod < 0) sMod += int64_t(periodUs);
+            const int64_t rot = sMod > 0 ? sMod : -1;
             int64_t t = startUs;
             uint64_t rem = lenUs;
             while (rem > 0) {
                 const uint64_t w = std::min(rem, periodUs);
-                clips.push_back({it.pattern, t, w, it.track});
+                // rot >= 0: rotated cycle, window [0, w) of the rotated events.
+                // rot < 0 with lo=0: the unrotated first period (sMod == 0).
+                segs.push_back({it.pattern, t, 0, int64_t(w), it.track, rot});
                 t += int64_t(periodUs);
                 rem -= w;
             }
         } else {
-            clips.push_back({it.pattern, startUs, lenUs, it.track});
+            segs.push_back({it.pattern, startUs, offUs, offUs + int64_t(lenUs), it.track, -1});
         }
     }
-    if (clips.empty() && project.playlist.empty()) {
+    if (segs.empty() && project.playlist.empty()) {
         // No usable arrangement: lay every pattern that charts notes end to end.
         std::vector<const FlpPattern*> order;
         for (const FlpPattern& p : project.patterns)
@@ -1300,13 +1315,13 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         int64_t tUs = 0;
         for (const FlpPattern* p : order) {
             const std::vector<Event>& ev = *eventsFor(p->number);
-            const uint64_t len = uint64_t(ev.back().timeUs) + 1;  // content end
-            clips.push_back({p->number, tUs, len, 0});
-            tUs += int64_t(len);
+            const int64_t len = int64_t(ev.back().timeUs) + 1;  // content end
+            segs.push_back({p->number, tUs, 0, len, 0, -1});
+            tUs += len;
         }
     }
-    std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
-        if (a.startUs != b.startUs) return a.startUs < b.startUs;
+    std::sort(segs.begin(), segs.end(), [](const Seg& a, const Seg& b) {
+        if (a.baseUs != b.baseUs) return a.baseUs < b.baseUs;
         if (a.track != b.track) return a.track < b.track;
         return a.pattern < b.pattern;
     });
@@ -1326,36 +1341,75 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         size_t srcBegin = 0, srcEnd = 0;          // index range inside *src
     };
     std::vector<Def> defs;
-    std::map<std::pair<int, uint64_t>, std::vector<uint32_t>> winDefs;
+    // Defs are shared per (pattern, rotation, window): clips with the same
+    // trim window point at the same table entries.
+    std::map<std::tuple<int, int64_t, int64_t, int64_t>, std::vector<uint32_t>> winDefs;
 
-    auto defsFor = [&](const Clip& c) -> const std::vector<uint32_t>* {
-        const std::vector<Event>* ev = eventsFor(c.pattern);
+    // Rotated views for looping clips: pattern note t -> (t - shift) mod
+    // period, re-sorted. std::map nodes keep the vectors' addresses stable
+    // for Def::src pointers. shift 0 returns the unrotated events.
+    std::map<std::pair<int, int64_t>, std::vector<Event>> rotCache;
+    auto rotSrc = [&](int pattern, int64_t shift) -> const std::vector<Event>* {
+        const auto perIt = patPeriodUs.find(pattern);
+        const int64_t period = perIt != patPeriodUs.end() ? int64_t(perIt->second) : 0;
+        if (shift <= 0 || period <= 0) return eventsFor(pattern);
+        const auto key = std::make_pair(pattern, shift);
+        auto it = rotCache.find(key);
+        if (it != rotCache.end()) return it->second.empty() ? nullptr : &it->second;
+        const std::vector<Event>* ev = eventsFor(pattern);
+        if (!ev) {
+            rotCache.emplace(key, std::vector<Event>{});
+            return nullptr;
+        }
+        std::vector<Event> r;
+        r.reserve(ev->size());
+        for (const Event& e : *ev) {
+            Event e2 = e;
+            int64_t t = (e.timeUs - shift) % period;
+            if (t < 0) t += period;
+            e2.timeUs = t;
+            r.push_back(e2);
+        }
+        std::stable_sort(r.begin(), r.end(),
+                         [](const Event& a, const Event& b) { return a.timeUs < b.timeUs; });
+        auto res = rotCache.emplace(key, std::move(r));
+        return res.first->second.empty() ? nullptr : &res.first->second;
+    };
+
+    // Index range of events with timeUs in [lo, hi); events are time-sorted.
+    auto windowRange = [](const std::vector<Event>& ev, int64_t lo, int64_t hi,
+                          size_t& n0, size_t& n1) {
+        const auto cmp = [](const Event& e, int64_t t) { return e.timeUs < t; };
+        n0 = size_t(std::lower_bound(ev.begin(), ev.end(), lo, cmp) - ev.begin());
+        n1 = size_t(std::lower_bound(ev.begin(), ev.end(), hi, cmp) - ev.begin());
+    };
+
+    auto defsFor = [&](const Seg& s) -> const std::vector<uint32_t>* {
+        const std::vector<Event>* ev =
+            s.rotShift >= 0 ? rotSrc(s.pattern, s.rotShift) : eventsFor(s.pattern);
         if (!ev) return nullptr;
-        const uint64_t contentEnd = uint64_t(ev->back().timeUs) + 1;
-        const uint64_t winLen = std::min<uint64_t>(c.lenUs ? c.lenUs : ~0ull, contentEnd);
-        const auto key = std::make_pair(c.pattern, winLen);
+        size_t n0 = 0, n1 = 0;
+        windowRange(*ev, s.loUs, s.hiUs, n0, n1);
+        if (n1 <= n0) return nullptr;
+        const auto key = std::make_tuple(s.pattern, s.rotShift, s.loUs, s.hiUs);
         auto it = winDefs.find(key);
         if (it != winDefs.end()) return &it->second;
         std::vector<uint32_t> ids;
-        // Events are time-sorted: the window is a prefix.
-        size_t n = 0;
-        while (n < ev->size() && uint64_t(ev->size()) &&
-               uint64_t(ev->at(n).timeUs) < winLen) ++n;
-        for (size_t s = 0; s < n; s += kFlpBlockEvents) {
-            const size_t e = std::min(s + size_t(kFlpBlockEvents), n);
+        for (size_t b = n0; b < n1; b += kFlpBlockEvents) {
+            const size_t e = std::min(b + size_t(kFlpBlockEvents), n1);
             Def d;
-            d.count = uint32_t(e - s);
+            d.count = uint32_t(e - b);
             d.src = ev;
-            d.srcBegin = s;
+            d.srcBegin = b;
             d.srcEnd = e;
-            d.originUs = ev->at(s).timeUs;
-            d.originLane = ev->at(s).lane;
-            d.spanUs = uint64_t(ev->at(e - 1).timeUs - ev->at(s).timeUs);
+            d.originUs = ev->at(b).timeUs;
+            d.originLane = ev->at(b).lane;
+            d.spanUs = uint64_t(ev->at(e - 1).timeUs - ev->at(b).timeUs);
             d.ops.u32(1);
             Buf op;
-            writeLiteralRel(op, ev->data() + s, e - s, ev->at(s).timeUs, 0, ev->at(s).lane);
+            writeLiteralRel(op, ev->data() + b, e - b, ev->at(b).timeUs, 0, ev->at(b).lane);
             d.ops.raw(op.b.data(), op.b.size());
-            for (size_t k = s; k < e; ++k) {
+            for (size_t k = b; k < e; ++k) {
                 if (ev->at(k).side == 1) ++d.sideP; else ++d.sideO;
             }
             ids.push_back(uint32_t(defs.size()));
@@ -1364,8 +1418,8 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         return &winDefs.emplace(key, std::move(ids)).first->second;
     };
 
-    // Pre-build defs in clip order so pattern ids follow the arrangement.
-    for (const Clip& c : clips) defsFor(c);
+    // Pre-build defs in segment order so pattern ids follow the arrangement.
+    for (const Seg& s : segs) defsFor(s);
 
     // ---- pattern section --------------------------------------------------
     Buf pb;
@@ -1390,19 +1444,21 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
     // overlap: single-clip groups keep pattern-instance ops, overlapping
     // groups merge into one time-sorted literal run (events interleave exactly
     // like the arrangement plays them).
-    std::vector<const std::vector<uint32_t>*> clipIds(clips.size(), nullptr);
-    std::vector<int64_t> clipEndUs(clips.size(), 0);
+    std::vector<const std::vector<uint32_t>*> segIds(segs.size(), nullptr);
+    std::vector<int64_t> segEndUs(segs.size(), 0);
     std::vector<size_t> active;
-    for (size_t i = 0; i < clips.size(); ++i) {
-        const std::vector<uint32_t>* ids = defsFor(clips[i]);
+    for (size_t i = 0; i < segs.size(); ++i) {
+        const Seg& s = segs[i];
+        const std::vector<uint32_t>* ids = defsFor(s);
         if (!ids || ids->empty()) continue;
-        clipIds[i] = ids;
-        int64_t end = clips[i].startUs;
+        segIds[i] = ids;
+        // Absolute end = base - lo + last local event time of each block.
+        int64_t end = s.baseUs - s.loUs;
         for (uint32_t id : *ids) {
             const Def& d = defs[id];
-            end = std::max(end, clips[i].startUs + d.originUs + int64_t(d.spanUs));
+            end = std::max(end, s.baseUs - s.loUs + d.originUs + int64_t(d.spanUs));
         }
-        clipEndUs[i] = end;
+        segEndUs[i] = end;
         active.push_back(i);
     }
 
@@ -1423,9 +1479,9 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         chunks.push_back(ChunkOut{});
     };
 
-    auto emitInstance = [&](const Clip& c, uint32_t id) {
+    auto emitInstance = [&](const Seg& s, uint32_t id) {
         const Def& d = defs[id];
-        const int64_t anchor = c.startUs + d.originUs;
+        const int64_t anchor = s.baseUs - s.loUs + d.originUs;
         for (;;) {
             ChunkOut& ch = chunks.back();
             const size_t room = opt.chunkEvents - std::min<uint64_t>(ch.expanded, opt.chunkEvents);
@@ -1452,30 +1508,30 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
     size_t g = 0;
     while (g < active.size()) {
         size_t h = g + 1;
-        int64_t gEnd = clipEndUs[active[g]];
-        while (h < active.size() && clips[active[h]].startUs < gEnd) {
-            gEnd = std::max(gEnd, clipEndUs[active[h]]);
+        int64_t gEnd = segEndUs[active[g]];
+        while (h < active.size() && segs[active[h]].baseUs < gEnd) {
+            gEnd = std::max(gEnd, segEndUs[active[h]]);
             ++h;
         }
         if (h - g == 1) {
             const size_t ai = active[g];
-            for (uint32_t id : *clipIds[ai]) emitInstance(clips[ai], id);
+            for (uint32_t id : *segIds[ai]) emitInstance(segs[ai], id);
         } else {
-            // Overlapping clips: merge their in-window events by absolute
+            // Overlapping segments: merge their in-window events by absolute
             // time and store them as literal runs.
             std::vector<Event> merged;
             for (size_t x = g; x < h; ++x) {
-                const Clip& c = clips[active[x]];
-                const std::vector<Event>* ev = eventsFor(c.pattern);
+                const Seg& s = segs[active[x]];
+                const std::vector<Event>* ev =
+                    s.rotShift >= 0 ? rotSrc(s.pattern, s.rotShift) : eventsFor(s.pattern);
                 if (!ev) continue;
-                const uint64_t contentEnd = uint64_t(ev->back().timeUs) + 1;
-                const uint64_t winLen = std::min<uint64_t>(c.lenUs ? c.lenUs : ~0ull, contentEnd);
-                size_t n = 0;
-                while (n < ev->size() && uint64_t(ev->at(n).timeUs) < winLen) ++n;
-                merged.reserve(merged.size() + n);
-                for (size_t k = 0; k < n; ++k) {
+                const int64_t shift = s.baseUs - s.loUs;  // seg-local -> absolute
+                size_t n0 = 0, n1 = 0;
+                windowRange(*ev, s.loUs, s.hiUs, n0, n1);
+                merged.reserve(merged.size() + (n1 - n0));
+                for (size_t k = n0; k < n1; ++k) {
                     Event e2 = ev->at(k);
-                    e2.timeUs += c.startUs;
+                    e2.timeUs += shift;
                     merged.push_back(e2);
                 }
             }
@@ -1505,11 +1561,12 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
                 std::vector<GroupEntry> ents;
                 for (size_t x = g; x < h; ++x) {
                     const size_t ai = active[x];
-                    const Clip& c = clips[ai];
-                    for (uint32_t id : *clipIds[ai]) {
+                    const Seg& s = segs[ai];
+                    const int64_t shift = s.baseUs - s.loUs;
+                    for (uint32_t id : *segIds[ai]) {
                         const Def& d = defs[id];
-                        const int64_t loLocal = winLo - c.startUs;
-                        const int64_t hiLocal = winHi - c.startUs;
+                        const int64_t loLocal = winLo - shift;
+                        const int64_t hiLocal = winHi - shift;
                         const std::vector<Event>& ev = *d.src;
                         const auto lb = std::lower_bound(
                             ev.begin() + std::ptrdiff_t(d.srcBegin),
@@ -1522,7 +1579,7 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
                         if (lb == ub) continue;
                         GroupEntry ge;
                         ge.patternId = id;
-                        ge.anchorUs = c.startUs + d.originUs;
+                        ge.anchorUs = shift + d.originUs;
                         ge.laneDelta = d.originLane;
                         ge.winLoUs = winLo;
                         ge.winHiUs = winHi;
