@@ -221,6 +221,8 @@ bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
                 case kPatStart: chanCtx = false; break;
                 case kTempo: out.bpm = value / 1000.0; break;
                 case kOldTempo: if (out.bpm <= 0) out.bpm = value; break;
+                case 17: out.timeSigNum = int(value); break;   // time signature
+                case 18: out.timeSigDen = int(value); break;   // numerator / denominator
                 case kTitle: out.title = flString(data, len); break;
                 case kPlugName:
                     if (!fpcFound && flString(data, len) == "FPC") {
@@ -323,6 +325,12 @@ std::string flpPatternLabel(const FlpProject& p, int number) {
     return "Pattern " + std::to_string(number);
 }
 
+double flpBpmScale(const FlpProject& p) {
+    // Only 4/x signatures retitle the beat (4/16 -> x4, 4/8 -> x2); other
+    // meters like 16/16 or 3/4 keep quarter-note timing.
+    return p.timeSigNum == 4 && p.timeSigDen > 0 ? p.timeSigDen / 4.0 : 1.0;
+}
+
 bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, double bpmIn) {
     out = Chart();
     if (pattern < 0) {
@@ -336,7 +344,7 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
         if (q.number == pattern) pat = &q;
     if (!pat) { err = "no pattern " + std::to_string(pattern); return false; }
     const int pside = flpPatternSide(p, *pat);
-    const double bpm = bpmIn > 0 ? bpmIn : p.bpm > 0 ? p.bpm : 120.0;
+    const double bpm = (bpmIn > 0 ? bpmIn : p.bpm > 0 ? p.bpm : 120.0) * flpBpmScale(p);
     const double msPerTick = 60000.0 / (bpm * p.ppqn);
 
     const auto named = flpNamedChannels(p);

@@ -47,6 +47,8 @@ struct FlpPattern {
 struct FlpProject {
     int ppqn = 96;          // ticks per beat
     double bpm = 0;         // 0: not in the file (.fsc scores)
+    int timeSigNum = 4;     // time signature numerator (FL events 17/18)
+    int timeSigDen = 4;     // denominator: 4, 8, 16, ...
     std::string title;
     int chartChannel = 0;   // the FPC channel (SNIFF's choice), else the first
     // Strings seen inside each channel's definition block (its name and
@@ -65,6 +67,12 @@ bool readFlpFile(const std::string& path, FlpProject& out, std::string& err);
 std::vector<int> flpChartPatterns(const FlpProject& p, bool strict = true);
 // A pattern's name for a difficulty list ("Hard", or "Pattern 3").
 std::string flpPatternLabel(const FlpProject& p, int number);
+
+// A 4/x time signature retitles the beat: 4/16 makes it a 16th note so
+// the quarter-note tempo reads 4x fast, 4/8 makes it an 8th note (2x).
+// Charts keep quarter-note timing, so a 4/x project scales its tempo by
+// den/4 (4/4 -> 1, 4/8 -> 2, 4/16 -> 4); other meters scale by 1.
+double flpBpmScale(const FlpProject& p);
 
 // SNIFF's conversion of one pattern (-1: the first with chart notes). The
 // project's tempo is used unless `bpm` is given (scores have none: 120).

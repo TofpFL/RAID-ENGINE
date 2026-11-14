@@ -571,6 +571,50 @@ std::string makeFlpPlaylist() {
     return f + ev;
 }
 
+// A project in 4/16: the beat is a 16th note, so the quarter-note tempo
+// scales x4 (150 BPM reads as 600 for chart timing).
+std::string makeFlpSig16() {
+    std::string ev;
+    auto word = [&](uint8_t id, uint16_t v) { ev += char(id); ev += char(v & 255); ev += char(v >> 8); };
+    auto dword = [&](uint8_t id, uint32_t v) {
+        ev += char(id);
+        for (int i = 0; i < 4; ++i) ev += char((v >> (8 * i)) & 255);
+    };
+    auto byte = [&](uint8_t id, uint8_t v) { ev += char(id); ev += char(v); };
+    auto array = [&](uint8_t id, const std::string& data) {
+        ev += char(id);
+        size_t n = data.size();
+        do {
+            uint8_t c = uint8_t(n & 0x7F);
+            n >>= 7;
+            if (n) c |= 0x80;
+            ev += char(c);
+        } while (n);
+        ev += data;
+    };
+    dword(0x9C, 150000);
+    byte(17, 4);   // time signature numerator
+    byte(18, 16);  // denominator
+    word(0x40, 0);
+    array(0xC9, std::string("F\0P\0C\0\0\0", 8));
+    word(0x41, 1);
+    std::string notes;
+    std::string r(24, '\0');
+    for (int i = 0; i < 4; ++i) r[size_t(i)] = char(96 >> (8 * i));  // t = 96 ticks
+    for (int i = 0; i < 4; ++i) r[size_t(12 + i)] = char(60 >> (8 * i));  // pitch 60
+    r[21] = char(100);
+    notes = r;
+    array(0xE0, notes);
+    std::string f = "FLhd";
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f += char((v >> (8 * i)) & 255); };
+    u32(6);
+    f += std::string("\0\0\x02\0", 4);
+    f += char(96);
+    f += char(0);
+    f += "FLdt";
+    u32(uint32_t(ev.size()));
+    return f + ev;
+}
 void testFlStudio() {
     FlpProject p;
     std::string err;
@@ -666,6 +710,15 @@ void testFlStudio() {
     SCHECK(kinds == 1);  // only the isolated pat2 clip stayed a pattern instance
     rd.close();
     fs::remove(raidPath);
+
+    // A 4/16 project: the beat is a 16th note, so timing scales x4.
+    FlpProject ps;
+    SCHECK(readFlp(makeFlpSig16(), ps, err));
+    SCHECK(ps.timeSigNum == 4 && ps.timeSigDen == 16 && flpBpmScale(ps) == 4.0);
+    Chart cs;
+    SCHECK(flpToChart(ps, -1, cs, err));
+    SCHECK(cs.notes.size() == 1 && std::fabs(cs.notes[0].time - 100) < 1e-6 &&
+           std::fabs(cs.bpmAt(0) - 600) < 1e-9);
 }
 
 }  // namespace
@@ -679,8 +732,8 @@ int printFlp(int argc, char** argv, int first) {
             std::printf("%s: %s\n", argv[i], err.c_str());
             continue;
         }
-        std::printf("%s: ppqn %d, bpm %.3f, title '%s', chart channel %d, %zu patterns\n", argv[i], p.ppqn, p.bpm,
-                    p.title.c_str(), p.chartChannel, p.patterns.size());
+        std::printf("%s: ppqn %d, bpm %.3f, sig %d/%d, title '%s', chart channel %d, %zu patterns\n", argv[i], p.ppqn,
+                    p.bpm, p.timeSigNum, p.timeSigDen, p.title.c_str(), p.chartChannel, p.patterns.size());
         if (!p.playlist.empty()) {
             std::printf("  playlist: %zu clips\n", p.playlist.size());
             for (size_t i = 0; i < p.playlist.size() && i < 40; ++i)

@@ -1049,7 +1049,7 @@ bool writeRaidFlp(const std::string& path, const FlpProject& project,
         err = "invalid encode options";
         return false;
     }
-    const double bpm = project.bpm > 0 ? project.bpm : 120.0;
+    const double bpm = (project.bpm > 0 ? project.bpm : 120.0) * flpBpmScale(project);
     const double usPerTick = 60000000.0 / (bpm * double(project.ppqn));
 
     // ---- chart events per FL pattern (pattern-local microseconds) --------
